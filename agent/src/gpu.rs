@@ -83,7 +83,7 @@ impl GpuDetector {
             }
             if trimmed.starts_with("Memory:") {
                 if let Some((_, val)) = trimmed.split_once(':') {
-                    let parts: Vec<&str> = val.trim().split_whitespace().collect();
+                    let parts: Vec<&str> = val.split_whitespace().collect();
                     if !parts.is_empty() {
                         if let Ok(gb) = parts[0].parse::<i32>() {
                             memory_gb = gb;
@@ -132,6 +132,9 @@ mod tests {
     fn test_real_hardware_detection() {
         let detector = GpuDetector::new(false);
         let gpus = detector.detect();
-        assert!(!gpus.is_empty(), "Expected real hardware detection to find host GPU");
+        assert!(
+            !gpus.is_empty(),
+            "Expected real hardware detection to find host GPU"
+        );
     }
 }

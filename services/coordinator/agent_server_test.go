@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"context"
 	"net"
 	"testing"
@@ -14,14 +15,19 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const testDBURL = "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable"
+func getTestDBURL() string {
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		return url
+	}
+	return "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable"
+}
 const testJWTSecret = "test-secret-key-32-bytes-long-super-secure!"
 
 func TestAgentServerRegistrationAndHeartbeat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	dbClient, err := db.NewClient(ctx, db.Config{URL: testDBURL})
+	dbClient, err := db.NewClient(ctx, db.Config{URL: getTestDBURL()})
 	if err != nil {
 		t.Fatalf("Failed to connect to test database: %v", err)
 	}

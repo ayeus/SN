@@ -19,7 +19,7 @@ func TestHostManagementEndpoints(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	dbClient, err := db.NewClient(ctx, db.Config{URL: testDBURL})
+	dbClient, err := db.NewClient(ctx, db.Config{URL: getTestDBURL()})
 	if err != nil {
 		t.Fatalf("Failed to connect to test database: %v", err)
 	}

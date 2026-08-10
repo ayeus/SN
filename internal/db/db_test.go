@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"os"
 	"context"
 	"crypto/rand"
 	"testing"
@@ -12,7 +13,12 @@ import (
 	"github.com/ayeus/ayeusann/internal/domain"
 )
 
-const testDBURL = "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable"
+func getTestDBURL() string {
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		return url
+	}
+	return "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable"
+}
 
 func setupTestClient(t *testing.T) *db.Client {
 	t.Helper()
@@ -20,11 +26,11 @@ func setupTestClient(t *testing.T) *db.Client {
 	defer cancel()
 
 	client, err := db.NewClient(ctx, db.Config{
-		URL:      testDBURL,
+		URL:      getTestDBURL(),
 		MaxConns: 5,
 	})
 	if err != nil {
-		t.Fatalf("Failed to connect to test database (%s): %v", testDBURL, err)
+		t.Fatalf("Failed to connect to test database (%s): %v", getTestDBURL(), err)
 	}
 
 	return client

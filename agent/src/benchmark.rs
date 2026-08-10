@@ -66,7 +66,11 @@ impl BenchmarkSuite {
             sum += (i as f32).sqrt().sin();
         }
         // Score between 50.0 and 100.0 based on completion speed
-        if sum != 0.0 { 82.0 } else { 50.0 }
+        if sum != 0.0 {
+            82.0
+        } else {
+            50.0
+        }
     }
 
     fn benchmark_disk_io(&self) -> (f32, f32) {

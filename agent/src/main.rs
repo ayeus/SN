@@ -22,7 +22,11 @@ struct Args {
     token: Option<String>,
 
     /// Coordinator endpoint
-    #[arg(long, env = "SN_COORDINATOR_URL", default_value = "http://localhost:8083")]
+    #[arg(
+        long,
+        env = "SN_COORDINATOR_URL",
+        default_value = "http://localhost:8083"
+    )]
     coordinator_url: String,
 
     /// Agent data directory
@@ -41,8 +45,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize structured JSON logging
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     fmt()
         .json()
@@ -69,10 +72,7 @@ async fn main() -> Result<()> {
     let detector = GpuDetector::new(args.fake_gpu);
     let gpus = detector.detect();
 
-    info!(
-        gpu_count = gpus.len(),
-        "detected GPU inventory on host"
-    );
+    info!(gpu_count = gpus.len(), "detected GPU inventory on host");
 
     for gpu in &gpus {
         info!(
