@@ -44,15 +44,21 @@ func main() {
 	}
 
 	authHandler := NewAuthHandler(dbClient, tm, ledger)
+	modelHandler := NewModelHandler(dbClient)
 
 	// Public Auth Endpoints
 	srv.Mux.HandleFunc("POST /v1/auth/signup", authHandler.HandleSignup)
 	srv.Mux.HandleFunc("POST /v1/auth/login", authHandler.HandleLogin)
 
+	// Public Model Catalog Endpoints
+	srv.Mux.HandleFunc("GET /v1/models", modelHandler.HandleListModels)
+	srv.Mux.HandleFunc("GET /v1/models/", modelHandler.HandleGetModel)
+
 	// Protected Endpoints
 	protectedMux := http.NewServeMux()
 	protectedMux.HandleFunc("GET /v1/auth/me", authHandler.HandleMe)
 	protectedMux.Handle("POST /v1/api-keys", auth.RequireRole("admin", "member")(http.HandlerFunc(authHandler.HandleCreateAPIKey)))
+	protectedMux.Handle("POST /v1/models/byo", auth.RequireRole("admin", "member")(http.HandlerFunc(modelHandler.HandleBYOModel)))
 
 	srv.Mux.Handle("/", tm.AuthMiddleware(protectedMux))
 
