@@ -1,8 +1,12 @@
+mod benchmark;
 mod gpu;
+mod network;
 
 use anyhow::Result;
+use benchmark::BenchmarkSuite;
 use clap::Parser;
 use gpu::GpuDetector;
+use network::MeshManager;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -11,7 +15,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 /// Manages GPU resources, executes workloads in isolation, and reports
 /// health/usage to the AyeusANN coordinator.
 #[derive(Parser, Debug)]
-#[command(name = "AyeusANN-agent", version, about)]
+#[command(name = "ayeusann-agent", version, about)]
 struct Args {
     /// Registration token (one-time, from host console)
     #[arg(long, env = "SN_REGISTRATION_TOKEN")]
@@ -22,7 +26,7 @@ struct Args {
     coordinator_url: String,
 
     /// Agent data directory
-    #[arg(long, env = "SN_DATA_DIR", default_value = "/var/lib/AyeusANN")]
+    #[arg(long, env = "SN_DATA_DIR", default_value = "/var/lib/ayeusann")]
     data_dir: String,
 
     /// Heartbeat interval in seconds
@@ -61,8 +65,7 @@ async fn main() -> Result<()> {
         warn!("running in FAKE GPU mode — no real GPU validation will occur");
     }
 
-    // Phase 0: Just verify the agent starts and logs correctly.
-    // Phase 4 will add: GPU detection, registration, heartbeat, benchmarking.
+    // 1. Hardware GPU Detection
     let detector = GpuDetector::new(args.fake_gpu);
     let gpus = detector.detect();
 
@@ -80,7 +83,19 @@ async fn main() -> Result<()> {
         );
     }
 
-    info!("agent initialized successfully — awaiting Phase 7 coordinator stream");
+    // 2. Hardware Benchmark Suite Execution
+    let bench = BenchmarkSuite::new(args.fake_gpu);
+    let report = bench.run_all();
+
+    // 3. WireGuard Keypair Generation & Network Mesh Configuration
+    let (_priv_key, pub_key) = MeshManager::generate_keypair();
+    MeshManager::setup_overlay("10.200.0.10", &pub_key);
+
+    info!(
+        score_compute = report.score_compute,
+        vram_bw_gbps = report.vram_bw_gbps,
+        "agent initialized successfully — ready for workloads"
+    );
 
     // Keep running until signal
     tokio::signal::ctrl_c().await?;

@@ -77,7 +77,7 @@ build-go: ## Build all Go services
 
 build-agent: ## Build the Rust host agent
 	cd agent && cargo build --release
-	@cp agent/target/release/AyeusANN-agent bin/ 2>/dev/null || true
+	@cp agent/target/release/AyeusANN-agent bin/spazenode-agent 2>/dev/null || true
 	@echo "✅ Agent built"
 
 # ─── Test ─────────────────────────────────────────────────────
