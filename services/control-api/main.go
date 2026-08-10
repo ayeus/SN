@@ -1,5 +1,5 @@
 // Package main implements the SpazeNode Control API.
-// Responsibilities: Auth, CRUD for orgs, users, API keys, models, deployments.
+// Responsibilities: Auth, CRUD for orgs, users, API keys, models, hosts, deployments.
 package main
 
 import (
@@ -45,6 +45,7 @@ func main() {
 
 	authHandler := NewAuthHandler(dbClient, tm, ledger)
 	modelHandler := NewModelHandler(dbClient)
+	hostHandler := NewHostHandler(dbClient, tm)
 
 	// Public Auth Endpoints
 	srv.Mux.HandleFunc("POST /v1/auth/signup", authHandler.HandleSignup)
@@ -59,6 +60,11 @@ func main() {
 	protectedMux.HandleFunc("GET /v1/auth/me", authHandler.HandleMe)
 	protectedMux.Handle("POST /v1/api-keys", auth.RequireRole("admin", "member")(http.HandlerFunc(authHandler.HandleCreateAPIKey)))
 	protectedMux.Handle("POST /v1/models/byo", auth.RequireRole("admin", "member")(http.HandlerFunc(modelHandler.HandleBYOModel)))
+
+	// Host Management Endpoints
+	protectedMux.Handle("POST /v1/hosts/register-token", auth.RequireRole("admin", "member")(http.HandlerFunc(hostHandler.HandleIssueRegistrationToken)))
+	protectedMux.HandleFunc("GET /v1/hosts", hostHandler.HandleListHosts)
+	protectedMux.HandleFunc("GET /v1/hosts/", hostHandler.HandleGetHost)
 
 	srv.Mux.Handle("/", tm.AuthMiddleware(protectedMux))
 

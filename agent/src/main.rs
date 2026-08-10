@@ -1,5 +1,8 @@
+mod gpu;
+
 use anyhow::Result;
 use clap::Parser;
+use gpu::GpuDetector;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -60,7 +63,24 @@ async fn main() -> Result<()> {
 
     // Phase 0: Just verify the agent starts and logs correctly.
     // Phase 4 will add: GPU detection, registration, heartbeat, benchmarking.
-    info!("agent initialized successfully (skeleton — awaiting Phase 4 implementation)");
+    let detector = GpuDetector::new(args.fake_gpu);
+    let gpus = detector.detect();
+
+    info!(
+        gpu_count = gpus.len(),
+        "detected GPU inventory on host"
+    );
+
+    for gpu in &gpus {
+        info!(
+            model = %gpu.model,
+            vram_gb = gpu.vram_gb,
+            uuid = %gpu.uuid,
+            "registered GPU device"
+        );
+    }
+
+    info!("agent initialized successfully — awaiting Phase 7 coordinator stream");
 
     // Keep running until signal
     tokio::signal::ctrl_c().await?;
