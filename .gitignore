@@ -1,0 +1,60 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+vendor/
+
+# Rust
+agent/target/
+cli/target/
+
+# Node
+node_modules/
+.next/
+dist/
+.turbo/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Docker
+deploy/compose/data/
+
+# Secrets
+*.key
+*.pem
+!deploy/compose/*.pem
+
+# Protobuf generated
+**/gen/
+
+# Coverage
+coverage/
+*.coverprofile
+htmlcov/

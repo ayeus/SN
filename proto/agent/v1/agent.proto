@@ -1,0 +1,202 @@
+syntax = "proto3";
+
+package spazenode.agent.v1;
+
+option go_package = "github.com/spazor/spazenode/gen/go/agent/v1;agentv1";
+
+import "google/protobuf/timestamp.proto";
+
+// ─── Agent ↔ Coordinator Service ─────────────────────────────
+
+service AgentService {
+  // Bidirectional stream for persistent agent sessions.
+  // Agent sends Register, then streams Heartbeat + StageEvent + UsageBatch.
+  // Coordinator sends ManifestDispatch + DrainRequest.
+  rpc Session(stream AgentMessage) returns (stream CoordinatorMessage);
+}
+
+// ─── Agent → Coordinator Messages ────────────────────────────
+
+message AgentMessage {
+  oneof payload {
+    RegisterRequest register = 1;
+    Heartbeat heartbeat = 2;
+    BenchmarkReport benchmark = 3;
+    StageEvent stage_event = 4;
+    UsageBatch usage_batch = 5;
+    DrainAck drain_ack = 6;
+  }
+}
+
+message RegisterRequest {
+  string registration_token = 1;
+  string hostname = 2;
+  string os = 3;
+  string os_version = 4;
+  string kernel = 5;
+  string region = 6;
+  repeated GpuInfo gpus = 7;
+  string agent_version = 8;
+  string hardware_fingerprint = 9;
+}
+
+message GpuInfo {
+  string model = 1;
+  int32 vram_gb = 2;
+  string driver_version = 3;
+  string cuda_version = 4;
+  int32 compute_capability_major = 5;
+  int32 compute_capability_minor = 6;
+  string uuid = 7;
+  string fingerprint = 8;
+}
+
+message Heartbeat {
+  google.protobuf.Timestamp ts = 1;
+  double cpu_usage_pct = 2;
+  double memory_usage_pct = 3;
+  repeated GpuStatus gpu_status = 4;
+  int32 active_jobs = 5;
+  bool host_user_active = 6;  // For pause-when-active
+}
+
+message GpuStatus {
+  string gpu_uuid = 1;
+  double utilization_pct = 2;
+  int32 vram_used_mb = 3;
+  int32 vram_total_mb = 4;
+  int32 temperature_c = 5;
+  int32 power_draw_w = 6;
+}
+
+message BenchmarkReport {
+  string hardware_fingerprint = 1;
+  repeated GpuBenchmark gpu_benchmarks = 2;
+  double disk_read_mbps = 3;
+  double disk_write_mbps = 4;
+  double net_upload_mbps = 5;
+  double net_download_mbps = 6;
+  double latency_to_pop_ms = 7;
+  google.protobuf.Timestamp ran_at = 8;
+}
+
+message GpuBenchmark {
+  string gpu_uuid = 1;
+  double compute_score = 2;
+  double vram_bandwidth_gbps = 3;
+}
+
+message StageEvent {
+  string replica_id = 1;
+  string job_id = 2;
+  ReplicaState state = 3;
+  string image_hash = 4;
+  string model_hash = 5;
+  string error_message = 6;
+  google.protobuf.Timestamp ts = 7;
+}
+
+message UsageBatch {
+  repeated UsageRecord records = 1;
+}
+
+message UsageRecord {
+  string request_id = 1;  // Idempotency key
+  string deployment_id = 2;
+  string replica_id = 3;
+  int32 input_tokens = 4;
+  int32 output_tokens = 5;
+  double gpu_seconds = 6;
+  string tier = 7;
+  google.protobuf.Timestamp ts = 8;
+  RequestStatus status = 9;
+}
+
+message DrainAck {
+  string reason = 1;
+  int32 remaining_jobs = 2;
+}
+
+// ─── Coordinator → Agent Messages ────────────────────────────
+
+message CoordinatorMessage {
+  oneof payload {
+    RegisterResponse register_response = 1;
+    ManifestDispatch manifest = 2;
+    DrainRequest drain = 3;
+    UpdateAvailable update = 4;
+  }
+}
+
+message RegisterResponse {
+  bool accepted = 1;
+  string host_id = 2;
+  string overlay_ip = 3;
+  string wg_public_key = 4;
+  string wg_endpoint = 5;
+  string rejection_reason = 6;
+}
+
+message ManifestDispatch {
+  string job_id = 1;
+  string replica_id = 2;
+  string deployment_id = 3;
+  string model_id = 4;
+  string image_url = 5;
+  string image_hash = 6;
+  string model_artifact_url = 7;
+  string model_hash = 8;
+
+  // Resource limits
+  int32 cpu_cores = 9;
+  int64 memory_mb = 10;
+  int64 disk_mb = 11;
+  string gpu_uuid = 12;
+
+  // Network
+  int32 inference_port = 13;
+  repeated string egress_allowlist = 14;
+
+  // Environment
+  map<string, string> env_vars = 15;
+
+  // Signature (Ed25519)
+  bytes signature = 16;
+  bytes signing_key_id = 17;
+}
+
+message DrainRequest {
+  string reason = 1;
+  int32 grace_period_seconds = 2;
+}
+
+message UpdateAvailable {
+  string version = 1;
+  string download_url = 2;
+  string checksum = 3;
+  bytes signature = 4;
+  bool mandatory = 5;
+}
+
+// ─── Enums ───────────────────────────────────────────────────
+
+enum ReplicaState {
+  REPLICA_STATE_UNSPECIFIED = 0;
+  REPLICA_STATE_PENDING = 1;
+  REPLICA_STATE_PULLING = 2;
+  REPLICA_STATE_LOADING = 3;
+  REPLICA_STATE_WARMING = 4;
+  REPLICA_STATE_SERVING = 5;
+  REPLICA_STATE_DEGRADED = 6;
+  REPLICA_STATE_STOPPING = 7;
+  REPLICA_STATE_STOPPED = 8;
+  REPLICA_STATE_FAILED = 9;
+}
+
+enum RequestStatus {
+  REQUEST_STATUS_UNSPECIFIED = 0;
+  REQUEST_STATUS_SUCCESS = 1;
+  REQUEST_STATUS_ERROR = 2;
+  REQUEST_STATUS_TIMEOUT = 3;
+  REQUEST_STATUS_CANCELLED = 4;
+}

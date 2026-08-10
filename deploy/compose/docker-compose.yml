@@ -1,0 +1,76 @@
+# SpazeNode Development Infrastructure
+# Usage: make dev (or docker compose -f deploy/compose/docker-compose.yml up -d)
+
+services:
+  # ─── Data Layer ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: sn-postgres
+    environment:
+      POSTGRES_USER: spazenode
+      POSTGRES_PASSWORD: spazenode_dev
+      POSTGRES_DB: spazenode
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spazenode"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: sn-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2-alpine
+    container_name: sn-nats
+    ports:
+      - "4222:4222"   # Client
+      - "8222:8222"   # Monitoring
+    command: "--jetstream --store_dir /data"
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      test: ["CMD", "nats-server", "--signal", "ldm=0"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  minio:
+    image: minio/minio:latest
+    container_name: sn-minio
+    environment:
+      MINIO_ROOT_USER: spazenode
+      MINIO_ROOT_PASSWORD: spazenode_dev
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    command: server /data --console-address ":9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  pgdata:
+  redisdata:
+  natsdata:
+  miniodata:
