@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
-	agentv1 "github.com/spazor/spazenode/gen/go/agent/v1"
-	"github.com/spazor/spazenode/internal/auth"
-	"github.com/spazor/spazenode/internal/db"
-	"github.com/spazor/spazenode/internal/domain"
+	agentv1 "github.com/ayeus/ayeusann/gen/go/agent/v1"
+	"github.com/ayeus/ayeusann/internal/auth"
+	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/domain"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

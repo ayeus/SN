@@ -1,4 +1,4 @@
-// Package platform provides shared server infrastructure for all SpazeNode services.
+// Package platform provides shared server infrastructure for all AyeusANN services.
 // Every service uses this package to get /healthz, /metrics, graceful shutdown,
 // and structured logging out of the box.
 package platform
@@ -27,7 +27,7 @@ type ServiceConfig struct {
 	Port    int
 }
 
-// Server is the base server that every SpazeNode service embeds.
+// Server is the base server that every AyeusANN service embeds.
 // It provides /healthz, /metrics, graceful shutdown, and structured logging.
 type Server struct {
 	Config  ServiceConfig

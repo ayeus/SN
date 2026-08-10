@@ -1,4 +1,4 @@
--- SpazeNode Seed Data: Catalog model for MVP
+-- AyeusANN Seed Data: Catalog model for MVP
 -- Run after migration 000001
 
 -- Seed the first catalog model: Llama 3.1 8B Instruct
@@ -32,7 +32,7 @@ INSERT INTO model_artifacts (
     '550e8400-e29b-41d4-a716-446655440002',
     '550e8400-e29b-41d4-a716-446655440001',
     'v1.0',
-    's3://spazenode-models/llama-3.1-8b-instruct/v1.0/',
+    's3://AyeusANN-models/llama-3.1-8b-instruct/v1.0/',
     16106127360,  -- ~15GB
     'sha256:placeholder_will_be_updated_with_real_checksum',
     'safetensors'

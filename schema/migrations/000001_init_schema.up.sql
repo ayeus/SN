@@ -1,6 +1,6 @@
--- SpazeNode Schema v1: Core Tables
+-- AyeusANN Schema v1: Core Tables
 -- Migration: 000001_init_schema
--- Description: Creates all core tables for the SpazeNode platform.
+-- Description: Creates all core tables for the AyeusANN platform.
 -- 
 -- IMPORTANT INVARIANTS:
 --   1. usage_events is APPEND-ONLY (no UPDATE/DELETE in application code)

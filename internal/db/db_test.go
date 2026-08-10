@@ -7,12 +7,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/spazor/spazenode/internal/crypto"
-	"github.com/spazor/spazenode/internal/db"
-	"github.com/spazor/spazenode/internal/domain"
+	"github.com/ayeus/ayeusann/internal/crypto"
+	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/domain"
 )
 
-const testDBURL = "postgres://spazenode:spazenode_dev@localhost:5433/spazenode?sslmode=disable"
+const testDBURL = "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable"
 
 func setupTestClient(t *testing.T) *db.Client {
 	t.Helper()
@@ -63,7 +63,7 @@ func TestOrgAndUserCreationWithPIIEncryption(t *testing.T) {
 		t.Fatalf("Failed to encrypt phone: %v", err)
 	}
 
-	userEmail := "test-" + uuid.New().String() + "@spazenode.io"
+	userEmail := "test-" + uuid.New().String() + "@AyeusANN.io"
 	var userID string
 	err = client.Pool.QueryRow(ctx, `
 		INSERT INTO users (email, name, phone_enc, auth_provider)

@@ -13,7 +13,7 @@ var (
 	ErrInvalidClaims = errors.New("auth: invalid token claims")
 )
 
-// Claims defines the custom claims stored in SpazeNode JWTs.
+// Claims defines the custom claims stored in AyeusANN JWTs.
 type Claims struct {
 	UserID string `json:"uid"`
 	OrgID  string `json:"org_id,omitempty"`
@@ -39,7 +39,7 @@ func NewTokenManager(secret string, accessExpiry, refreshExpiry time.Duration) *
 	}
 	return &TokenManager{
 		secret:        []byte(secret),
-		issuer:        "spazenode",
+		issuer:        "AyeusANN",
 		accessExpiry:  accessExpiry,
 		refreshExpiry: refreshExpiry,
 	}
@@ -57,7 +57,7 @@ func (tm *TokenManager) GeneratePair(userID, orgID, role string) (accessToken st
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    tm.issuer,
 			Subject:   userID,
-			Audience:  jwt.ClaimStrings{"spazenode-api"},
+			Audience:  jwt.ClaimStrings{"AyeusANN-api"},
 			ExpiresAt: jwt.NewNumericDate(now.Add(tm.accessExpiry)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
@@ -77,7 +77,7 @@ func (tm *TokenManager) GeneratePair(userID, orgID, role string) (accessToken st
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    tm.issuer,
 			Subject:   userID,
-			Audience:  jwt.ClaimStrings{"spazenode-refresh"},
+			Audience:  jwt.ClaimStrings{"AyeusANN-refresh"},
 			ExpiresAt: jwt.NewNumericDate(now.Add(tm.refreshExpiry)),
 			IssuedAt:  jwt.NewNumericDate(now),
 		},

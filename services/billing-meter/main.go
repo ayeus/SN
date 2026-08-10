@@ -1,4 +1,4 @@
-// Package main implements the SpazeNode Billing Meter.
+// Package main implements the AyeusANN Billing Meter.
 // Responsibilities: usage event consumption, wallet ledger, invoices, payouts.
 package main
 
@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/spazor/spazenode/internal/platform"
+	"github.com/ayeus/ayeusann/internal/platform"
 )
 
 func main() {
@@ -24,7 +24,7 @@ func main() {
 
 	srv.Mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"service":"spazenode-billing-meter","version":"0.1.0"}`))
+		_, _ = w.Write([]byte(`{"service":"AyeusANN-billing-meter","version":"0.1.0"}`))
 	})
 
 	srv.SetReady()

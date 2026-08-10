@@ -6,7 +6,7 @@
 
 ## Context
 
-SpazeNode requires workload isolation for running vLLM inference on host machines. The production target is Firecracker microVMs (ADR-002), but developers need to run the complete control plane workflow on laptops without KVM/Firecracker support (especially macOS).
+AyeusANN requires workload isolation for running vLLM inference on host machines. The production target is Firecracker microVMs (ADR-002), but developers need to run the complete control plane workflow on laptops without KVM/Firecracker support (especially macOS).
 
 ## Decision
 

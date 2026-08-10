@@ -1,4 +1,4 @@
-# SpazeNode Makefile
+# AyeusANN Makefile
 # Usage: make dev          — start full development environment
 #        make lint          — run all linters
 #        make test          — run all tests
@@ -16,7 +16,7 @@
 # ─── Variables ────────────────────────────────────────────────
 
 COMPOSE_FILE := deploy/compose/docker-compose.yml
-DB_URL := postgres://spazenode:spazenode_dev@localhost:5433/spazenode?sslmode=disable
+DB_URL := postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable
 
 GO_SERVICES := gateway control-api scheduler coordinator router inference-gateway billing-meter trust-engine
 GO_SVC_DIRS := $(addprefix services/,$(GO_SERVICES))
@@ -30,7 +30,7 @@ help: ## Show this help
 # ─── Development Environment ─────────────────────────────────
 
 dev: dev-infra migrate seed dev-services ## Start full development environment
-	@echo "\n✅ SpazeNode dev environment is running!"
+	@echo "\n✅ AyeusANN dev environment is running!"
 	@echo "   Postgres:  localhost:5432"
 	@echo "   Redis:     localhost:6379"
 	@echo "   NATS:      localhost:4222 (monitoring: 8222)"
@@ -47,7 +47,7 @@ dev: dev-infra migrate seed dev-services ## Start full development environment
 dev-infra: ## Start infrastructure (PG, Redis, NATS, MinIO)
 	docker compose -f $(COMPOSE_FILE) up -d
 	@echo "Waiting for Postgres to be ready..."
-	@until docker exec sn-postgres pg_isready -U spazenode > /dev/null 2>&1; do sleep 1; done
+	@until docker exec sn-postgres pg_isready -U AyeusANN > /dev/null 2>&1; do sleep 1; done
 	@echo "Infrastructure ready."
 
 dev-services: ## Start all Go services in background
@@ -77,7 +77,7 @@ build-go: ## Build all Go services
 
 build-agent: ## Build the Rust host agent
 	cd agent && cargo build --release
-	@cp agent/target/release/spazenode-agent bin/ 2>/dev/null || true
+	@cp agent/target/release/AyeusANN-agent bin/ 2>/dev/null || true
 	@echo "✅ Agent built"
 
 # ─── Test ─────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ migrate-force: ## Force migration version (use: make migrate-force V=1)
 seed: ## Seed the database with initial data
 	@for f in schema/seeds/*.sql; do \
 		echo "Seeding: $$f"; \
-		docker exec -i sn-postgres psql -U spazenode -d spazenode < "$$f" 2>/dev/null || true; \
+		docker exec -i sn-postgres psql -U AyeusANN -d AyeusANN < "$$f" 2>/dev/null || true; \
 	done
 
 # ─── Protobuf ─────────────────────────────────────────────────

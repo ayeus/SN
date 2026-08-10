@@ -1,4 +1,4 @@
-// Package main implements the SpazeNode API Gateway.
+// Package main implements the AyeusANN API Gateway.
 // Responsibilities: AuthN, rate limiting, request routing to internal services.
 package main
 
@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/spazor/spazenode/internal/platform"
+	"github.com/ayeus/ayeusann/internal/platform"
 )
 
 const (
@@ -29,7 +29,7 @@ func main() {
 
 	srv.Mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"service":"spazenode-gateway","version":"0.1.0"}`))
+		_, _ = w.Write([]byte(`{"service":"AyeusANN-gateway","version":"0.1.0"}`))
 	})
 
 	srv.SetReady()

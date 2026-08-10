@@ -1,4 +1,4 @@
-// Package main implements the SpazeNode Coordinator.
+// Package main implements the AyeusANN Coordinator.
 // Responsibilities: persistent agent sessions, manifest dispatch, stage events.
 package main
 
@@ -10,17 +10,17 @@ import (
 	"strconv"
 	"time"
 
-	agentv1 "github.com/spazor/spazenode/gen/go/agent/v1"
-	"github.com/spazor/spazenode/internal/auth"
-	"github.com/spazor/spazenode/internal/db"
-	"github.com/spazor/spazenode/internal/platform"
+	agentv1 "github.com/ayeus/ayeusann/gen/go/agent/v1"
+	"github.com/ayeus/ayeusann/internal/auth"
+	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/platform"
 	"google.golang.org/grpc"
 )
 
 func main() {
 	port, _ := strconv.Atoi(platform.MustEnv("COORDINATOR_PORT", "8083"))
 	grpcPort := platform.MustEnv("COORDINATOR_GRPC_PORT", "50051")
-	dbURL := platform.MustEnv("DATABASE_URL", "postgres://spazenode:spazenode_dev@localhost:5433/spazenode?sslmode=disable")
+	dbURL := platform.MustEnv("DATABASE_URL", "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable")
 	jwtSecret := platform.MustEnv("JWT_SECRET", "dev-secret-key-32-bytes-long-super-secure!")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -63,7 +63,7 @@ func main() {
 
 	srv.Mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"service":"spazenode-coordinator","version":"0.1.0"}`))
+		_, _ = w.Write([]byte(`{"service":"AyeusANN-coordinator","version":"0.1.0"}`))
 	})
 
 	srv.SetReady()

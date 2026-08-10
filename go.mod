@@ -1,4 +1,4 @@
-module github.com/spazor/spazenode
+module github.com/ayeus/ayeusann
 
 go 1.25.0
 

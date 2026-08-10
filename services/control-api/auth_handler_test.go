@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/spazor/spazenode/internal/auth"
-	"github.com/spazor/spazenode/internal/db"
-	"github.com/spazor/spazenode/internal/platform"
+	"github.com/ayeus/ayeusann/internal/auth"
+	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/platform"
 )
 
-const testDBURL = "postgres://spazenode:spazenode_dev@localhost:5433/spazenode?sslmode=disable"
+const testDBURL = "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable"
 const testJWTSecret = "test-secret-key-32-bytes-long-super-secure!"
 
 func TestSignupLoginAndAPIKeyFlow(t *testing.T) {
@@ -48,7 +48,7 @@ func TestSignupLoginAndAPIKeyFlow(t *testing.T) {
 
 	srv.Mux.Handle("/", tm.AuthMiddleware(protectedMux))
 
-	uniqueEmail := "dev-" + uuid.New().String() + "@spazenode.io"
+	uniqueEmail := "dev-" + uuid.New().String() + "@AyeusANN.io"
 	password := "securePassword123"
 
 	// 1. Test Signup

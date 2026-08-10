@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/spazor/spazenode/internal/platform"
+	"github.com/ayeus/ayeusann/internal/platform"
 )
 
 func TestNewServer(t *testing.T) {

@@ -1,4 +1,4 @@
-// Package main implements the SpazeNode Control API.
+// Package main implements the AyeusANN Control API.
 // Responsibilities: Auth, CRUD for orgs, users, API keys, models, hosts, deployments.
 package main
 
@@ -9,14 +9,14 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/spazor/spazenode/internal/auth"
-	"github.com/spazor/spazenode/internal/db"
-	"github.com/spazor/spazenode/internal/platform"
+	"github.com/ayeus/ayeusann/internal/auth"
+	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/platform"
 )
 
 func main() {
 	port, _ := strconv.Atoi(platform.MustEnv("CONTROL_API_PORT", "8081"))
-	dbURL := platform.MustEnv("DATABASE_URL", "postgres://spazenode:spazenode_dev@localhost:5433/spazenode?sslmode=disable")
+	dbURL := platform.MustEnv("DATABASE_URL", "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable")
 	jwtSecret := platform.MustEnv("JWT_SECRET", "dev-secret-key-32-bytes-long-super-secure!")
 
 	// Initialize DB Client

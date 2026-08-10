@@ -1,8 +1,8 @@
-# SpazeNode
+# AyeusANN
 
 **Data Center as a Service for AI Compute**
 
-SpazeNode aggregates underutilized GPUs — data centres, college labs, workstations, and personal machines — into managed AI infrastructure. Customers deploy open-source models and receive production-grade inference endpoints. Hosts earn revenue from idle GPU capacity.
+AyeusANN aggregates underutilized GPUs — data centres, college labs, workstations, and personal machines — into managed AI infrastructure. Customers deploy open-source models and receive production-grade inference endpoints. Hosts earn revenue from idle GPU capacity.
 
 ## Quick Start
 
@@ -34,7 +34,7 @@ See [docs/](docs/) for architecture documentation, ADRs, and implementation guid
 ## Repository Structure
 
 ```
-spazenode/
+AyeusANN/
 ├── proto/              # gRPC/protobuf contracts
 ├── services/           # Go backend services (8 services)
 ├── agent/              # Rust host agent
@@ -50,4 +50,4 @@ spazenode/
 
 ## License
 
-Proprietary — Spazor Private Limited
+Proprietary — Ayeus Private Limited

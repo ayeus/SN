@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spazor/spazenode/internal/auth"
+	"github.com/ayeus/ayeusann/internal/auth"
 )
 
 func TestPasswordHashing(t *testing.T) {

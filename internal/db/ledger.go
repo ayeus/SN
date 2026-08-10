@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/spazor/spazenode/internal/domain"
+	"github.com/ayeus/ayeusann/internal/domain"
 )
 
 var (

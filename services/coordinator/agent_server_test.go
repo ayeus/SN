@@ -7,14 +7,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	agentv1 "github.com/spazor/spazenode/gen/go/agent/v1"
-	"github.com/spazor/spazenode/internal/auth"
-	"github.com/spazor/spazenode/internal/db"
+	agentv1 "github.com/ayeus/ayeusann/gen/go/agent/v1"
+	"github.com/ayeus/ayeusann/internal/auth"
+	"github.com/ayeus/ayeusann/internal/db"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const testDBURL = "postgres://spazenode:spazenode_dev@localhost:5433/spazenode?sslmode=disable"
+const testDBURL = "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable"
 const testJWTSecret = "test-secret-key-32-bytes-long-super-secure!"
 
 func TestAgentServerRegistrationAndHeartbeat(t *testing.T) {
@@ -37,7 +37,7 @@ func TestAgentServerRegistrationAndHeartbeat(t *testing.T) {
 	_, err = dbClient.Pool.Exec(ctx, `
 		INSERT INTO users (id, email, name, auth_provider)
 		VALUES ($1, $2, 'Host Owner', 'email');
-	`, userID, "owner-"+userID+"@spazenode.io")
+	`, userID, "owner-"+userID+"@AyeusANN.io")
 	if err != nil {
 		t.Fatalf("Failed to seed test user: %v", err)
 	}

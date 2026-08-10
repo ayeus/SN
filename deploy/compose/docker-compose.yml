@@ -1,28 +1,28 @@
-# SpazeNode Development Infrastructure
+# AyeusANN Development Infrastructure
 # Usage: make dev (or docker compose -f deploy/compose/docker-compose.yml up -d)
 
 services:
   # ─── Data Layer ─────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: sn-postgres
+    container_name: ann-postgres
     environment:
-      POSTGRES_USER: spazenode
-      POSTGRES_PASSWORD: spazenode_dev
-      POSTGRES_DB: spazenode
+      POSTGRES_USER: ayeusann
+      POSTGRES_PASSWORD: ayeusann_dev
+      POSTGRES_DB: ayeusann
     ports:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spazenode"]
+      test: ["CMD-SHELL", "pg_isready -U ayeusann"]
       interval: 5s
       timeout: 3s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    container_name: sn-redis
+    container_name: ann-redis
     ports:
       - "6379:6379"
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
@@ -36,7 +36,7 @@ services:
 
   nats:
     image: nats:2-alpine
-    container_name: sn-nats
+    container_name: ann-nats
     ports:
       - "4222:4222"   # Client
       - "8222:8222"   # Monitoring
@@ -52,10 +52,10 @@ services:
 
   minio:
     image: minio/minio:latest
-    container_name: sn-minio
+    container_name: ann-minio
     environment:
-      MINIO_ROOT_USER: spazenode
-      MINIO_ROOT_PASSWORD: spazenode_dev
+      MINIO_ROOT_USER: ayeusann
+      MINIO_ROOT_PASSWORD: ayeusann_dev
     ports:
       - "9000:9000"   # API
       - "9001:9001"   # Console

@@ -6,7 +6,7 @@
 
 ## Context
 
-The SpazeNode control plane needs to be testable on development machines that lack NVIDIA GPUs. The complete deployment workflow (register host → detect GPU → schedule → deploy → serve → meter) must be exercisable locally.
+The AyeusANN control plane needs to be testable on development machines that lack NVIDIA GPUs. The complete deployment workflow (register host → detect GPU → schedule → deploy → serve → meter) must be exercisable locally.
 
 ## Decision
 

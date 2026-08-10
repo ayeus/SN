@@ -1,9 +1,9 @@
 [package]
-name = "spazenode-agent"
+name = "AyeusANN-agent"
 version = "0.1.0"
 edition = "2021"
-authors = ["Spazor Private Limited"]
-description = "SpazeNode host agent — GPU detection, benchmark, job execution, heartbeat"
+authors = ["Ayeus Private Limited"]
+description = "AyeusANN host agent — GPU detection, benchmark, job execution, heartbeat"
 license = "Proprietary"
 
 [dependencies]

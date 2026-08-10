@@ -1,4 +1,4 @@
-// Package domain defines core domain entities and data structures for SpazeNode.
+// Package domain defines core domain entities and data structures for AyeusANN.
 package domain
 
 import (

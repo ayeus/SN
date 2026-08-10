@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/spazor/spazenode/internal/auth"
-	"github.com/spazor/spazenode/internal/db"
-	"github.com/spazor/spazenode/internal/platform"
+	"github.com/ayeus/ayeusann/internal/auth"
+	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/platform"
 )
 
 func TestHostManagementEndpoints(t *testing.T) {
@@ -45,7 +45,7 @@ func TestHostManagementEndpoints(t *testing.T) {
 	srv.Mux.Handle("/", tm.AuthMiddleware(protectedMux))
 
 	// Setup user & org for auth token
-	uniqueEmail := "host-installer-" + uuid.New().String() + "@spazenode.io"
+	uniqueEmail := "host-installer-" + uuid.New().String() + "@AyeusANN.io"
 	signupPayload, _ := json.Marshal(map[string]string{
 		"email":    uniqueEmail,
 		"password": "password1234",

@@ -1,4 +1,4 @@
-# SpazeNode — Local Development Guide
+# AyeusANN — Local Development Guide
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@
 
 ```bash
 # Clone the repository
-git clone <repo-url> && cd spazenode
+git clone <repo-url> && cd AyeusANN
 
 # Copy environment variables
 cp .env.example .env
@@ -27,10 +27,10 @@ make dev
 ```
 
 This starts:
-- **Postgres** on `:5432` (user: `spazenode`, pass: `spazenode_dev`)
+- **Postgres** on `:5432` (user: `AyeusANN`, pass: `AyeusANN_dev`)
 - **Redis** on `:6379`
 - **NATS** on `:4222` (monitoring: `:8222`)
-- **MinIO** on `:9000` (console: `:9001`, user: `spazenode`, pass: `spazenode_dev`)
+- **MinIO** on `:9000` (console: `:9001`, user: `AyeusANN`, pass: `AyeusANN_dev`)
 - **8 Go services** on ports `8080–8087`
 
 ## Service Ports
@@ -67,7 +67,7 @@ make clean          # Clean build artifacts
 
 Connect directly:
 ```bash
-psql postgres://spazenode:spazenode_dev@localhost:5432/spazenode
+psql postgres://AyeusANN:AyeusANN_dev@localhost:5432/AyeusANN
 ```
 
 Reset:

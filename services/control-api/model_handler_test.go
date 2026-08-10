@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/spazor/spazenode/internal/auth"
-	"github.com/spazor/spazenode/internal/db"
-	"github.com/spazor/spazenode/internal/domain"
-	"github.com/spazor/spazenode/internal/platform"
+	"github.com/ayeus/ayeusann/internal/auth"
+	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/domain"
+	"github.com/ayeus/ayeusann/internal/platform"
 )
 
 func TestModelCatalogAndBYO(t *testing.T) {
@@ -47,7 +47,7 @@ func TestModelCatalogAndBYO(t *testing.T) {
 	srv.Mux.Handle("/", tm.AuthMiddleware(protectedMux))
 
 	// Setup user & org for auth token
-	uniqueEmail := "byo-tester-" + uuid.New().String() + "@spazenode.io"
+	uniqueEmail := "byo-tester-" + uuid.New().String() + "@AyeusANN.io"
 	signupPayload, _ := json.Marshal(map[string]string{
 		"email":    uniqueEmail,
 		"password": "password1234",

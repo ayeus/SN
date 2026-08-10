@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"github.com/spazor/spazenode/internal/crypto"
+	"github.com/ayeus/ayeusann/internal/crypto"
 )
 
 func TestAES256GCM(t *testing.T) {

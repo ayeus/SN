@@ -6,12 +6,12 @@ use gpu::GpuDetector;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// SpazeNode Host Agent
+/// AyeusANN Host Agent
 ///
 /// Manages GPU resources, executes workloads in isolation, and reports
-/// health/usage to the SpazeNode coordinator.
+/// health/usage to the AyeusANN coordinator.
 #[derive(Parser, Debug)]
-#[command(name = "spazenode-agent", version, about)]
+#[command(name = "AyeusANN-agent", version, about)]
 struct Args {
     /// Registration token (one-time, from host console)
     #[arg(long, env = "SN_REGISTRATION_TOKEN")]
@@ -22,7 +22,7 @@ struct Args {
     coordinator_url: String,
 
     /// Agent data directory
-    #[arg(long, env = "SN_DATA_DIR", default_value = "/var/lib/spazenode")]
+    #[arg(long, env = "SN_DATA_DIR", default_value = "/var/lib/AyeusANN")]
     data_dir: String,
 
     /// Heartbeat interval in seconds
@@ -50,11 +50,11 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     info!(
-        service = "spazenode-agent",
+        service = "AyeusANN-agent",
         version = env!("CARGO_PKG_VERSION"),
         coordinator_url = %args.coordinator_url,
         fake_gpu = args.fake_gpu,
-        "starting spazenode host agent"
+        "starting AyeusANN host agent"
     );
 
     if args.fake_gpu {
