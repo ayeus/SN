@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     info!(
-        service = "AyeusANN-agent",
+        service = "ayeusann-agent",
         version = env!("CARGO_PKG_VERSION"),
         coordinator_url = %args.coordinator_url,
         fake_gpu = args.fake_gpu,
