@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AyeusANN — Decentralized GPU Compute & Inference Network</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- Top Navbar -->
+  <nav class="navbar">
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      AyeusANN
+    </div>
+
+    <div class="nav-links">
+      <button class="nav-tab active" data-tab="host-console">
+        <span>🖥️</span> Host GPU Console
+      </button>
+      <button class="nav-tab" data-tab="client-marketplace">
+        <span>🛒</span> GPU Marketplace
+      </button>
+      <button class="nav-tab" data-tab="chat-studio">
+        <span>💬</span> AI Chat Studio
+      </button>
+      <button class="nav-tab" data-tab="wallet-billing">
+        <span>💳</span> Wallet & Billing
+      </button>
+    </div>
+
+    <div class="user-status">
+      <div class="status-badge">
+        <span class="pulse-dot"></span>
+        <span id="mesh-status-text">Network Mesh Online</span>
+      </div>
+      <button class="btn btn-outline" id="btn-login-modal">Sign In / Register</button>
+    </div>
+  </nav>
+
+  <!-- Main Application Body -->
+  <div class="container">
+
+    <!-- ─── TAB 1: Host GPU Console ─────────────────────────────── -->
+    <div class="tab-content active" id="tab-host-console">
+      <div class="hero-banner">
+        <div>
+          <h1 class="hero-title">Monetize Your GPU Compute</h1>
+          <p class="hero-subtitle">List your Apple Silicon or NVIDIA RTX 4090/5090 host node. Earn revenue in INR/USD per token computed across the decentralized mesh network.</p>
+        </div>
+        <button class="btn" id="btn-generate-installer">
+          <span>🚀</span> Host My GPU
+        </button>
+      </div>
+
+      <!-- Installer Command Modal / Banner -->
+      <div class="card" id="installer-card" style="margin-bottom: 2rem; border-color: var(--accent-cyan);">
+        <div class="card-header">
+          <div class="card-title">
+            <span>⚡</span> One-Click Host Agent Installer Command
+          </div>
+          <span class="status-badge" style="background: rgba(0, 242, 254, 0.1); color: var(--accent-cyan); border-color: var(--accent-cyan);">
+            24h Registration Token Active
+          </span>
+        </div>
+        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1rem;">
+          Run this single command on your macOS terminal or Windows PowerShell. The host agent will automatically detect your physical GPU, run hardware benchmarks, and link your node to the AyeusANN mesh.
+        </p>
+
+        <div style="display: flex; gap: 1rem; margin-bottom: 0.75rem;">
+          <button class="btn btn-secondary" id="tab-cmd-mac">macOS / Linux (Bash)</button>
+          <button class="btn btn-secondary" id="tab-cmd-win">Windows (PowerShell)</button>
+        </div>
+
+        <div class="terminal-box">
+          <div class="terminal-header">
+            <span id="cmd-platform-label">bash</span>
+            <button class="copy-btn" id="btn-copy-installer">Copy Command</button>
+          </div>
+          <code id="installer-cmd-text">curl -fsSL https://ayeus.ann/install.sh | sh -s -- --token reg_jwt_sample_token_24h --coordinator http://localhost:8083</code>
+        </div>
+      </div>
+
+      <!-- Live Hosts List -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>🖥️</span> Registered GPU Host Nodes (<span id="host-count">1</span>)
+          </div>
+          <button class="btn btn-secondary" id="btn-refresh-hosts">Refresh Hosts</button>
+        </div>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Host Node</th>
+                <th>Physical GPU</th>
+                <th>VRAM (GB)</th>
+                <th>Tier</th>
+                <th>Region</th>
+                <th>Benchmark / Reputation</th>
+                <th>Status</th>
+                <th>Overlay IP</th>
+              </tr>
+            </thead>
+            <tbody id="hosts-table-body">
+              <tr>
+                <td><strong>MacBook-Air-Local</strong><br><small style="color: var(--text-muted)">UUID: 2A87FEEA...</small></td>
+                <td><span style="color: var(--accent-cyan); font-weight: bold;">Apple M4 GPU</span></td>
+                <td>16 GB (Unified)</td>
+                <td><span class="status-badge">T2 High-Perf</span></td>
+                <td>IN-SOUTH</td>
+                <td>Score 98.5 / Rep 100</td>
+                <td><span class="status-badge"><span class="pulse-dot"></span> Active Serving</span></td>
+                <td><code style="color: var(--accent-cyan);">10.200.0.10</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── TAB 2: Client Marketplace & GPU Rental ──────────────── -->
+    <div class="tab-content" id="tab-client-marketplace">
+      <div class="hero-banner">
+        <div>
+          <h1 class="hero-title">High-Performance GPU Model Hosting</h1>
+          <p class="hero-subtitle">Deploy state-of-the-art open-weights LLMs across distributed GPU tiers with ultra-low latency and zero cold starts.</p>
+        </div>
+      </div>
+
+      <!-- Tier Overview -->
+      <div class="grid-3" style="margin-bottom: 2rem;">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title" style="color: var(--accent-cyan);">Tier 1 (Enterprise)</div>
+            <span style="font-weight: bold;">₹45/hr</span>
+          </div>
+          <p style="color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 1rem;">Dedicated RTX 4090/5090 (24-32GB VRAM), 99.9% SLA guaranteed, encrypted WireGuard tunnel.</p>
+          <button class="btn btn-outline" style="width: 100%;">Select Tier 1</button>
+        </div>
+
+        <div class="card" style="border-color: var(--accent-cyan);">
+          <div class="card-header">
+            <div class="card-title" style="color: var(--accent-green);">Tier 2 (Community High-Perf)</div>
+            <span style="font-weight: bold;">₹29/hr</span>
+          </div>
+          <p style="color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 1rem;">Apple M-series & 16GB+ VRAM nodes, reputation score ≥ 80, fast model switching.</p>
+          <button class="btn" style="width: 100%;">Select Tier 2 (Popular)</button>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title" style="color: var(--accent-amber);">Tier 3 (Spot / Budget)</div>
+            <span style="font-weight: bold;">₹12/hr</span>
+          </div>
+          <p style="color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 1rem;">Intermittent spot capacity, auto-retry fallback, ultra-budget inference workloads.</p>
+          <button class="btn btn-outline" style="width: 100%;">Select Tier 3</button>
+        </div>
+      </div>
+
+      <!-- Model Catalog -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>📦</span> Available Model Catalog
+          </div>
+        </div>
+
+        <div class="grid-2" id="catalog-model-grid">
+          <div class="card" style="background: var(--bg-surface);">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem;">
+              <div>
+                <h3 style="font-size: 1.1rem; font-weight: 700;">llama-3.1-8b-instruct</h3>
+                <span style="color: var(--text-muted); font-size: 0.8rem;">Meta Llama 3.1 Family • 8.0B Parameters</span>
+              </div>
+              <span class="status-badge">Available</span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 1rem;">
+              High-throughput instruction tuned LLM. Requires min 16GB VRAM.
+            </p>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-size: 0.85rem; color: var(--accent-cyan);">$0.08 / 1M in • $0.22 / 1M out</span>
+              <button class="btn btn-secondary btn-deploy-model" data-model="llama-3.1-8b-instruct">Deploy to Mesh</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── TAB 3: AI Chat Studio (SSE Playground) ──────────────── -->
+    <div class="tab-content" id="tab-chat-studio">
+      <div class="grid-3" style="margin-bottom: 1.5rem;">
+        <div class="card" style="grid-column: span 2;">
+          <div class="card-header">
+            <div class="card-title">
+              <span>💬</span> OpenAI-Compatible Live Chat Studio
+            </div>
+            <span class="status-badge" id="chat-status-badge">Ready for Inference</span>
+          </div>
+
+          <div class="chat-container">
+            <div class="chat-messages" id="chat-messages">
+              <div class="chat-bubble assistant">
+                Greetings! I am AyeusANN, running across distributed Apple M4 GPU nodes. Enter your prompt below to execute live inference with real-time SSE streaming.
+              </div>
+            </div>
+
+            <div class="chat-input-row">
+              <input type="text" class="form-input" id="chat-input" placeholder="Type prompt (e.g. Write a quick Go function to route requests)...">
+              <button class="btn" id="btn-send-chat">Send Prompt</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title"><span>⚙️</span> Execution Config</div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Target Model</label>
+            <select class="form-select" id="chat-model-select">
+              <option value="llama-3.1-8b-instruct">llama-3.1-8b-instruct</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">API Key Header</label>
+            <input type="text" class="form-input" id="chat-api-key-input" placeholder="sk_live_sample_key_01">
+            <button class="btn btn-secondary" id="btn-generate-api-key" style="width: 100%; margin-top: 0.5rem; font-size: 0.8rem;">
+              Generate New API Key
+            </button>
+          </div>
+
+          <div class="stat-box" style="margin-top: 1rem;">
+            <div class="stat-label">Response Time</div>
+            <div class="stat-value" id="chat-stat-latency">-- ms</div>
+          </div>
+
+          <div class="stat-box" style="margin-top: 0.75rem;">
+            <div class="stat-label">Tokens Processed</div>
+            <div class="stat-value" id="chat-stat-tokens">0 tks</div>
+          </div>
+
+          <div class="stat-box" style="margin-top: 0.75rem;">
+            <div class="stat-label">Host Node Assigned</div>
+            <div style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent-cyan); margin-top: 0.2rem;" id="chat-stat-host">
+              127.0.0.1 (M4 GPU)
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── TAB 4: Wallet & Billing ─────────────────────────────── -->
+    <div class="tab-content" id="tab-wallet-billing">
+      <div class="grid-3" style="margin-bottom: 2rem;">
+        <div class="stat-box">
+          <div class="stat-label">Current Wallet Balance</div>
+          <div class="stat-value" id="wallet-balance-val">₹ 2,500.00</div>
+          <button class="btn btn-outline" id="btn-topup-wallet" style="margin-top: 0.75rem; font-size: 0.8rem;">+ Top Up Wallet</button>
+        </div>
+
+        <div class="stat-box">
+          <div class="stat-label">Total Input Tokens (This Month)</div>
+          <div class="stat-value">1,450,200</div>
+        </div>
+
+        <div class="stat-box">
+          <div class="stat-label">Total Output Tokens (This Month)</div>
+          <div class="stat-value">620,800</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><span>📜</span> Invoices & GST Reports</div>
+          <button class="btn" id="btn-generate-invoice">Generate Monthly Invoice</button>
+        </div>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Invoice #</th>
+                <th>Billing Period</th>
+                <th>Subtotal</th>
+                <th>GST (18%)</th>
+                <th>Total</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="invoices-table-body">
+              <tr>
+                <td><strong style="font-family: var(--font-mono);">INV-202608-8900EF1D</strong></td>
+                <td>2026-08-01 to 2026-08-31</td>
+                <td>₹ 2,118.64</td>
+                <td>₹ 381.36</td>
+                <td><strong>₹ 2,500.00</strong></td>
+                <td><span class="status-badge" style="background: rgba(0, 230, 118, 0.1); color: var(--accent-green);">Paid</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Sign In / Registration Modal -->
+  <div class="modal-backdrop" id="auth-modal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="card-title">Sign In to AyeusANN</div>
+        <button class="modal-close" id="modal-close-auth">&times;</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Email Address</label>
+        <input type="email" class="form-input" id="auth-email" value="admin@ayeusann.com">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <input type="password" class="form-input" id="auth-password" value="SuperSecure123!">
+      </div>
+
+      <div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
+        <button class="btn" id="btn-submit-login" style="flex: 1;">Sign In</button>
+        <button class="btn btn-secondary" id="btn-submit-signup" style="flex: 1;">Create Account</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    AyeusANN Network v0.2.0 • Decentralized GPU Compute Engine • Built with Metal 4 & CUDA Acceleration
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

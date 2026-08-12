@@ -66,7 +66,16 @@ func main() {
 	protectedMux.HandleFunc("GET /v1/hosts", hostHandler.HandleListHosts)
 	protectedMux.HandleFunc("GET /v1/hosts/", hostHandler.HandleGetHost)
 
-	srv.Mux.Handle("/", tm.AuthMiddleware(protectedMux))
+	// Serve Static Frontend UI
+	fs := http.FileServer(http.Dir("web"))
+	srv.Mux.Handle("GET /static/", http.StripPrefix("/static/", fs))
+	srv.Mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			http.ServeFile(w, r, "web/index.html")
+			return
+		}
+		tm.AuthMiddleware(protectedMux).ServeHTTP(w, r)
+	})
 
 	srv.SetReady()
 	if err := srv.Run(); err != nil {
