@@ -38,6 +38,7 @@ message RegisterRequest {
   repeated GpuInfo gpus = 7;
   string agent_version = 8;
   string hardware_fingerprint = 9;
+  string wg_public_key = 10;
 }
 
 message GpuInfo {

@@ -132,13 +132,18 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 	}
 
 	// 4. Send RegisterResponse Success
+	wgPub := regReq.WgPublicKey
+	if wgPub == "" {
+		wgPub = "wg_pub_key_default"
+	}
+
 	err = stream.Send(&agentv1.CoordinatorMessage{
 		Payload: &agentv1.CoordinatorMessage_RegisterResponse{
 			RegisterResponse: &agentv1.RegisterResponse{
 				Accepted:     true,
 				HostId:       hostID,
 				OverlayIp:    overlayIP,
-				WgPublicKey:  "wg_pub_key_placeholder",
+				WgPublicKey:  wgPub,
 				WgEndpoint:   "10.200.0.1:51820",
 			},
 		},

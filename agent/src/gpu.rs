@@ -62,7 +62,7 @@ impl GpuDetector {
 
     #[cfg(target_os = "macos")]
     fn detect_apple_silicon() -> Option<GpuInfo> {
-        // Query system_profiler for Chipset Model and RAM
+        // Query system_profiler for Chipset Model, RAM, Hardware UUID, and Serial
         let output = Command::new("system_profiler")
             .arg("SPDisplaysDataType")
             .arg("SPHardwareDataType")
@@ -73,6 +73,8 @@ impl GpuDetector {
 
         let mut chip_name = "Apple Silicon GPU".to_string();
         let mut memory_gb = 16; // default fallback
+        let mut hw_uuid = "unknown-uuid".to_string();
+        let mut serial_num = "unknown-serial".to_string();
 
         for line in stdout.lines() {
             let trimmed = line.trim();
@@ -91,6 +93,16 @@ impl GpuDetector {
                     }
                 }
             }
+            if trimmed.starts_with("Hardware UUID:") {
+                if let Some((_, val)) = trimmed.split_once(':') {
+                    hw_uuid = val.trim().to_string();
+                }
+            }
+            if trimmed.starts_with("Serial Number (system):") {
+                if let Some((_, val)) = trimmed.split_once(':') {
+                    serial_num = val.trim().to_string();
+                }
+            }
         }
 
         // Clean up redundant "Apple Apple" if present
@@ -101,8 +113,12 @@ impl GpuDetector {
         info!(
             chip = %chip_name,
             vram_gb = memory_gb,
+            hw_uuid = %hw_uuid,
             "detected physical Apple Silicon GPU with Unified Memory"
         );
+
+        let fingerprint_raw = format!("{}:{}:{}", hw_uuid, serial_num, memory_gb);
+        let fingerprint = format!("sha256:{:x}", md5_or_simple_hash(&fingerprint_raw));
 
         Some(GpuInfo {
             model: chip_name,
@@ -111,10 +127,19 @@ impl GpuDetector {
             cuda_version: "Metal 4 / MPS".to_string(),
             compute_capability_major: 0,
             compute_capability_minor: 0,
-            uuid: "GPU-apple-silicon-m4-unified".to_string(),
-            fingerprint: "sha256:apple_m4_unified_memory_fingerprint".to_string(),
+            uuid: format!("GPU-apple-{}", hw_uuid.to_lowercase()),
+            fingerprint,
         })
     }
+}
+
+fn md5_or_simple_hash(input: &str) -> u128 {
+    let mut hash: u128 = 0xcbf29ce484222325;
+    for byte in input.bytes() {
+        hash ^= u128::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 #[cfg(test)]

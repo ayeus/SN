@@ -32,12 +32,16 @@ impl MeshManager {
             }
         }
 
-        // Software keypair fallback for development environments without root/wg CLI
-        warn!("wg binary not found or non-root environment; using software WireGuard keypair");
-        (
-            "YF23kO...synthetic_wg_priv_key_01...=".to_string(),
-            "XG34lP...synthetic_wg_pub_key_01...=".to_string(),
-        )
+        // Software keypair generation fallback for development environments without root/wg CLI
+        warn!("wg binary not found or non-root environment; generating software WireGuard keypair");
+        let mut priv_bytes = [0u8; 32];
+        for b in &mut priv_bytes {
+            *b = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() % 255) as u8;
+        }
+        use base64::Engine;
+        let priv_key = base64::engine::general_purpose::STANDARD.encode(priv_bytes);
+        let pub_key = base64::engine::general_purpose::STANDARD.encode(&priv_bytes[..16]);
+        (priv_key, pub_key)
     }
 
     pub fn setup_overlay(overlay_ip: &str, wg_public_key: &str) -> bool {

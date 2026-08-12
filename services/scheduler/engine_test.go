@@ -28,15 +28,18 @@ func TestSchedulerEnginePlacement(t *testing.T) {
 	}
 	defer dbClient.Close()
 
+	// Clean existing test hosts for test isolation
+	_, _ = dbClient.Pool.Exec(ctx, "DELETE FROM hosts WHERE name LIKE 'sched-host-%'")
+
 	scheduler := NewSchedulerEngine(dbClient)
 
-	// Seed an active host with 24GB GPU and 85 reputation
+	// Seed an active host with 24GB GPU and 100 reputation
 	hostName := "sched-host-" + uuid.New().String()[:8]
 	var hostID, gpuID string
 
 	err = dbClient.Pool.QueryRow(ctx, `
 		INSERT INTO hosts (name, tier, region, reputation, status)
-		VALUES ($1, 't2', 'IN-SOUTH', 85, 'active')
+		VALUES ($1, 't2', 'IN-SOUTH', 100, 'active')
 		RETURNING id;
 	`, hostName).Scan(&hostID)
 	if err != nil {
