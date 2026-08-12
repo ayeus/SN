@@ -37,7 +37,7 @@ document.addEventListener('DOMContentLoaded', () => {
       cmdText.textContent = `curl -fsSL https://ayeus.ann/install.sh | sh -s -- --token ${activeRegistrationToken} --coordinator http://localhost:8083`;
     } else {
       cmdPlatformLabel.textContent = 'powershell (Windows)';
-      cmdText.textContent = `iwr -useb https://ayeus.ann/install.ps1 | iex -Args "-Token ${activeRegistrationToken} -Coordinator http://localhost:8083"`;
+      cmdText.textContent = `$env:SN_REGISTRATION_TOKEN="${activeRegistrationToken}"; $env:SN_COORDINATOR_URL="http://localhost:8083"; iwr -useb https://ayeus.ann/install.ps1 | iex`;
     }
   }
 
