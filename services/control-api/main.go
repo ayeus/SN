@@ -66,12 +66,26 @@ func main() {
 	protectedMux.HandleFunc("GET /v1/hosts", hostHandler.HandleListHosts)
 	protectedMux.HandleFunc("GET /v1/hosts/", hostHandler.HandleGetHost)
 
-	// Serve Static Frontend UI
+	// Serve Static Frontend UI & Installer Scripts
 	fs := http.FileServer(http.Dir("web"))
 	srv.Mux.Handle("GET /static/", http.StripPrefix("/static/", fs))
+	srv.Mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "web/install.sh")
+	})
+	srv.Mux.HandleFunc("GET /install.ps1", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "web/install.ps1")
+	})
 	srv.Mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			http.ServeFile(w, r, "web/index.html")
+			return
+		}
+		if r.URL.Path == "/install.sh" {
+			http.ServeFile(w, r, "web/install.sh")
+			return
+		}
+		if r.URL.Path == "/install.ps1" {
+			http.ServeFile(w, r, "web/install.ps1")
 			return
 		}
 		tm.AuthMiddleware(protectedMux).ServeHTTP(w, r)

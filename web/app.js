@@ -32,12 +32,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnCopyInstaller = document.getElementById('btn-copy-installer');
 
   function updateInstallerCommand() {
+    const origin = window.location.origin || 'http://192.168.1.4:8081';
+    const hostIp = window.location.hostname || '192.168.1.4';
+    const coordUrl = `http://${hostIp}:8083`;
+
     if (currentPlatform === 'mac') {
       cmdPlatformLabel.textContent = 'bash (macOS / Linux)';
-      cmdText.textContent = `curl -fsSL https://ayeus.ann/install.sh | sh -s -- --token ${activeRegistrationToken} --coordinator http://localhost:8083`;
+      cmdText.textContent = `curl -fsSL ${origin}/install.sh | sh -s -- --token ${activeRegistrationToken} --coordinator ${coordUrl}`;
     } else {
       cmdPlatformLabel.textContent = 'powershell (Windows)';
-      cmdText.textContent = `$env:SN_REGISTRATION_TOKEN="${activeRegistrationToken}"; $env:SN_COORDINATOR_URL="http://localhost:8083"; iwr -useb https://ayeus.ann/install.ps1 | iex`;
+      cmdText.textContent = `$env:SN_REGISTRATION_TOKEN="${activeRegistrationToken}"; $env:SN_COORDINATOR_URL="${coordUrl}"; iwr -useb ${origin}/install.ps1 | iex`;
     }
   }
 
