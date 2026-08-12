@@ -41,7 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
       cmdText.textContent = `curl -fsSL ${origin}/install.sh | sh -s -- --token ${activeRegistrationToken} --coordinator ${coordUrl}`;
     } else {
       cmdPlatformLabel.textContent = 'powershell (Windows)';
-      cmdText.textContent = `$env:SN_REGISTRATION_TOKEN="${activeRegistrationToken}"; $env:SN_COORDINATOR_URL="${coordUrl}"; iwr -useb ${origin}/install.ps1 | iex`;
+      cmdText.textContent = `$env:SN_REGISTRATION_TOKEN="${activeRegistrationToken}"; $env:SN_COORDINATOR_URL="${coordUrl}"; Invoke-RestMethod ${origin}/install.ps1 | Invoke-Expression`;
     }
   }
 
