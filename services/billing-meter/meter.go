@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/ayeus/ayeusann/internal/auth"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/domain"
+	"github.com/ayeus/ayeusann/internal/money"
 )
 
 var (
@@ -110,7 +113,7 @@ func (m *MeterService) IngestUsage(ctx context.Context, req UsageIngestRequest) 
 			input_tokens, output_tokens, gpu_seconds, tier,
 			amount_customer, amount_host, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		ON CONFLICT (request_id, ts) DO NOTHING
+		ON CONFLICT (request_id) DO NOTHING
 		RETURNING request_id, deployment_id, replica_id, host_id,
 			input_tokens, output_tokens, gpu_seconds, tier,
 			amount_customer, amount_host, ts, status;
@@ -139,9 +142,14 @@ func (m *MeterService) IngestUsage(ctx context.Context, req UsageIngestRequest) 
 	if amountCustomer > 0 && req.Status == "success" {
 		desc := fmt.Sprintf("Inference: %d input + %d output tokens on %s",
 			req.InputTokens, req.OutputTokens, req.DeploymentID[:8])
-		_, walletErr := m.ledger.RecordTransaction(
-			ctx, orgID, -amountCustomer, domain.LedgerKindDebit, &req.RequestID, &desc, true,
-		)
+		delta, _ := money.FromFloat(-amountCustomer, "USD")
+		_, walletErr := m.ledger.RecordTransaction(ctx, db.TransactionRequest{
+			OrgID:       orgID,
+			Delta:       delta,
+			Kind:        domain.LedgerKindDebit,
+			RefID:       &req.RequestID,
+			Description: &desc,
+		})
 		if walletErr != nil {
 			// Log but don't fail — usage is already recorded, billing will reconcile
 			fmt.Printf("meter: WARNING wallet debit failed for org %s: %v\n", orgID, walletErr)
@@ -197,7 +205,7 @@ func (m *MeterService) GetUsageSummary(ctx context.Context, orgID string, deploy
 }
 
 // GetBalance returns the current wallet balance for an organization.
-func (m *MeterService) GetBalance(ctx context.Context, orgID string) (float64, error) {
+func (m *MeterService) GetBalance(ctx context.Context, orgID string) (money.Amount, error) {
 	return m.ledger.GetBalance(ctx, orgID)
 }
 
@@ -234,9 +242,9 @@ func (m *MeterService) GenerateInvoice(ctx context.Context, req InvoiceGenerateR
 	var invoice domain.Invoice
 	err = m.db.ExecTx(ctx, func(tx pgx.Tx) error {
 		invoiceQuery := `
-			INSERT INTO invoices (org_id, number, period_start, period_end, subtotal, gst_amount, total, status)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 'issued')
-			RETURNING id, org_id, number, period_start, period_end, subtotal, gst_amount, total, status, created_at;
+			INSERT INTO invoices (org_id, number, period_start, period_end, subtotal, tax_amount, tax_name, tax_rate, total, currency, status)
+			VALUES ($1, $2, $3, $4, $5, $6, 'GST', '0.18', $7, 'USD', 'issued')
+			RETURNING id, org_id, number, period_start, period_end, subtotal, tax_amount, total, status, created_at;
 		`
 		err := tx.QueryRow(ctx, invoiceQuery,
 			req.OrgID, invoiceNumber, req.PeriodStart, req.PeriodEnd,
@@ -244,7 +252,7 @@ func (m *MeterService) GenerateInvoice(ctx context.Context, req InvoiceGenerateR
 		).Scan(
 			&invoice.ID, &invoice.OrgID, &invoice.Number,
 			&invoice.PeriodStart, &invoice.PeriodEnd,
-			&invoice.Subtotal, &invoice.GstAmount, &invoice.Total,
+			&invoice.Subtotal, &invoice.TaxAmount, &invoice.Total,
 			&invoice.Status, &invoice.CreatedAt,
 		)
 		if err != nil {
@@ -289,7 +297,7 @@ func (m *MeterService) GenerateInvoice(ctx context.Context, req InvoiceGenerateR
 func (m *MeterService) ListInvoices(ctx context.Context, orgID string) ([]domain.Invoice, error) {
 	query := `
 		SELECT id, org_id, number, period_start, period_end,
-		       subtotal, gst_amount, total, status, pdf_url, created_at
+		       subtotal, tax_amount, total, status, pdf_url, created_at
 		FROM invoices
 		WHERE org_id = $1
 		ORDER BY period_start DESC;
@@ -306,7 +314,7 @@ func (m *MeterService) ListInvoices(ctx context.Context, orgID string) ([]domain
 		var inv domain.Invoice
 		if err := rows.Scan(
 			&inv.ID, &inv.OrgID, &inv.Number, &inv.PeriodStart, &inv.PeriodEnd,
-			&inv.Subtotal, &inv.GstAmount, &inv.Total, &inv.Status, &inv.PdfURL, &inv.CreatedAt,
+			&inv.Subtotal, &inv.TaxAmount, &inv.Total, &inv.Status, &inv.PdfURL, &inv.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("meter: failed to scan invoice: %w", err)
 		}
@@ -326,12 +334,17 @@ func computeTokenCost(inputTokens, outputTokens int, priceInPer1M, priceOutPer1M
 // ─── HTTP Handlers ────────────────────────────────────────────
 
 // RegisterRoutes registers all billing meter HTTP endpoints on the provided mux.
-func (m *MeterService) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/usage", m.handleIngestUsage)
-	mux.HandleFunc("GET /v1/usage/{org_id}", m.handleGetUsageSummary)
-	mux.HandleFunc("GET /v1/balance/{org_id}", m.handleGetBalance)
-	mux.HandleFunc("POST /v1/invoices/generate", m.handleGenerateInvoice)
-	mux.HandleFunc("GET /v1/invoices/{org_id}", m.handleListInvoices)
+func (m *MeterService) RegisterRoutes(mux *http.ServeMux, svcAuth *auth.ServiceAuthenticator, tm *auth.TokenManager, revStore auth.RevocationStore) {
+	authMw := auth.NewMiddleware(tm, revStore)
+
+	// Internal service endpoint: only the inference-gateway may ingest usage
+	mux.Handle("POST /v1/usage", svcAuth.RequireInternalService(auth.ServiceInferenceGateway)(http.HandlerFunc(m.handleIngestUsage)))
+
+	// Org-scoped endpoints: protected by JWT Bearer token + matching org_id
+	mux.Handle("GET /v1/usage/{org_id}", authMw.Authenticate(auth.RequireOrg("org_id")(http.HandlerFunc(m.handleGetUsageSummary))))
+	mux.Handle("GET /v1/balance/{org_id}", authMw.Authenticate(auth.RequireOrg("org_id")(http.HandlerFunc(m.handleGetBalance))))
+	mux.Handle("POST /v1/invoices/generate", authMw.Authenticate(http.HandlerFunc(m.handleGenerateInvoice)))
+	mux.Handle("GET /v1/invoices/{org_id}", authMw.Authenticate(auth.RequireOrg("org_id")(http.HandlerFunc(m.handleListInvoices))))
 }
 
 func (m *MeterService) handleIngestUsage(w http.ResponseWriter, r *http.Request) {
@@ -417,6 +430,13 @@ func (m *MeterService) handleGenerateInvoice(w http.ResponseWriter, r *http.Requ
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeMeterError(w, http.StatusBadRequest, "Invalid request body")
 		return
+	}
+
+	if claims, ok := auth.GetClaims(r.Context()); ok && claims != nil {
+		if claims.OrgID != "" && req.OrgID != claims.OrgID && !strings.EqualFold(claims.Role, "admin") {
+			writeMeterError(w, http.StatusForbidden, "Cannot generate invoice for another organization")
+			return
+		}
 	}
 
 	invoice, err := m.GenerateInvoice(r.Context(), req)

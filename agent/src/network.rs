@@ -21,26 +21,37 @@ impl MeshManager {
         if let Ok(out) = priv_key_output {
             if out.status.success() {
                 let priv_key = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let pub_key_output = Command::new("wg")
+                let child = Command::new("wg")
                     .arg("pubkey")
                     .stdin(std::process::Stdio::piped())
-                    .output();
-                if let Ok(pub_out) = pub_key_output {
-                    let pub_key = String::from_utf8_lossy(&pub_out.stdout).trim().to_string();
-                    return (priv_key, pub_key);
+                    .stdout(std::process::Stdio::piped())
+                    .spawn();
+                if let Ok(mut child) = child {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        let _ = stdin.write_all(priv_key.as_bytes());
+                    }
+                    if let Ok(pub_out) = child.wait_with_output() {
+                        if pub_out.status.success() {
+                            let pub_key = String::from_utf8_lossy(&pub_out.stdout).trim().to_string();
+                            return (priv_key, pub_key);
+                        }
+                    }
                 }
             }
         }
 
-        // Software keypair generation fallback for development environments without root/wg CLI
-        warn!("wg binary not found or non-root environment; generating software WireGuard keypair");
+        // Software keypair generation fallback using CSPRNG
+        warn!("wg binary not found or non-root environment; generating software WireGuard keypair with CSPRNG");
+        use rand::RngCore;
         let mut priv_bytes = [0u8; 32];
-        for b in &mut priv_bytes {
-            *b = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() % 255) as u8;
-        }
+        let mut pub_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut priv_bytes);
+        rand::thread_rng().fill_bytes(&mut pub_bytes);
+
         use base64::Engine;
         let priv_key = base64::engine::general_purpose::STANDARD.encode(priv_bytes);
-        let pub_key = base64::engine::general_purpose::STANDARD.encode(&priv_bytes[..16]);
+        let pub_key = base64::engine::general_purpose::STANDARD.encode(pub_bytes);
         (priv_key, pub_key)
     }
 

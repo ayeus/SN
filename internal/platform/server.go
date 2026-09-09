@@ -5,6 +5,7 @@ package platform
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -30,11 +31,12 @@ type ServiceConfig struct {
 // Server is the base server that every AyeusANN service embeds.
 // It provides /healthz, /metrics, graceful shutdown, and structured logging.
 type Server struct {
-	Config  ServiceConfig
-	Logger  *zap.Logger
-	Mux     *http.ServeMux
-	httpSrv *http.Server
-	ready   atomic.Bool
+	Config     ServiceConfig
+	Logger     *zap.Logger
+	Mux        *http.ServeMux
+	httpSrv    *http.Server
+	ready      atomic.Bool
+	readyCheck func(context.Context) error
 }
 
 // NewServer creates a new platform server with health and metrics endpoints.
@@ -76,6 +78,7 @@ func NewServer(cfg ServiceConfig) (*Server, error) {
 
 	// Register standard endpoints
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	return s, nil
@@ -90,14 +93,39 @@ func (s *Server) SetReady() {
 
 // Run starts the HTTP server and blocks until a shutdown signal is received.
 // It performs graceful shutdown with a 15-second timeout.
+//
+// When TLS_CERT_FILE and TLS_KEY_FILE are set the server serves HTTPS with
+// TLS 1.2 as the floor. Plain HTTP is intended for local development and for
+// running behind a TLS-terminating ingress; production deployments should set
+// either the cert pair or SN_TLS_TERMINATED_BY_PROXY=true to acknowledge that
+// termination happens upstream.
 func (s *Server) Run() error {
+	certFile := os.Getenv("TLS_CERT_FILE")
+	keyFile := os.Getenv("TLS_KEY_FILE")
+	tlsEnabled := certFile != "" && keyFile != ""
+
+	if !tlsEnabled && IsProduction() && !EnvBool("SN_TLS_TERMINATED_BY_PROXY", false) {
+		return fmt.Errorf(
+			"platform: refusing to serve plaintext HTTP in production; set TLS_CERT_FILE and TLS_KEY_FILE, " +
+				"or set SN_TLS_TERMINATED_BY_PROXY=true if an ingress terminates TLS upstream")
+	}
+
 	s.httpSrv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.Config.Port),
 		Handler:           s.Mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      0, // 0 = no deadline; SSE streams outlive any fixed write timeout
 		IdleTimeout:       120 * time.Second,
+	}
+
+	if tlsEnabled {
+		s.httpSrv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			CurvePreferences: []tls.CurveID{
+				tls.X25519, tls.CurveP256,
+			},
+		}
 	}
 
 	// Channel for shutdown signals
@@ -112,8 +140,15 @@ func (s *Server) Run() error {
 			zap.String("service", s.Config.Name),
 			zap.String("version", s.Config.Version),
 			zap.Int("port", s.Config.Port),
+			zap.Bool("tls", tlsEnabled),
 		)
-		if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if tlsEnabled {
+			err = s.httpSrv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			err = s.httpSrv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()
@@ -171,10 +206,39 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// MustEnv reads an environment variable or returns a default value.
-func MustEnv(key, defaultVal string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+// handleReadyz reports whether the service is ready to receive traffic.
+// Kubernetes uses /healthz as a liveness probe and /readyz as a readiness probe;
+// they differ once a service has dependencies that can degrade independently.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if !s.ready.Load() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"not_ready"}`))
+		return
 	}
-	return defaultVal
+
+	if s.readyCheck != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if err := s.readyCheck(ctx); err != nil {
+			s.Logger.Warn("readiness check failed", zap.Error(err))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "not_ready",
+				"reason": err.Error(),
+			})
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// SetReadyCheck registers a dependency probe used by /readyz. Typically this
+// pings the database so that a service with a dead pool is pulled from rotation.
+func (s *Server) SetReadyCheck(fn func(context.Context) error) {
+	s.readyCheck = fn
 }

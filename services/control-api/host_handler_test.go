@@ -25,7 +25,11 @@ func TestHostManagementEndpoints(t *testing.T) {
 	}
 	defer dbClient.Close()
 
-	tm := auth.NewTokenManager(testJWTSecret, 15*time.Minute, 7*24*time.Hour)
+	tm, err := auth.NewTokenManager(testJWTSecret, 15*time.Minute, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewTokenManager error: %v", err)
+	}
+	revStore := auth.NewMemoryRevocationStore()
 	ledger := db.NewLedgerService(dbClient)
 
 	srv, err := platform.NewServer(platform.ServiceConfig{Name: "test-control-api", Version: "0.1.0", Port: 9999})
@@ -33,7 +37,7 @@ func TestHostManagementEndpoints(t *testing.T) {
 		t.Fatalf("NewServer error: %v", err)
 	}
 
-	authHandler := NewAuthHandler(dbClient, tm, ledger)
+	authHandler := NewAuthHandler(dbClient, tm, revStore, ledger)
 	hostHandler := NewHostHandler(dbClient, tm)
 
 	srv.Mux.HandleFunc("POST /v1/auth/signup", authHandler.HandleSignup)
@@ -84,7 +88,7 @@ func TestHostManagementEndpoints(t *testing.T) {
 
 	// Verify registration token can be decoded by TokenManager
 	t.Run("VerifyRegistrationToken", func(t *testing.T) {
-		claims, err := tm.VerifyToken(regToken)
+		claims, err := tm.VerifyRegistrationToken(regToken)
 		if err != nil {
 			t.Fatalf("Failed to verify issued registration token: %v", err)
 		}

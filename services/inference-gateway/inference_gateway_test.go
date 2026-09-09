@@ -6,7 +6,40 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func createMockRouteResponse(model, requestID, content string) *routeResponseBody {
+	resp := ChatCompletionResponse{
+		ID:                "chatcmpl-" + requestID[:12],
+		Object:            "chat.completion",
+		Created:           time.Now().Unix(),
+		Model:             model,
+		SystemFingerprint: "fp_test",
+		Choices: []Choice{
+			{
+				Index: 0,
+				Message: Message{
+					Role:    "assistant",
+					Content: content,
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: Usage{
+			PromptTokens:     10,
+			CompletionTokens: 20,
+			TotalTokens:      30,
+		},
+	}
+	respJSON, _ := json.Marshal(resp)
+	return &routeResponseBody{
+		ReplicaID:  "test-replica-1",
+		HostID:     "test-host-1",
+		StatusCode: http.StatusOK,
+		Body:       string(respJSON),
+	}
+}
 
 func TestHandleChatCompletions_MissingAPIKey(t *testing.T) {
 	handler := &InferenceHandler{
@@ -76,32 +109,21 @@ func TestHandleChatCompletions_CORS(t *testing.T) {
 	}
 }
 
-func TestSimulatedResponse(t *testing.T) {
+func TestWriteNonStreamResponse_ParsedJSON(t *testing.T) {
 	handler := &InferenceHandler{
 		httpClient: http.DefaultClient,
 	}
 
-	req := ChatCompletionRequest{
-		Model: "llama-3.1-8b-instruct",
-		Messages: []Message{
-			{Role: "user", Content: "What is AyeusANN?"},
-		},
+	routeResp := createMockRouteResponse("llama-3.1-8b-instruct", "test-request-id-1234567890", "Hello from worker!")
+	w := httptest.NewRecorder()
+	handler.writeNonStreamResponse(w, routeResp, "llama-3.1-8b-instruct", "test-request-id-1234567890")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	resp := handler.simulatedResponse(req, "test-request-id-1234567890")
-	if resp == nil {
-		t.Fatal("expected non-nil response")
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	if resp.ReplicaID != "sim-replica-dev" {
-		t.Fatalf("expected sim-replica-dev, got %s", resp.ReplicaID)
-	}
-
-	// Parse the body as ChatCompletionResponse
 	var chatResp ChatCompletionResponse
-	if err := json.Unmarshal([]byte(resp.Body), &chatResp); err != nil {
+	if err := json.Unmarshal(w.Body.Bytes(), &chatResp); err != nil {
 		t.Fatalf("failed to parse response body: %v", err)
 	}
 
@@ -111,14 +133,8 @@ func TestSimulatedResponse(t *testing.T) {
 	if len(chatResp.Choices) != 1 {
 		t.Fatalf("expected 1 choice, got %d", len(chatResp.Choices))
 	}
-	if chatResp.Choices[0].FinishReason != "stop" {
-		t.Fatalf("expected finish_reason=stop, got %s", chatResp.Choices[0].FinishReason)
-	}
-	if !strings.Contains(chatResp.Choices[0].Message.Content, "AyeusANN") {
-		t.Fatal("expected response to mention AyeusANN")
-	}
-	if chatResp.Usage.TotalTokens <= 0 {
-		t.Fatal("expected non-zero total tokens")
+	if chatResp.Choices[0].Message.Content != "Hello from worker!" {
+		t.Fatalf("unexpected content: %s", chatResp.Choices[0].Message.Content)
 	}
 }
 
@@ -127,7 +143,6 @@ func TestSSEStream_FormatValidation(t *testing.T) {
 		httpClient: http.DefaultClient,
 	}
 
-	// Create a simulated response
 	req := ChatCompletionRequest{
 		Model:  "llama-3.1-8b-instruct",
 		Stream: true,
@@ -136,7 +151,7 @@ func TestSSEStream_FormatValidation(t *testing.T) {
 		},
 	}
 
-	routeResp := handler.simulatedResponse(req, "stream-test-id-1234567890")
+	routeResp := createMockRouteResponse(req.Model, "stream-test-id-1234567890", "Hi there")
 
 	w := httptest.NewRecorder()
 	handler.writeSSEStream(w, routeResp, req.Model, "stream-test-id-1234567890")

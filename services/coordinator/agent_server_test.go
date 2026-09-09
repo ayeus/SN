@@ -33,7 +33,11 @@ func TestAgentServerRegistrationAndHeartbeat(t *testing.T) {
 	}
 	defer dbClient.Close()
 
-	tm := auth.NewTokenManager(testJWTSecret, 15*time.Minute, 7*24*time.Hour)
+	tm, err := auth.NewTokenManager(testJWTSecret, 15*time.Minute, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to create token manager: %v", err)
+	}
+	revStore := auth.NewMemoryRevocationStore()
 
 	// Create test user and registration token
 	userID := uuid.New().String()
@@ -48,7 +52,7 @@ func TestAgentServerRegistrationAndHeartbeat(t *testing.T) {
 		t.Fatalf("Failed to seed test user: %v", err)
 	}
 
-	regToken, _, err := tm.GeneratePair(userID, orgID, "host_installer")
+	regToken, err := tm.GenerateRegistrationToken(userID, orgID)
 	if err != nil {
 		t.Fatalf("Failed to generate registration token: %v", err)
 	}
@@ -61,7 +65,7 @@ func TestAgentServerRegistrationAndHeartbeat(t *testing.T) {
 	defer lis.Close()
 
 	grpcServer := grpc.NewServer()
-	agentServer := NewAgentServer(dbClient, tm)
+	agentServer := NewAgentServer(dbClient, tm, revStore)
 	agentv1.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	go func() {
@@ -86,7 +90,7 @@ func TestAgentServerRegistrationAndHeartbeat(t *testing.T) {
 	regMsg := &agentv1.AgentMessage{
 		Payload: &agentv1.AgentMessage_Register{
 			Register: &agentv1.RegisterRequest{
-				RegistrationToken:   regToken,
+				RegistrationToken:   regToken.Token,
 				Hostname:            "node-chennai-01",
 				Os:                  "Linux",
 				OsVersion:           "Ubuntu 24.04 LTS",

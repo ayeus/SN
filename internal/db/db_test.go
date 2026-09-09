@@ -11,6 +11,7 @@ import (
 	"github.com/ayeus/ayeusann/internal/crypto"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/domain"
+	"github.com/ayeus/ayeusann/internal/money"
 )
 
 func getTestDBURL() string {
@@ -187,36 +188,52 @@ func TestLedgerServiceTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBalance error: %v", err)
 	}
-	if bal != 0 {
-		t.Fatalf("Expected initial balance 0, got %f", bal)
+	if !bal.IsZero() {
+		t.Fatalf("Expected initial balance 0, got %s", bal.String())
 	}
 
 	// 2. Record Topup ($50 credit)
 	ref1 := uuid.New().String()
 	desc1 := "Initial Topup"
-	entry1, err := ledger.RecordTransaction(ctx, orgID, 50.00, domain.LedgerKindTopup, &ref1, &desc1, false)
+	entry1, err := ledger.RecordTransaction(ctx, db.TransactionRequest{
+		OrgID: orgID,
+		Delta: money.MustParse("50.00", "USD"),
+		Kind:  domain.LedgerKindTopup,
+		RefID: &ref1,
+		Description: &desc1,
+	})
 	if err != nil {
 		t.Fatalf("RecordTransaction topup error: %v", err)
 	}
 
-	if entry1.BalanceAfter != 50.00 {
-		t.Fatalf("Expected balance_after 50.00, got %f", entry1.BalanceAfter)
+	if entry1.BalanceAfter != money.MustParse("50.00", "USD") {
+		t.Fatalf("Expected balance_after 50.00, got %s", entry1.BalanceAfter.String())
 	}
 
 	// 3. Record Debit ($15)
 	ref2 := uuid.New().String()
 	desc2 := "Inference Usage"
-	entry2, err := ledger.RecordTransaction(ctx, orgID, -15.00, domain.LedgerKindDebit, &ref2, &desc2, false)
+	entry2, err := ledger.RecordTransaction(ctx, db.TransactionRequest{
+		OrgID: orgID,
+		Delta: money.MustParse("-15.00", "USD"),
+		Kind:  domain.LedgerKindDebit,
+		RefID: &ref2,
+		Description: &desc2,
+	})
 	if err != nil {
 		t.Fatalf("RecordTransaction debit error: %v", err)
 	}
 
-	if entry2.BalanceAfter != 35.00 {
-		t.Fatalf("Expected balance_after 35.00, got %f", entry2.BalanceAfter)
+	if entry2.BalanceAfter != money.MustParse("35.00", "USD") {
+		t.Fatalf("Expected balance_after 35.00, got %s", entry2.BalanceAfter.String())
 	}
 
 	// 4. Record Excessive Debit ($40) when balance is $35 -> Should fail with ErrInsufficientBalance
-	_, err = ledger.RecordTransaction(ctx, orgID, -40.00, domain.LedgerKindDebit, nil, nil, false)
+	_, err = ledger.RecordTransaction(ctx, db.TransactionRequest{
+		OrgID: orgID,
+		Delta: money.MustParse("-40.00", "USD"),
+		Kind:  domain.LedgerKindDebit,
+	})
 	if err == nil || err != db.ErrInsufficientBalance {
 		t.Fatalf("Expected ErrInsufficientBalance, got %v", err)
 	}
@@ -226,7 +243,7 @@ func TestLedgerServiceTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBalance error: %v", err)
 	}
-	if balFinal != 35.00 {
-		t.Fatalf("Expected balance to remain 35.00, got %f", balFinal)
+	if balFinal != money.MustParse("35.00", "USD") {
+		t.Fatalf("Expected balance to remain 35.00, got %s", balFinal.String())
 	}
 }

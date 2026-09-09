@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"strconv"
 	"time"
 
 	agentv1 "github.com/ayeus/ayeusann/gen/go/agent/v1"
@@ -17,11 +16,22 @@ import (
 	"google.golang.org/grpc"
 )
 
+const devJWTSecret = "dev-only-insecure-jwt-signing-key-0001"
+
 func main() {
-	port, _ := strconv.Atoi(platform.MustEnv("COORDINATOR_PORT", "8083"))
-	grpcPort := platform.MustEnv("COORDINATOR_GRPC_PORT", "50051")
-	dbURL := platform.MustEnv("DATABASE_URL", "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable")
-	jwtSecret := platform.MustEnv("JWT_SECRET", "dev-secret-key-32-bytes-long-super-secure!")
+	port := platform.EnvInt("COORDINATOR_PORT", 8083)
+	grpcPort := platform.Env("COORDINATOR_GRPC_PORT", "50051")
+
+	dbURL, err := platform.RequireEnv("DATABASE_URL",
+		"postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable")
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+
+	jwtSecret, err := platform.RequireSecret("JWT_SECRET", devJWTSecret, 32)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -32,7 +42,11 @@ func main() {
 	}
 	defer dbClient.Close()
 
-	tm := auth.NewTokenManager(jwtSecret, 15*time.Minute, 7*24*time.Hour)
+	tm, err := auth.NewTokenManager(jwtSecret, 15*time.Minute, 7*24*time.Hour)
+	if err != nil {
+		log.Fatalf("failed to initialize token manager: %v", err)
+	}
+	revocations := auth.NewPGRevocationStore(dbClient.Pool)
 
 	// Start gRPC Server for Agent Sessions
 	lis, err := net.Listen("tcp", ":"+grpcPort)
@@ -41,7 +55,7 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer()
-	agentServer := NewAgentServer(dbClient, tm)
+	agentServer := NewAgentServer(dbClient, tm, revocations)
 	agentv1.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	go func() {

@@ -21,15 +21,17 @@ type AgentServer struct {
 	agentv1.UnimplementedAgentServiceServer
 	db         *db.Client
 	tm         *auth.TokenManager
+	revocations auth.RevocationStore
 	ipCounter  uint32
 	sessions   sync.Map
 }
 
-func NewAgentServer(database *db.Client, tm *auth.TokenManager) *AgentServer {
+func NewAgentServer(database *db.Client, tm *auth.TokenManager, revocations auth.RevocationStore) *AgentServer {
 	return &AgentServer{
-		db:        database,
-		tm:        tm,
-		ipCounter: 10, // Starts at 10.200.0.10
+		db:          database,
+		tm:          tm,
+		revocations: revocations,
+		ipCounter:   10, // Starts at 10.200.0.10
 	}
 }
 
@@ -47,8 +49,9 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 		return status.Error(codes.InvalidArgument, "first message in session MUST be RegisterRequest")
 	}
 
-	// 2. Verify registration token
-	claims, err := s.tm.VerifyToken(regReq.RegistrationToken)
+	// 2. Verify registration token — requires audience=AudienceRegistration and
+	// role=host_installer so a normal access token or refresh token is rejected.
+	claims, err := s.tm.VerifyRegistrationToken(regReq.RegistrationToken)
 	if err != nil {
 		_ = stream.Send(&agentv1.CoordinatorMessage{
 			Payload: &agentv1.CoordinatorMessage_RegisterResponse{
@@ -59,6 +62,25 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 			},
 		})
 		return status.Error(codes.Unauthenticated, "invalid registration token")
+	}
+
+	// 3. Consume the token so it cannot be reused. The revocation store's
+	// unique constraint on jti makes this atomic under concurrency.
+	if s.revocations != nil {
+		if err := s.revocations.Consume(ctx, claims.TokenID(), claims.ExpiresAt.Time); err != nil {
+			if errors.Is(err, auth.ErrTokenAlreadyUsed) {
+				_ = stream.Send(&agentv1.CoordinatorMessage{
+					Payload: &agentv1.CoordinatorMessage_RegisterResponse{
+						RegisterResponse: &agentv1.RegisterResponse{
+							Accepted:        false,
+							RejectionReason: "Registration token has already been used",
+						},
+					},
+				})
+				return status.Error(codes.Unauthenticated, "registration token already consumed")
+			}
+			return status.Errorf(codes.Internal, "failed to consume registration token: %v", err)
+		}
 	}
 
 	// Determine host tier based on GPUs: >=24GB VRAM = T1/T2, else T3
@@ -79,17 +101,19 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 		region = domain.RegionInSouth
 	}
 
-	// 3. Save Host and GPUs to Database
+	// 4. Save Host and GPUs to Database.
+	// Upsert by hw_fingerprint so a reconnecting agent updates its record
+	// rather than creating a duplicate row every time.
 	var hostID string
 	err = s.db.ExecTx(ctx, func(tx pgx.Tx) error {
-		// Upsert Host
 		hostQuery := `
 			INSERT INTO hosts (user_id, name, hostname, tier, region, overlay_ip, kyc_status, reputation, status, hw_fingerprint, agent_version, last_heartbeat_at)
-			VALUES ($1, $2, $3, $4, $5, $6, 'verified', 50, 'active', $7, $8, NOW())
-			ON CONFLICT (id) DO UPDATE SET
+			VALUES ($1, $2, $3, $4, $5, $6, 'pending', 50, 'registered', $7, $8, NOW())
+			ON CONFLICT (hw_fingerprint) WHERE hw_fingerprint IS NOT NULL DO UPDATE SET
 				status = 'active',
 				agent_version = EXCLUDED.agent_version,
-				last_heartbeat_at = NOW()
+				last_heartbeat_at = NOW(),
+				overlay_ip = EXCLUDED.overlay_ip
 			RETURNING id;
 		`
 		err := tx.QueryRow(ctx, hostQuery,
@@ -100,11 +124,17 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 			return fmt.Errorf("failed to register host in DB: %w", err)
 		}
 
-		// Upsert GPUs
+		// Upsert GPUs — deduplicate on (host_id, uuid)
 		gpuQuery := `
 			INSERT INTO gpus (host_id, model, vram_gb, driver_version, cuda_version, uuid, fingerprint, status)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, 'available')
-			ON CONFLICT DO NOTHING;
+			ON CONFLICT (host_id, uuid) DO UPDATE SET
+				model = EXCLUDED.model,
+				vram_gb = EXCLUDED.vram_gb,
+				driver_version = EXCLUDED.driver_version,
+				cuda_version = EXCLUDED.cuda_version,
+				fingerprint = EXCLUDED.fingerprint,
+				status = 'available';
 		`
 		for _, gpu := range regReq.Gpus {
 			_, err := tx.Exec(ctx, gpuQuery,
@@ -131,7 +161,7 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 		return status.Errorf(codes.Internal, "database registration error: %v", err)
 	}
 
-	// 4. Send RegisterResponse Success
+	// 5. Send RegisterResponse Success
 	wgPub := regReq.WgPublicKey
 	if wgPub == "" {
 		wgPub = "wg_pub_key_default"
@@ -155,7 +185,7 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 	s.sessions.Store(hostID, stream)
 	defer s.sessions.Delete(hostID)
 
-	// 5. Handle ongoing heartbeat stream
+	// 6. Handle ongoing heartbeat stream
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -176,3 +206,4 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 func parseIP(ipStr string) net.IP {
 	return net.ParseIP(ipStr)
 }
+

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ayeus/ayeusann/internal/auth"
 	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/ayeus/ayeusann/internal/platform"
 )
 
@@ -34,7 +35,11 @@ func TestSignupLoginAndAPIKeyFlow(t *testing.T) {
 	}
 	defer dbClient.Close()
 
-	tm := auth.NewTokenManager(testJWTSecret, 15*time.Minute, 7*24*time.Hour)
+	tm, err := auth.NewTokenManager(testJWTSecret, 15*time.Minute, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewTokenManager error: %v", err)
+	}
+	revStore := auth.NewMemoryRevocationStore()
 	ledger := db.NewLedgerService(dbClient)
 
 	// Create test server mux
@@ -43,7 +48,7 @@ func TestSignupLoginAndAPIKeyFlow(t *testing.T) {
 		t.Fatalf("NewServer error: %v", err)
 	}
 
-	authHandler := NewAuthHandler(dbClient, tm, ledger)
+	authHandler := NewAuthHandler(dbClient, tm, revStore, ledger)
 
 	srv.Mux.HandleFunc("POST /v1/auth/signup", authHandler.HandleSignup)
 	srv.Mux.HandleFunc("POST /v1/auth/login", authHandler.HandleLogin)
@@ -85,8 +90,8 @@ func TestSignupLoginAndAPIKeyFlow(t *testing.T) {
 		orgMap := res["organization"].(map[string]interface{})
 		orgID := orgMap["id"].(string)
 		bal, err := ledger.GetBalance(ctx, orgID)
-		if err != nil || bal != 50.00 {
-			t.Fatalf("Expected signup credit balance 50.00, got %f (err: %v)", bal, err)
+		if err != nil || bal != money.MustParse("50.00", "USD") {
+			t.Fatalf("Expected signup credit balance 50.00, got %s (err: %v)", bal.String(), err)
 		}
 	})
 

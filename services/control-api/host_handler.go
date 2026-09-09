@@ -35,16 +35,16 @@ func (h *HostHandler) HandleIssueRegistrationToken(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Issue a special registration JWT token valid for 24 hours
-	regToken, _, err := h.tm.GeneratePair(claims.UserID, claims.OrgID, "host_installer")
+	// Issue a single-use registration JWT token valid for 24 hours.
+	regTok, err := h.tm.GenerateRegistrationToken(claims.UserID, claims.OrgID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to issue registration token")
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, IssueTokenResponse{
-		RegistrationToken: regToken,
-		ExpiresAt:         time.Now().Add(24 * time.Hour),
+		RegistrationToken: regTok.Token,
+		ExpiresAt:         regTok.ExpiresAt,
 	})
 }
 

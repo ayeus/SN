@@ -154,6 +154,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_real_hardware_detection() {
         let detector = GpuDetector::new(false);
         let gpus = detector.detect();

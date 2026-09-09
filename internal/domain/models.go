@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net"
 	"time"
+
+	"github.com/ayeus/ayeusann/internal/money"
 )
 
 // Role constants
@@ -21,11 +23,45 @@ const (
 	TierT3 = "t3" // Personal Laptops (Best-effort / Spot)
 )
 
-// Region constants
+// Region constants. These mirror the regions table, which replaced the two-value
+// CHECK constraint that made the platform India-only at the schema level.
 const (
-	RegionInSouth = "IN-SOUTH" // Chennai primary
-	RegionInWest  = "IN-WEST"  // Mumbai secondary
+	RegionInSouth     = "IN-SOUTH"     // Chennai
+	RegionInWest      = "IN-WEST"      // Mumbai
+	RegionUSEast      = "US-EAST"      // N. Virginia
+	RegionUSWest      = "US-WEST"      // Oregon
+	RegionEUWest      = "EU-WEST"      // Ireland
+	RegionEUCentral   = "EU-CENTRAL"   // Frankfurt
+	RegionUKSouth     = "UK-SOUTH"     // London
+	RegionAPSouth     = "AP-SOUTH"     // Singapore
+	RegionAPNortheast = "AP-NORTHEAST" // Tokyo
+	RegionAPSoutheast = "AP-SOUTHEAST" // Sydney
+	RegionSAEast      = "SA-EAST"      // São Paulo
+	RegionCACentral   = "CA-CENTRAL"   // Toronto
+	RegionMECentral   = "ME-CENTRAL"   // Dubai
+	RegionAFSouth     = "AF-SOUTH"     // Cape Town
 )
+
+// AllRegions is the set of region codes seeded in the regions table.
+var AllRegions = []string{
+	RegionInSouth, RegionInWest,
+	RegionUSEast, RegionUSWest,
+	RegionEUWest, RegionEUCentral, RegionUKSouth,
+	RegionAPSouth, RegionAPNortheast, RegionAPSoutheast,
+	RegionSAEast, RegionCACentral, RegionMECentral, RegionAFSouth,
+}
+
+// IsValidRegion reports whether a region code is one the platform knows about.
+// The database enforces this too, via a foreign key to regions(code); this is
+// for rejecting bad input before a round trip.
+func IsValidRegion(code string) bool {
+	for _, r := range AllRegions {
+		if r == code {
+			return true
+		}
+	}
+	return false
+}
 
 // Deployment states
 const (
@@ -73,14 +109,14 @@ type PriceBook struct {
 }
 
 type PriceBookEntry struct {
-	ID             string   `json:"id"`
-	PriceBookID    string   `json:"price_book_id"`
-	GpuModel       string   `json:"gpu_model"`
-	Tier           string   `json:"tier"`
-	PricePerHour   float64  `json:"price_per_hour"`
-	PriceInPer1M   *float64 `json:"price_in_per_1m,omitempty"`
-	PriceOutPer1M  *float64 `json:"price_out_per_1m,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID            string        `json:"id"`
+	PriceBookID   string        `json:"price_book_id"`
+	GpuModel      string        `json:"gpu_model"`
+	Tier          string        `json:"tier"`
+	PricePerHour  money.Amount  `json:"price_per_hour"`
+	PriceInPer1M  *money.Amount `json:"price_in_per_1m,omitempty"`
+	PriceOutPer1M *money.Amount `json:"price_out_per_1m,omitempty"`
+	CreatedAt     time.Time     `json:"created_at"`
 }
 
 // ─── 2. User ──────────────────────────────────────────────────
@@ -101,14 +137,46 @@ type User struct {
 // ─── 3. Organization ──────────────────────────────────────────
 
 type Organization struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	GstinEnc      []byte     `json:"-"` // Column-encrypted
-	DefaultRegion string     `json:"default_region"`
-	PriceBookID   *string    `json:"price_book_id,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-	DeletedAt     *time.Time `json:"deleted_at,omitempty"`
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	GstinEnc      []byte  `json:"-"` // Column-encrypted
+	TaxIDEnc      []byte  `json:"-"` // Column-encrypted VAT/GST number
+	DefaultRegion string  `json:"default_region"`
+	PriceBookID   *string `json:"price_book_id,omitempty"`
+	// BillingCountry is ISO 3166-1 alpha-2 and drives tax treatment.
+	BillingCountry *string    `json:"billing_country,omitempty"`
+	Currency       string     `json:"currency"`
+	IsBusiness     bool       `json:"is_business"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
+}
+
+// ─── 3b. Region & TaxJurisdiction ─────────────────────────────
+
+type Region struct {
+	Code        string    `json:"code"`
+	DisplayName string    `json:"display_name"`
+	CountryCode string    `json:"country_code"`
+	Continent   string    `json:"continent"`
+	Active      bool      `json:"active"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// TaxJurisdiction describes the indirect tax applied to a customer's invoices.
+// v1 hardcoded an 18% Indian GST on every invoice regardless of where the
+// customer was, which is wrong everywhere except India.
+type TaxJurisdiction struct {
+	CountryCode string `json:"country_code"`
+	TaxName     string `json:"tax_name"`
+	// Rate is a decimal string, e.g. "0.18". It is not a float because it is
+	// multiplied into invoice totals.
+	Rate money.Amount `json:"rate"`
+	// ReverseChargeEligible marks jurisdictions where a VAT-registered business
+	// customer accounts for the tax itself and is not charged.
+	ReverseChargeEligible bool      `json:"reverse_charge_eligible"`
+	Notes                 *string   `json:"notes,omitempty"`
+	EffectiveFrom         time.Time `json:"effective_from"`
 }
 
 // ─── 4. Membership ────────────────────────────────────────────
@@ -140,20 +208,22 @@ type ApiKey struct {
 // ─── 6. Model & ModelArtifact ─────────────────────────────────
 
 type Model struct {
-	ID                 string          `json:"id"`
-	Name               string          `json:"name"`
-	Family             string          `json:"family"`
-	ParamsB            float32         `json:"params_b"`
-	License            string          `json:"license"`
-	MinVramGB          int             `json:"min_vram_gb"`
-	TiersAllowed       []string        `json:"tiers_allowed"`
-	PriceInPer1M       float64         `json:"price_in_per_1m"`
-	PriceOutPer1M      float64         `json:"price_out_per_1m"`
-	PricePerHourINR    *float64        `json:"price_per_hour_inr,omitempty"`
-	IsBYO              bool            `json:"is_byo"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Family       string   `json:"family"`
+	ParamsB      float32  `json:"params_b"`
+	License      string   `json:"license"`
+	MinVramGB    int      `json:"min_vram_gb"`
+	TiersAllowed []string `json:"tiers_allowed"`
+	// Prices are per 1M tokens in USD, held as exact decimals because they are
+	// multiplied by token counts to produce charges.
+	PriceInPer1M        money.Amount    `json:"price_in_per_1m"`
+	PriceOutPer1M       money.Amount    `json:"price_out_per_1m"`
+	PricePerHourINR     *money.Amount   `json:"price_per_hour_inr,omitempty"`
+	IsBYO               bool            `json:"is_byo"`
 	QuantizationPresets json.RawMessage `json:"quantization_presets"`
-	CreatedAt          time.Time       `json:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
 type ModelArtifact struct {
@@ -273,65 +343,79 @@ type Replica struct {
 // ─── 10. UsageEvent (Partitioned, Append-Only) ────────────────
 
 type UsageEvent struct {
-	RequestID      string    `json:"request_id"` // Idempotency Key (UUID)
-	DeploymentID   string    `json:"deployment_id"`
-	ReplicaID      string    `json:"replica_id"`
-	HostID         string    `json:"host_id"`
-	InputTokens    int       `json:"input_tokens"`
-	OutputTokens   int       `json:"output_tokens"`
-	GpuSeconds     float64   `json:"gpu_seconds"`
-	Tier           string    `json:"tier"`
-	AmountCustomer float64   `json:"amount_customer"` // USD charged to customer
-	AmountHost     float64   `json:"amount_host"`     // USD accrued to host (75%)
-	Timestamp      time.Time `json:"ts"`
-	Status         string    `json:"status"`
+	RequestID    string `json:"request_id"` // Idempotency Key (UUID)
+	DeploymentID string `json:"deployment_id"`
+	ReplicaID    string `json:"replica_id"`
+	HostID       string `json:"host_id"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	// GpuSeconds is a measurement, not currency, so a float is fine here.
+	GpuSeconds float64 `json:"gpu_seconds"`
+	Tier       string  `json:"tier"`
+	// AmountCustomer and AmountHost are exact decimals. They were float64, which
+	// drifts under accumulation and cannot be reconciled against the ledger.
+	AmountCustomer money.Amount `json:"amount_customer"`
+	AmountHost     money.Amount `json:"amount_host"`
+	Timestamp      time.Time    `json:"ts"`
+	Status         string       `json:"status"`
 }
 
 // ─── 11. Billing: WalletLedger, Invoice, PayoutBatch ──────────
 
 type WalletLedger struct {
-	EntryID      string    `json:"entry_id"`
-	OrgID        string    `json:"org_id"`
-	Delta        float64   `json:"delta"`         // Positive = credit, negative = debit
-	BalanceAfter float64   `json:"balance_after"` // Running balance
-	Kind         string    `json:"kind"`          // topup|debit|credit|refund|signup_credit
-	RefID        *string   `json:"ref_id,omitempty"`
-	Description  *string   `json:"description,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
+	EntryID      string       `json:"entry_id"`
+	OrgID        string       `json:"org_id"`
+	Delta        money.Amount `json:"delta"`         // Positive = credit, negative = debit
+	BalanceAfter money.Amount `json:"balance_after"` // Running balance
+	Kind         string       `json:"kind"`          // topup|debit|credit|refund|signup_credit
+	RefID        *string      `json:"ref_id,omitempty"`
+	Description  *string      `json:"description,omitempty"`
+	Currency     string       `json:"currency"`
+	CreatedAt    time.Time    `json:"created_at"`
 }
 
 type Invoice struct {
-	ID          string        `json:"id"`
-	OrgID       string        `json:"org_id"`
-	Number      string        `json:"number"`
-	PeriodStart time.Time     `json:"period_start"`
-	PeriodEnd   time.Time     `json:"period_end"`
-	Subtotal    float64       `json:"subtotal"`
-	GstAmount   float64       `json:"gst_amount"`
-	Total       float64       `json:"total"`
-	Status      string        `json:"status"`
-	PdfURL      *string       `json:"pdf_url,omitempty"`
-	Lines       []InvoiceLine `json:"lines,omitempty"`
-	CreatedAt   time.Time     `json:"created_at"`
+	ID          string       `json:"id"`
+	OrgID       string       `json:"org_id"`
+	Number      string       `json:"number"`
+	PeriodStart time.Time    `json:"period_start"`
+	PeriodEnd   time.Time    `json:"period_end"`
+	Subtotal    money.Amount `json:"subtotal"`
+	// TaxAmount replaces GstAmount: the tax applied depends on the customer's
+	// jurisdiction, and is not always Indian GST.
+	TaxAmount money.Amount `json:"tax_amount"`
+	TaxName   string       `json:"tax_name"`  // GST | VAT | Sales Tax | ...
+	TaxRate   string       `json:"tax_rate"`  // decimal string, e.g. "0.18"
+	Total     money.Amount `json:"total"`
+	Currency  string       `json:"currency"`
+	// FxRate is the USD -> Currency rate recorded at invoice time, so a
+	// historical invoice always reproduces the same numbers.
+	FxRate        string        `json:"fx_rate"`
+	TaxCountry    *string       `json:"tax_country,omitempty"`
+	ReverseCharge bool          `json:"reverse_charge"`
+	Status        string        `json:"status"`
+	PdfURL        *string       `json:"pdf_url,omitempty"`
+	Lines         []InvoiceLine `json:"lines,omitempty"`
+	CreatedAt     time.Time     `json:"created_at"`
 }
 
 type InvoiceLine struct {
-	ID          string    `json:"id"`
-	InvoiceID   string    `json:"invoice_id"`
-	Description string    `json:"description"`
-	Quantity    float64   `json:"quantity"`
-	UnitPrice   float64   `json:"unit_price"`
-	Amount      float64   `json:"amount"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string       `json:"id"`
+	InvoiceID   string       `json:"invoice_id"`
+	Description string       `json:"description"`
+	Quantity    float64      `json:"quantity"`
+	UnitPrice   money.Amount `json:"unit_price"`
+	Amount      money.Amount `json:"amount"`
+	CreatedAt   time.Time    `json:"created_at"`
 }
 
 type PayoutBatch struct {
 	ID        string       `json:"id"`
 	WeekStart time.Time    `json:"week_start"`
 	WeekEnd   time.Time    `json:"week_end"`
-	Gross     float64      `json:"gross"`
-	Tds       float64      `json:"tds"` // TDS 1% under Section 194-O
-	Net       float64      `json:"net"`
+	Gross     money.Amount `json:"gross"`
+	Tds       money.Amount `json:"tds"` // TDS 1% under Section 194-O (India only)
+	Net       money.Amount `json:"net"`
 	RzpxRef   *string      `json:"rzpx_ref,omitempty"`
 	Status    string       `json:"status"`
 	Lines     []PayoutLine `json:"lines,omitempty"`
@@ -339,15 +423,15 @@ type PayoutBatch struct {
 }
 
 type PayoutLine struct {
-	ID             string    `json:"id"`
-	BatchID        string    `json:"batch_id"`
-	HostID         string    `json:"host_id"`
-	Gross          float64   `json:"gross"`
-	TdsAmount      float64   `json:"tds_amount"`
-	Net            float64   `json:"net"`
-	Status         string    `json:"status"`
-	RzpxTransferID *string   `json:"rzpx_transfer_id,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             string       `json:"id"`
+	BatchID        string       `json:"batch_id"`
+	HostID         string       `json:"host_id"`
+	Gross          money.Amount `json:"gross"`
+	TdsAmount      money.Amount `json:"tds_amount"`
+	Net            money.Amount `json:"net"`
+	Status         string       `json:"status"`
+	RzpxTransferID *string      `json:"rzpx_transfer_id,omitempty"`
+	CreatedAt      time.Time    `json:"created_at"`
 }
 
 type TaxDoc struct {

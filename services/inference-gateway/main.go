@@ -9,16 +9,29 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ayeus/ayeusann/internal/auth"
 	"github.com/ayeus/ayeusann/internal/config"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/platform"
 )
+
+const devServiceSecret = "dev-only-insecure-internal-service-key-0001"
 
 func main() {
 	port, _ := strconv.Atoi(platform.MustEnv("INFERENCE_GW_PORT", "8085"))
 	dbURL := platform.MustEnv("DATABASE_URL", "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable")
 	routerURL := platform.MustEnv("ROUTER_URL", "http://localhost:8084")
 	billingURL := platform.MustEnv("BILLING_URL", "http://localhost:8086")
+
+	serviceSecret, err := platform.RequireSecret("INTERNAL_SERVICE_SECRET", devServiceSecret, 32)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+
+	svcAuth, err := auth.NewServiceAuthenticator(serviceSecret, auth.ServiceInferenceGateway)
+	if err != nil {
+		log.Fatalf("failed to create service authenticator: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -43,7 +56,7 @@ func main() {
 		}
 	}
 
-	handler := NewInferenceHandler(dbClient, rateLimiter, routerURL, billingURL)
+	handler := NewInferenceHandler(dbClient, rateLimiter, routerURL, billingURL, svcAuth)
 
 	srv, err := platform.NewServer(platform.ServiceConfig{
 		Name:    "inference-gateway",

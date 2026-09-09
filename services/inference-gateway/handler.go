@@ -84,19 +84,21 @@ type APIKeyInfo struct {
 
 // InferenceHandler handles OpenAI-compatible inference requests.
 type InferenceHandler struct {
-	db           *db.Client
-	rateLimiter  *RateLimiter
-	routerURL    string
-	billingURL   string
-	httpClient   *http.Client
+	db          *db.Client
+	rateLimiter *RateLimiter
+	routerURL   string
+	billingURL  string
+	svcAuth     *auth.ServiceAuthenticator
+	httpClient  *http.Client
 }
 
-func NewInferenceHandler(database *db.Client, rl *RateLimiter, routerURL, billingURL string) *InferenceHandler {
+func NewInferenceHandler(database *db.Client, rl *RateLimiter, routerURL, billingURL string, svcAuth *auth.ServiceAuthenticator) *InferenceHandler {
 	return &InferenceHandler{
 		db:          database,
 		rateLimiter: rl,
 		routerURL:   routerURL,
 		billingURL:  billingURL,
+		svcAuth:     svcAuth,
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -173,8 +175,9 @@ func (h *InferenceHandler) HandleChatCompletions(w http.ResponseWriter, r *http.
 	// 7. Route to a replica via the Router service
 	routeResp, err := h.routeRequest(r.Context(), req, apiKey.OrgID, requestID)
 	if err != nil {
-		// Fallback to simulated response in dev mode
-		routeResp = h.simulatedResponse(req, requestID)
+		writeGatewayError(w, http.StatusBadGateway, "routing_error",
+			fmt.Sprintf("Failed to route request to GPU replica: %v", err))
+		return
 	}
 
 	// 8. Respond to client
@@ -383,6 +386,9 @@ func (h *InferenceHandler) routeRequest(ctx context.Context, req ChatCompletionR
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Request-ID", requestID)
+	if h.svcAuth != nil {
+		h.svcAuth.SignRequest(httpReq)
+	}
 
 	resp, err := h.httpClient.Do(httpReq)
 	if err != nil {
@@ -402,55 +408,6 @@ func (h *InferenceHandler) routeRequest(ctx context.Context, req ChatCompletionR
 	}
 
 	return &routeResp, nil
-}
-
-// ─── Simulated Response (Dev Mode) ────────────────────────────
-
-func (h *InferenceHandler) simulatedResponse(req ChatCompletionRequest, requestID string) *routeResponseBody {
-	userPrompt := "Hello"
-	if len(req.Messages) > 0 {
-		userPrompt = req.Messages[len(req.Messages)-1].Content
-	}
-
-	aiContent := fmt.Sprintf(
-		"Greetings from AyeusANN! Your prompt %q was computed remotely on distributed GPU infrastructure. "+
-			"AyeusANN processed your request across cities using the %s model with ultra-low latency!",
-		userPrompt, req.Model,
-	)
-
-	promptTokens := len(userPrompt)/4 + 5
-	completionTokens := len(aiContent)/4 + 10
-
-	resp := ChatCompletionResponse{
-		ID:                "chatcmpl-" + requestID[:12],
-		Object:            "chat.completion",
-		Created:           time.Now().Unix(),
-		Model:             req.Model,
-		SystemFingerprint: "fp_AyeusANN_gpu",
-		Choices: []Choice{
-			{
-				Index: 0,
-				Message: Message{
-					Role:    "assistant",
-					Content: aiContent,
-				},
-				FinishReason: "stop",
-			},
-		},
-		Usage: Usage{
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			TotalTokens:      promptTokens + completionTokens,
-		},
-	}
-
-	respJSON, _ := json.Marshal(resp)
-	return &routeResponseBody{
-		ReplicaID:  "sim-replica-dev",
-		HostID:     "sim-host-dev",
-		StatusCode: http.StatusOK,
-		Body:       string(respJSON),
-	}
 }
 
 // ─── Response Writers ─────────────────────────────────────────
@@ -636,11 +593,18 @@ func (h *InferenceHandler) emitUsageEvent(requestID string, routeResp *routeResp
 	body, _ := json.Marshal(payload)
 	url := h.billingURL + "/v1/usage"
 
+	if routeResp == nil || routeResp.ReplicaID == "" || routeResp.HostID == "" {
+		return
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if h.svcAuth != nil {
+		h.svcAuth.SignRequest(httpReq)
+	}
 
 	resp, err := h.httpClient.Do(httpReq)
 	if err != nil {

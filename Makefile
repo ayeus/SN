@@ -47,7 +47,7 @@ dev: dev-infra migrate seed dev-services ## Start full development environment
 dev-infra: ## Start infrastructure (PG, Redis, NATS, MinIO)
 	docker compose -f $(COMPOSE_FILE) up -d
 	@echo "Waiting for Postgres to be ready..."
-	@until docker exec sn-postgres pg_isready -U AyeusANN > /dev/null 2>&1; do sleep 1; done
+	@until docker exec ann-postgres pg_isready -U ayeusann > /dev/null 2>&1; do sleep 1; done
 	@echo "Infrastructure ready."
 
 dev-services: ## Start all Go services in background
@@ -129,7 +129,7 @@ migrate-force: ## Force migration version (use: make migrate-force V=1)
 seed: ## Seed the database with initial data
 	@for f in schema/seeds/*.sql; do \
 		echo "Seeding: $$f"; \
-		docker exec -i sn-postgres psql -U AyeusANN -d AyeusANN < "$$f" 2>/dev/null || true; \
+		docker exec -i ann-postgres psql -U ayeusann -d ayeusann < "$$f" 2>/dev/null || true; \
 	done
 
 # ─── Protobuf ─────────────────────────────────────────────────

@@ -10,13 +10,26 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ayeus/ayeusann/internal/auth"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/platform"
 )
 
+const devServiceSecret = "dev-only-insecure-internal-service-key-0001"
+
 func main() {
 	port, _ := strconv.Atoi(platform.MustEnv("ROUTER_PORT", "8084"))
 	dbURL := platform.MustEnv("DATABASE_URL", "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable")
+
+	serviceSecret, err := platform.RequireSecret("INTERNAL_SERVICE_SECRET", devServiceSecret, 32)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+
+	svcAuth, err := auth.NewServiceAuthenticator(serviceSecret, auth.ServiceRouter)
+	if err != nil {
+		log.Fatalf("failed to create service authenticator: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -51,8 +64,8 @@ func main() {
 		log.Fatalf("failed to create server: %v", err)
 	}
 
-	// POST /v1/route — Route an inference request to the best replica
-	srv.Mux.HandleFunc("POST /v1/route", func(w http.ResponseWriter, r *http.Request) {
+	// POST /v1/route — Route an inference request to the best replica (internal only: inference-gateway)
+	routeHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req RouteRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeRouterError(w, http.StatusBadRequest, "Invalid request body")
@@ -78,6 +91,7 @@ func main() {
 		w.WriteHeader(resp.StatusCode)
 		_ = json.NewEncoder(w).Encode(resp)
 	})
+	srv.Mux.Handle("POST /v1/route", svcAuth.RequireInternalService(auth.ServiceInferenceGateway)(routeHandler))
 
 	// GET /v1/replicas?deployment_id=... — List serving replicas for a deployment
 	srv.Mux.HandleFunc("GET /v1/replicas", func(w http.ResponseWriter, r *http.Request) {
