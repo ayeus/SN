@@ -1,419 +1,304 @@
 mod benchmark;
 mod gpu;
+mod inference;
+mod manifest;
 mod network;
+mod runtime;
+mod session;
+mod state;
+mod telemetry;
 
 pub mod proto {
-    tonic::include_proto!("ayeus_ann.agent.v1");
+    tonic::include_proto!("ayeusann.agent.v1");
 }
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use benchmark::BenchmarkSuite;
 use clap::Parser;
 use gpu::GpuDetector;
 use network::MeshManager;
-use proto::agent_service_client::AgentServiceClient;
-use proto::{
-    agent_message, coordinator_message, AgentMessage, GpuInfo as ProtoGpuInfo, Heartbeat,
-    RegisterRequest,
-};
+use session::{HostFacts, Outcome, Session, Shared};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// AyeusANN Host Agent
-///
-/// Manages GPU resources, executes workloads in isolation, and reports
-/// health/usage to the AyeusANN coordinator.
+/// NVIDIA driver floor (PRD F-11: "NVIDIA R535+ enforced").
+const MIN_NVIDIA_DRIVER: u32 = 535;
+
+/// AyeusANN host agent: connects this machine's GPU to the network.
 #[derive(Parser, Debug)]
 #[command(name = "ayeusann-agent", version, about)]
 struct Args {
-    /// Registration token (one-time, from host console)
+    /// One-time registration token from the host console. Only needed for the
+    /// first run; afterwards the agent reconnects with its stored credential.
     #[arg(long, env = "SN_REGISTRATION_TOKEN")]
     token: Option<String>,
 
-    /// Coordinator endpoint (gRPC)
+    /// Coordinator gRPC endpoint.
     #[arg(
-        long,
+        long = "coordinator",
+        visible_alias = "coordinator-url",
         env = "SN_COORDINATOR_URL",
         default_value = "http://127.0.0.1:50051"
     )]
-    coordinator_url: String,
+    coordinator: String,
 
-    /// Agent data directory
-    #[arg(long, env = "SN_DATA_DIR", default_value = "/var/lib/ayeusann")]
-    data_dir: String,
+    /// Region this machine is in (e.g. IN-SOUTH).
+    #[arg(long, env = "SN_REGION", default_value = "IN-SOUTH")]
+    region: String,
 
-    /// Heartbeat interval in seconds
+    /// Model runtime to drive: ollama or vllm.
+    #[arg(long, env = "SN_RUNTIME", default_value = "ollama")]
+    runtime: String,
+
+    /// Runtime base URL (default: the runtime's standard local port).
+    #[arg(long, env = "SN_RUNTIME_URL")]
+    runtime_url: Option<String>,
+
+    /// Where the host credential is stored (default: ~/.ayeusann).
+    #[arg(long, env = "SN_DATA_DIR")]
+    data_dir: Option<PathBuf>,
+
+    /// Heartbeat interval in seconds (SRS FR-40: 5 s).
     #[arg(long, env = "SN_HEARTBEAT_INTERVAL", default_value = "5")]
     heartbeat_interval: u64,
 
-    /// Enable fake GPU mode for development
+    /// Development only: report a simulated RTX 4090 instead of real hardware.
     #[arg(long, env = "SN_FAKE_GPU", default_value = "false")]
     fake_gpu: bool,
+
+    /// Development only: run several agents on one machine as distinct hosts.
+    #[arg(long, env = "SN_INSTANCE", hide = true)]
+    instance: Option<String>,
+
+    /// Forget the stored credential and enrol again with --token.
+    #[arg(long)]
+    reset: bool,
 }
 
-fn get_hostname() -> String {
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return h;
-        }
-    }
-    if let Ok(out) = std::process::Command::new("hostname").output() {
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !s.is_empty() {
-            return s;
-        }
-    }
-    "ayeusann-host-node".to_string()
+fn command_output(cmd: &str, args: &[&str]) -> String {
+    std::process::Command::new(cmd)
+        .args(args)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
-fn get_os_name() -> String {
+fn hostname() -> String {
+    let h = command_output("hostname", &[]);
+    if h.is_empty() {
+        "ayeusann-host".into()
+    } else {
+        h
+    }
+}
+
+fn os_name() -> String {
     match std::env::consts::OS {
-        "macos" => "macOS".to_string(),
-        "linux" => "Linux".to_string(),
-        "windows" => "Windows".to_string(),
-        other => other.to_string(),
+        "macos" => "macOS".into(),
+        "linux" => "Linux".into(),
+        "windows" => "Windows".into(),
+        o => o.into(),
     }
 }
 
-fn get_os_version() -> String {
-    if cfg!(target_os = "macos") {
-        if let Ok(out) = std::process::Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-        {
-            let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !ver.is_empty() {
-                return format!("macOS {}", ver);
+/// A stable identity for this machine. Two agents on one machine are the same
+/// host unless --instance says otherwise (development only).
+fn fingerprint(gpus: &[gpu::GpuInfo], fake: bool, instance: Option<&str>) -> String {
+    let base = if let (false, Some(g)) = (fake, gpus.first()) {
+        format!("host:{}", g.fingerprint)
+    } else if let Ok(id) = std::fs::read_to_string("/etc/machine-id") {
+        format!("machine:{}", id.trim())
+    } else {
+        format!("hostname:{}", hostname())
+    };
+    let salted = match (fake, instance) {
+        (_, Some(i)) => format!("{base}|instance:{i}|fake:{fake}"),
+        (true, None) => format!("{base}|fake"),
+        (false, None) => base,
+    };
+    gpu::sha256_hex(salted.as_bytes())
+}
+
+/// Refuses configurations the platform will not accept, with a clear fix
+/// (SRS FR-50).
+fn preflight(gpus: &[gpu::GpuInfo]) -> Result<()> {
+    if gpus.is_empty() {
+        bail!("no supported GPU found. NVIDIA GPUs need the driver and nvidia-smi installed; Apple Silicon is detected automatically.");
+    }
+    for g in gpus {
+        if g.model.to_uppercase().contains("NVIDIA") {
+            let major: u32 = g
+                .driver_version
+                .split('.')
+                .next()
+                .and_then(|m| m.parse().ok())
+                .unwrap_or(0);
+            if major > 0 && major < MIN_NVIDIA_DRIVER {
+                bail!(
+                    "NVIDIA driver {} is too old; install R{MIN_NVIDIA_DRIVER} or newer (e.g. `sudo apt install nvidia-driver-550`).",
+                    g.driver_version
+                );
             }
         }
     }
-    if cfg!(target_os = "linux") {
-        if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
-            for line in content.lines() {
-                if let Some(stripped) = line.strip_prefix("PRETTY_NAME=") {
-                    return stripped.trim_matches('"').to_string();
-                }
-            }
-        }
-    }
-    std::env::consts::OS.to_string()
-}
-
-fn get_kernel() -> String {
-    if let Ok(out) = std::process::Command::new("uname").arg("-r").output() {
-        let k = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !k.is_empty() {
-            return k;
-        }
-    }
-    "unknown".to_string()
-}
-
-fn get_hardware_fingerprint(fake_gpu: bool, gpus: &[gpu::GpuInfo]) -> String {
-    if fake_gpu {
-        return "sha256:fake_host_hardware_fingerprint_01".to_string();
-    }
-    if !gpus.is_empty() && gpus[0].fingerprint.len() > 7 {
-        return format!("sha256:host-{}", &gpus[0].fingerprint[7..]);
-    }
-    if let Ok(id) = std::fs::read_to_string("/etc/machine-id") {
-        return format!("sha256:{}", id.trim());
-    }
-    format!("sha256:host-local-{}", get_hostname())
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize structured JSON logging
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
     fmt()
-        .json()
         .with_env_filter(filter)
-        .with_target(true)
-        .with_thread_ids(true)
+        .with_target(false)
+        .compact()
         .init();
 
     let args = Args::parse();
-
-    let mut coord_url = args.coordinator_url.clone();
-    if coord_url.ends_with(":8083") {
-        coord_url = coord_url.replace(":8083", ":50051");
+    let mut coordinator = args.coordinator.clone();
+    if coordinator.ends_with(":8083") {
+        // 8083 is the coordinator's HTTP port; agents speak gRPC on 50051.
+        coordinator = coordinator.replace(":8083", ":50051");
     }
 
-    info!(
-        service = "ayeusann-agent",
-        version = env!("CARGO_PKG_VERSION"),
-        coordinator_url = %coord_url,
-        fake_gpu = args.fake_gpu,
-        "starting AyeusANN host agent"
-    );
+    let mut data_dir = args.data_dir.clone().unwrap_or_else(|| {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".ayeusann")
+    });
+    if let Some(i) = &args.instance {
+        data_dir = data_dir.join(format!("instance-{i}"));
+    }
+    if args.reset {
+        state::clear(&data_dir);
+        info!("stored credential cleared");
+    }
 
+    let kind = runtime::Kind::parse(&args.runtime)?;
+    let runtime_url = args
+        .runtime_url
+        .clone()
+        .unwrap_or_else(|| kind.default_url().to_string());
+    let rt = runtime::Runtime::new(kind, &runtime_url)?;
+
+    info!(version = env!("CARGO_PKG_VERSION"), coordinator = %coordinator, runtime = kind.name(), "starting host agent");
     if args.fake_gpu {
-        warn!("running in FAKE GPU mode — no real GPU validation will occur");
+        warn!("FAKE GPU MODE: reporting simulated hardware. Development only.");
     }
 
-    // 1. Hardware GPU Detection
-    let detector = GpuDetector::new(args.fake_gpu);
-    let gpus = detector.detect();
+    let mut gpus = GpuDetector::new(args.fake_gpu).detect();
+    if let Some(i) = &args.instance {
+        for g in &mut gpus {
+            g.uuid = format!("{}-instance-{i}", g.uuid);
+        }
+    }
+    if let Err(e) = preflight(&gpus) {
+        error!("{e}");
+        std::process::exit(2);
+    }
+    for g in &gpus {
+        info!(model = %g.model, vram_gb = g.vram_gb, driver = %g.driver_version, "GPU detected");
+    }
 
-    info!(gpu_count = gpus.len(), "detected GPU inventory on host");
-
-    for gpu in &gpus {
-        info!(
-            model = %gpu.model,
-            vram_gb = gpu.vram_gb,
-            uuid = %gpu.uuid,
-            "registered GPU device"
+    if !rt.healthy().await {
+        warn!(
+            "{} is not reachable at {}. The host will connect but receive no jobs until it is running{}",
+            kind.name(),
+            runtime_url,
+            if kind == runtime::Kind::Ollama { " (install from https://ollama.com, then `ollama serve`)." } else { "." }
         );
     }
 
-    // 2. Hardware Benchmark Suite Execution
-    let bench = BenchmarkSuite::new(args.fake_gpu);
-    let report = bench.run_all();
+    let fp = fingerprint(&gpus, args.fake_gpu, args.instance.as_deref());
+    let bench = BenchmarkSuite::new(args.fake_gpu, &coordinator, &fp).run_all();
+    let (_wg_private, wg_public) = MeshManager::generate_keypair();
 
-    // 3. WireGuard Keypair Generation
-    let (_priv_key, pub_key) = MeshManager::generate_keypair();
+    let facts = HostFacts {
+        hostname: hostname(),
+        os: os_name(),
+        os_version: command_output("uname", &["-r"]),
+        kernel: command_output("uname", &["-v"]),
+        region: args.region.clone(),
+        gpus,
+        fingerprint: fp,
+        wg_public_key: wg_public,
+        benchmark: bench,
+    };
 
-    info!(
-        score_compute = report.score_compute,
-        vram_bw_gbps = report.vram_bw_gbps,
-        "hardware inspection and benchmark complete"
-    );
-
-    // 4. gRPC Connection to Coordinator
-    if let Some(token) = args.token.as_deref().filter(|t| !t.is_empty()) {
-        info!(
-            coordinator_url = %coord_url,
-            "connecting to coordinator gRPC session"
-        );
-
-        match connect_and_run_session(
-            &coord_url,
-            token,
-            &gpus,
-            &pub_key,
-            &report,
-            args.heartbeat_interval,
-            args.fake_gpu,
-        )
-        .await
-        {
-            Ok(()) => {
-                info!("gRPC session finished gracefully");
-            }
-            Err(e) => {
-                error!(error = %e, "gRPC coordinator session ended with error");
+    let shared = Arc::new(Shared::default());
+    let mut backoff = Duration::from_secs(1);
+    let run = async {
+        loop {
+            let s = Session {
+                coordinator_url: &coordinator,
+                token: args.token.as_deref(),
+                data_dir: data_dir.clone(),
+                facts: &facts,
+                runtime: rt.clone(),
+                heartbeat: Duration::from_secs(args.heartbeat_interval.max(1)),
+                shared: shared.clone(),
+            };
+            let started = std::time::Instant::now();
+            match s.run().await {
+                Outcome::Rejected(reason) => {
+                    error!("registration rejected: {reason}");
+                    return 1;
+                }
+                Outcome::Disconnected(e) => {
+                    if started.elapsed() > Duration::from_secs(60) {
+                        backoff = Duration::from_secs(1);
+                    }
+                    warn!(error = %format!("{e:#}"), retry_in_s = backoff.as_secs(), "disconnected from coordinator; reconnecting");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                }
             }
         }
-    } else {
-        warn!(
-            "no registration token provided (pass --token <TOKEN> or set SN_REGISTRATION_TOKEN). Agent running in standalone inspection mode."
-        );
-        MeshManager::setup_overlay("10.200.0.10", &pub_key);
+    };
 
-        info!("press Ctrl+C to stop agent");
-        tokio::signal::ctrl_c().await?;
-    }
-
-    info!("received shutdown signal, stopping agent");
-    Ok(())
+    let code = tokio::select! {
+        code = run => code,
+        _ = tokio::signal::ctrl_c() => {
+            info!("shutting down; the coordinator will move this host's jobs elsewhere");
+            0
+        }
+    };
+    std::process::exit(code);
 }
 
-async fn connect_and_run_session(
-    coord_url: &str,
-    token: &str,
-    gpus: &[gpu::GpuInfo],
-    pub_key: &str,
-    report: &benchmark::BenchmarkReport,
-    heartbeat_interval: u64,
-    fake_gpu: bool,
-) -> Result<()> {
-    let hostname = get_hostname();
-    let os_name = get_os_name();
-    let os_version = get_os_version();
-    let kernel = get_kernel();
-    let hw_fingerprint = get_hardware_fingerprint(fake_gpu, gpus);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let proto_gpus: Vec<ProtoGpuInfo> = gpus
-        .iter()
-        .map(|g| ProtoGpuInfo {
-            model: g.model.clone(),
-            vram_gb: g.vram_gb,
-            driver_version: g.driver_version.clone(),
-            cuda_version: g.cuda_version.clone(),
-            compute_capability_major: g.compute_capability_major,
-            compute_capability_minor: g.compute_capability_minor,
-            uuid: g.uuid.clone(),
-            fingerprint: g.fingerprint.clone(),
-        })
-        .collect();
-
-    let reg_req = RegisterRequest {
-        registration_token: token.to_string(),
-        hostname: hostname.clone(),
-        os: os_name,
-        os_version,
-        kernel,
-        region: "IN-SOUTH".to_string(),
-        gpus: proto_gpus.clone(),
-        agent_version: env!("CARGO_PKG_VERSION").to_string(),
-        hardware_fingerprint: hw_fingerprint,
-        wg_public_key: pub_key.to_string(),
-    };
-
-    let mut client = AgentServiceClient::connect(coord_url.to_string()).await?;
-
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-
-    // Send initial RegisterRequest
-    tx.send(AgentMessage {
-        payload: Some(agent_message::Payload::Register(reg_req)),
-    })
-    .await?;
-
-    let response = client.session(request_stream).await?;
-    let mut response_stream = response.into_inner();
-
-    // Wait for RegisterResponse from coordinator
-    if let Some(msg) = response_stream.message().await? {
-        match msg.payload {
-            Some(coordinator_message::Payload::RegisterResponse(reg_resp)) => {
-                if !reg_resp.accepted {
-                    anyhow::bail!(
-                        "registration rejected by coordinator: {}",
-                        reg_resp.rejection_reason
-                    );
-                }
-                info!(
-                    host_id = %reg_resp.host_id,
-                    overlay_ip = %reg_resp.overlay_ip,
-                    wg_endpoint = %reg_resp.wg_endpoint,
-                    "host successfully registered with coordinator!"
-                );
-                MeshManager::setup_overlay(&reg_resp.overlay_ip, pub_key);
-            }
-            other => {
-                anyhow::bail!("unexpected message before registration response: {:?}", other);
-            }
-        }
-    } else {
-        anyhow::bail!("coordinator closed session stream before registration response");
-    }
-
-    // Send BenchmarkReport
-    let proto_benchmarks = gpus
-        .iter()
-        .map(|g| proto::GpuBenchmark {
-            gpu_uuid: g.uuid.clone(),
-            compute_score: report.score_compute as f64,
-            vram_bandwidth_gbps: report.vram_bw_gbps as f64,
-        })
-        .collect();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-
-    let bench_msg = AgentMessage {
-        payload: Some(agent_message::Payload::Benchmark(proto::BenchmarkReport {
-            hardware_fingerprint: get_hardware_fingerprint(fake_gpu, gpus),
-            gpu_benchmarks: proto_benchmarks,
-            disk_read_mbps: report.disk_read_mbps as f64,
-            disk_write_mbps: report.disk_write_mbps as f64,
-            net_upload_mbps: report.net_up_mbps as f64,
-            net_download_mbps: report.net_down_mbps as f64,
-            latency_to_pop_ms: report.latency_pop_ms as f64,
-            ran_at: Some(prost_types::Timestamp {
-                seconds: now.as_secs() as i64,
-                nanos: now.subsec_nanos() as i32,
-            }),
-        })),
-    };
-    let _ = tx.send(bench_msg).await;
-
-    // Start background Heartbeat task
-    let hb_tx = tx.clone();
-    let hb_gpus = proto_gpus.clone();
-    let mut hb_interval = tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval));
-
-    let heartbeat_handle = tokio::spawn(async move {
-        loop {
-            hb_interval.tick().await;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap();
-            let hb = AgentMessage {
-                payload: Some(agent_message::Payload::Heartbeat(Heartbeat {
-                    ts: Some(prost_types::Timestamp {
-                        seconds: now.as_secs() as i64,
-                        nanos: now.subsec_nanos() as i32,
-                    }),
-                    cpu_usage_pct: 12.5,
-                    memory_usage_pct: 28.0,
-                    gpu_status: hb_gpus
-                        .iter()
-                        .map(|g| proto::GpuStatus {
-                            gpu_uuid: g.uuid.clone(),
-                            utilization_pct: 0.0,
-                            vram_used_mb: 256,
-                            vram_total_mb: g.vram_gb * 1024,
-                            temperature_c: 40,
-                            power_draw_w: 95,
-                        })
-                        .collect(),
-                    active_jobs: 0,
-                    host_user_active: false,
-                })),
-            };
-            if hb_tx.send(hb).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Process incoming coordinator messages
-    info!("listening for coordinator manifest dispatches and instructions");
-    tokio::select! {
-        res = async {
-            while let Some(msg) = response_stream.message().await? {
-                match msg.payload {
-                    Some(coordinator_message::Payload::Manifest(manifest)) => {
-                        info!(
-                            job_id = %manifest.job_id,
-                            replica_id = %manifest.replica_id,
-                            model_id = %manifest.model_id,
-                            "received workload manifest dispatch from coordinator"
-                        );
-                    }
-                    Some(coordinator_message::Payload::Drain(drain)) => {
-                        warn!(reason = %drain.reason, "received drain request from coordinator");
-                        let ack = AgentMessage {
-                            payload: Some(agent_message::Payload::DrainAck(proto::DrainAck {
-                                reason: drain.reason,
-                                remaining_jobs: 0,
-                            })),
-                        };
-                        let _ = tx.send(ack).await;
-                    }
-                    Some(coordinator_message::Payload::Update(update)) => {
-                        info!(version = %update.version, "update available from coordinator");
-                    }
-                    _ => {}
-                }
-            }
-            Ok::<(), anyhow::Error>(())
-        } => {
-            if let Err(e) = res {
-                error!(error = %e, "stream error while receiving messages");
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            info!("received Ctrl+C in session, shutting down");
+    fn nvidia(driver: &str) -> gpu::GpuInfo {
+        gpu::GpuInfo {
+            model: "NVIDIA GeForce RTX 4090".into(),
+            vram_gb: 24,
+            driver_version: driver.into(),
+            cuda_version: String::new(),
+            compute_capability_major: 8,
+            compute_capability_minor: 9,
+            uuid: "GPU-1".into(),
+            fingerprint: "sha256:x".into(),
         }
     }
 
-    heartbeat_handle.abort();
-    Ok(())
+    #[test]
+    fn preflight_enforces_driver_floor_and_a_gpu() {
+        assert!(preflight(&[]).is_err());
+        assert!(preflight(&[nvidia("470.82.01")]).is_err());
+        assert!(preflight(&[nvidia("535.104.05")]).is_ok());
+        assert!(preflight(&[nvidia("550.54.14")]).is_ok());
+    }
+
+    #[test]
+    fn instances_get_distinct_fingerprints() {
+        let g = vec![nvidia("550.1")];
+        let a = fingerprint(&g, true, Some("a"));
+        let b = fingerprint(&g, true, Some("b"));
+        assert_ne!(a, b);
+        assert_eq!(a, fingerprint(&g, true, Some("a")));
+        assert_ne!(fingerprint(&g, true, None), fingerprint(&g, false, None));
+    }
 }

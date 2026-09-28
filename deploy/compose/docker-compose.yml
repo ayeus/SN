@@ -1,5 +1,7 @@
-# AyeusANN Development Infrastructure
-# Usage: make dev (or docker compose -f deploy/compose/docker-compose.yml up -d)
+# AyeusANN development infrastructure.
+# `make dev` starts Postgres and Redis, which is all the services use today.
+# NATS and MinIO are in the architecture (event bus, model cache) but no code
+# talks to them yet; start them with `--profile full` when that work lands.
 
 services:
   # ─── Data Layer ─────────────────────────────────────────────
@@ -35,6 +37,7 @@ services:
       retries: 5
 
   nats:
+    profiles: ["full"]
     image: nats:2-alpine
     container_name: ann-nats
     ports:
@@ -51,6 +54,7 @@ services:
       start_period: 5s
 
   minio:
+    profiles: ["full"]
     image: minio/minio:latest
     container_name: ann-minio
     environment:

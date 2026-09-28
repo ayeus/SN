@@ -1,17 +1,23 @@
 syntax = "proto3";
 
-package AyeusANN.agent.v1;
+package ayeusann.agent.v1;
 
 option go_package = "github.com/ayeus/ayeusann/gen/go/agent/v1;agentv1";
 
 import "google/protobuf/timestamp.proto";
 
 // ─── Agent ↔ Coordinator Service ─────────────────────────────
+//
+// The agent always dials out; hosts never accept inbound connections. Every
+// control message AND every inference request travels over this one stream,
+// which is what lets a laptop behind home NAT or a lab behind campus NAT serve
+// traffic without port-forwarding (ADR-001, ADR-011).
 
 service AgentService {
   // Bidirectional stream for persistent agent sessions.
-  // Agent sends Register, then streams Heartbeat + StageEvent + UsageBatch.
-  // Coordinator sends ManifestDispatch + DrainRequest.
+  // Agent sends Register first, then Heartbeat, BenchmarkReport, StageEvent,
+  // InferenceChunk. Coordinator sends ManifestDispatch, StopReplica,
+  // InferenceRequest, InferenceCancel, DrainRequest.
   rpc Session(stream AgentMessage) returns (stream CoordinatorMessage);
 }
 
@@ -25,10 +31,15 @@ message AgentMessage {
     StageEvent stage_event = 4;
     UsageBatch usage_batch = 5;
     DrainAck drain_ack = 6;
+    InferenceChunk inference_chunk = 7;
   }
 }
 
 message RegisterRequest {
+  // Exactly one of registration_token (first enrolment) or host_credential
+  // (every reconnect after that) must be set. Registration tokens are single
+  // use; the credential returned in RegisterResponse is what keeps a host
+  // enrolled across restarts.
   string registration_token = 1;
   string hostname = 2;
   string os = 3;
@@ -39,6 +50,11 @@ message RegisterRequest {
   string agent_version = 8;
   string hardware_fingerprint = 9;
   string wg_public_key = 10;
+  string host_credential = 11;
+  // Local serving runtime the agent drives: "ollama" or "vllm".
+  string runtime = 12;
+  // Model identifiers already present in the runtime's local cache.
+  repeated string cached_models = 13;
 }
 
 message GpuInfo {
@@ -59,6 +75,8 @@ message Heartbeat {
   repeated GpuStatus gpu_status = 4;
   int32 active_jobs = 5;
   bool host_user_active = 6;  // For pause-when-active
+  repeated string cached_models = 7;
+  bool runtime_healthy = 8;
 }
 
 message GpuStatus {
@@ -95,6 +113,8 @@ message StageEvent {
   string model_hash = 5;
   string error_message = 6;
   google.protobuf.Timestamp ts = 7;
+  // Human-readable progress, e.g. "pulling 1.2 GB / 4.7 GB".
+  string detail = 8;
 }
 
 message UsageBatch {
@@ -118,6 +138,20 @@ message DrainAck {
   int32 remaining_jobs = 2;
 }
 
+// A slice of an inference response flowing back to the coordinator. For a
+// streamed request each chunk carries raw SSE bytes; for a non-streamed request
+// a single chunk carries the whole JSON body. The final chunk has done=true and,
+// when the runtime reported them, exact token counts.
+message InferenceChunk {
+  string request_id = 1;
+  bytes data = 2;
+  bool done = 3;
+  int32 status_code = 4;
+  string error = 5;
+  int32 prompt_tokens = 6;
+  int32 completion_tokens = 7;
+}
+
 // ─── Coordinator → Agent Messages ────────────────────────────
 
 message CoordinatorMessage {
@@ -126,6 +160,9 @@ message CoordinatorMessage {
     ManifestDispatch manifest = 2;
     DrainRequest drain = 3;
     UpdateAvailable update = 4;
+    InferenceRequest inference_request = 5;
+    InferenceCancel inference_cancel = 6;
+    StopReplica stop_replica = 7;
   }
 }
 
@@ -136,6 +173,14 @@ message RegisterResponse {
   string wg_public_key = 4;
   string wg_endpoint = 5;
   string rejection_reason = 6;
+  // Issued on first enrolment only. The agent must persist it and present it
+  // on every reconnect; it is never sent again.
+  string host_credential = 7;
+  string tier = 8;
+  string status = 9;
+  // Ed25519 public key that signs every ManifestDispatch (SRS FR-53). The agent
+  // pins it on first enrolment and refuses manifests that do not verify.
+  bytes manifest_public_key = 10;
 }
 
 message ManifestDispatch {
@@ -164,6 +209,35 @@ message ManifestDispatch {
   // Signature (Ed25519)
   bytes signature = 16;
   bytes signing_key_id = 17;
+
+  // Identifier of the model inside the agent's runtime, e.g. "qwen2.5:7b" for
+  // Ollama or "Qwen/Qwen2.5-7B-Instruct" for vLLM. Resolved by the coordinator
+  // from the catalogue so hosts never guess.
+  string runtime_model = 18;
+  string model_name = 19;
+  // Unix seconds; covered by the signature so a captured manifest cannot be
+  // replayed indefinitely.
+  int64 issued_at = 20;
+}
+
+message StopReplica {
+  string replica_id = 1;
+  string reason = 2;
+}
+
+// An OpenAI-compatible request to execute against a replica. The body is the
+// customer's JSON with "model" already rewritten to the runtime identifier.
+message InferenceRequest {
+  string request_id = 1;
+  string replica_id = 2;
+  string path = 3;  // e.g. "/v1/chat/completions"
+  bytes body = 4;
+  bool stream = 5;
+  int32 timeout_seconds = 6;
+}
+
+message InferenceCancel {
+  string request_id = 1;
 }
 
 message DrainRequest {

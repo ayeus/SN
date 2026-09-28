@@ -10,10 +10,10 @@ import (
 )
 
 var (
-	ErrInvalidToken     = errors.New("auth: invalid or expired JWT token")
-	ErrInvalidClaims    = errors.New("auth: invalid token claims")
-	ErrWrongTokenType   = errors.New("auth: token is not valid for this purpose")
-	ErrSecretTooShort   = errors.New("auth: JWT secret must be at least 32 bytes")
+	ErrInvalidToken   = errors.New("auth: invalid or expired JWT token")
+	ErrInvalidClaims  = errors.New("auth: invalid token claims")
+	ErrWrongTokenType = errors.New("auth: token is not valid for this purpose")
+	ErrSecretTooShort = errors.New("auth: JWT secret must be at least 32 bytes")
 )
 
 // Token audiences. A token minted for one purpose must not be accepted for
@@ -34,6 +34,9 @@ type Claims struct {
 	UserID string `json:"uid"`
 	OrgID  string `json:"org_id,omitempty"`
 	Role   string `json:"role,omitempty"`
+	// Tier is set only on host registration tokens: the supply tier the owner
+	// declared when generating the install command (PRD F-10).
+	Tier string `json:"tier,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -165,7 +168,8 @@ type RegistrationToken struct {
 // GenerateRegistrationToken issues a host registration token valid for 24 hours.
 // The token's audience restricts it to the coordinator's registration path, and
 // its jti is recorded by the caller so the token can be consumed exactly once.
-func (tm *TokenManager) GenerateRegistrationToken(userID, orgID string) (*RegistrationToken, error) {
+// tier is the supply tier the host will enrol at ("t1", "t2" or "t3").
+func (tm *TokenManager) GenerateRegistrationToken(userID, orgID, tier string) (*RegistrationToken, error) {
 	now := time.Now()
 	jti := uuid.NewString()
 	expiresAt := now.Add(tm.regExpiry)
@@ -174,6 +178,7 @@ func (tm *TokenManager) GenerateRegistrationToken(userID, orgID string) (*Regist
 		UserID: userID,
 		OrgID:  orgID,
 		Role:   RoleHostInstaller,
+		Tier:   tier,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        jti,
 			Issuer:    tm.issuer,

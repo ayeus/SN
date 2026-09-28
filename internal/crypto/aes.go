@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	ErrInvalidKeySize   = errors.New("crypto: key must be exactly 32 bytes for AES-256")
+	ErrInvalidKeySize    = errors.New("crypto: key must be exactly 32 bytes for AES-256")
 	ErrInvalidCiphertext = errors.New("crypto: ciphertext is too short or malformed")
 )
 

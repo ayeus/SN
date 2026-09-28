@@ -1,12 +1,15 @@
-// Package main implements the AyeusANN Billing Meter.
-// Responsibilities: usage event ingestion, wallet ledger debits, invoices, payouts.
+// Package main implements the AyeusANN Billing Meter: wallets, usage reports,
+// invoices, top-ups and ledger reconciliation (Architecture §4, §9).
+//
+// Usage is recorded by the inference gateway through internal/billing in the
+// same transaction as the wallet debit; this service reads and reconciles it.
 package main
 
 import (
 	"context"
 	"log"
-	"net/http"
-	"strconv"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/auth"
@@ -14,32 +17,18 @@ import (
 	"github.com/ayeus/ayeusann/internal/platform"
 )
 
-const (
-	devJWTSecret     = "dev-only-insecure-jwt-signing-key-0001"
-	devServiceSecret = "dev-only-insecure-internal-service-key-0001"
-)
-
 func main() {
-	port, _ := strconv.Atoi(platform.MustEnv("BILLING_PORT", "8086"))
-	dbURL, err := platform.RequireEnv("DATABASE_URL", "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable")
+	port := platform.EnvInt("BILLING_PORT", 8086)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "billing-meter")
+
+	jwtSecret, err := platform.JWTSecret()
 	if err != nil {
 		log.Fatalf("configuration error: %v", err)
 	}
 
-	jwtSecret, err := platform.RequireSecret("JWT_SECRET", devJWTSecret, 32)
-	if err != nil {
-		log.Fatalf("configuration error: %v", err)
-	}
-
-	serviceSecret, err := platform.RequireSecret("INTERNAL_SERVICE_SECRET", devServiceSecret, 32)
-	if err != nil {
-		log.Fatalf("configuration error: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	dbClient, err := db.NewClient(ctx, db.Config{URL: dbURL})
+	dbClient, err := platform.ConnectDB(ctx)
 	if err != nil {
 		log.Fatalf("failed to connect to database: %v", err)
 	}
@@ -49,35 +38,43 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create token manager: %v", err)
 	}
-	revStore := auth.NewPGRevocationStore(dbClient.Pool)
 
-	svcAuth, err := auth.NewServiceAuthenticator(serviceSecret, auth.ServiceBillingMeter)
-	if err != nil {
-		log.Fatalf("failed to create service authenticator: %v", err)
+	rz := newRazorpay(os.Getenv("RAZORPAY_KEY_ID"), os.Getenv("RAZORPAY_KEY_SECRET"), os.Getenv("RAZORPAY_WEBHOOK_SECRET"))
+	if rz == nil {
+		logger.Warn("Razorpay not configured; online top-ups disabled")
 	}
 
-	meter := NewMeterService(dbClient)
+	meter := &Meter{
+		db:              dbClient,
+		ledger:          db.NewLedgerService(dbClient),
+		log:             logger,
+		razorpay:        rz,
+		allowTestCredit: !platform.IsProduction(),
+	}
 
-	srv, err := platform.NewServer(platform.ServiceConfig{
-		Name:    "billing-meter",
-		Version: "0.2.0",
-		Port:    port,
-	})
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			if err := meter.Reconcile(ctx); err != nil && ctx.Err() == nil {
+				logger.Error("reconciliation failed", "err", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+
+	srv, err := platform.NewServer(platform.ServiceConfig{Name: "billing-meter", Version: "0.3.0", Port: port})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
-
-	// Register billing meter API routes
-	meter.RegisterRoutes(srv.Mux, svcAuth, tm, revStore)
-
-	srv.Mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"service":"AyeusANN-billing-meter","version":"0.2.0"}`))
-	})
-
+	srv.Mux.Handle("/v1/", meter.Routes(tm, auth.NewPGRevocationStore(dbClient.Pool)))
+	srv.SetReadyCheck(func(ctx context.Context) error { return dbClient.Pool.Ping(ctx) })
 	srv.SetReady()
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
-

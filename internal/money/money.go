@@ -27,10 +27,10 @@ const Scale = 6
 const micros int64 = 1_000_000
 
 var (
-	ErrOverflow       = errors.New("money: arithmetic overflow")
+	ErrOverflow         = errors.New("money: arithmetic overflow")
 	ErrCurrencyMismatch = errors.New("money: cannot combine amounts in different currencies")
-	ErrInvalidAmount  = errors.New("money: invalid amount format")
-	ErrNegativeAmount = errors.New("money: amount must not be negative")
+	ErrInvalidAmount    = errors.New("money: invalid amount format")
+	ErrNegativeAmount   = errors.New("money: amount must not be negative")
 )
 
 // Amount is an exact monetary amount in micro-units of a currency.
@@ -364,6 +364,7 @@ func (a *Amount) UnmarshalJSON(data []byte) error {
 func (a Amount) Value() (driver.Value, error) {
 	return a.String(), nil
 }
+
 // Scan implements sql.Scanner for NUMERIC columns.
 func (a *Amount) Scan(src interface{}) error {
 	switch v := src.(type) {

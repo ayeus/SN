@@ -1,87 +1,88 @@
 package main
 
 import (
-	"context"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/domain"
 )
 
-func getTestDBURL() string {
-	if url := os.Getenv("DATABASE_URL"); url != "" {
-		return url
+func f(v float64) *float64 { return &v }
+
+func TestScoreUsesPRDWeights(t *testing.T) {
+	// All evidence present and perfect.
+	s, _ := Score(Inputs{UptimePct: 100, SuccessRatePct: f(100), StabilityPct: f(100), AgeDays: 30})
+	if s != 100 {
+		t.Fatalf("perfect host scored %d", s)
 	}
-	return "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable"
+
+	// Uptime 50, everything else perfect: 100 − 0.40·50 = 80.
+	s, c := Score(Inputs{UptimePct: 50, SuccessRatePct: f(100), StabilityPct: f(100), AgeDays: 30})
+	if s != 80 || c.Uptime != 50 {
+		t.Fatalf("uptime weighting wrong: %d %+v", s, c)
+	}
+
+	// Correctness 0 costs its 25%.
+	s, _ = Score(Inputs{UptimePct: 100, SuccessRatePct: f(0), StabilityPct: f(100), AgeDays: 30})
+	if s != 75 {
+		t.Fatalf("correctness weighting wrong: %d", s)
+	}
+
+	// Each incident in 30 days removes 20 points of the 10% incident component.
+	s, _ = Score(Inputs{UptimePct: 100, SuccessRatePct: f(100), StabilityPct: f(100), AgeDays: 30, Incidents30d: 5})
+	if s != 90 {
+		t.Fatalf("incident weighting wrong: %d", s)
+	}
 }
 
-func TestReputationEngineAndIncidents(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	dbClient, err := db.NewClient(ctx, db.Config{URL: getTestDBURL()})
-	if err != nil {
-		t.Fatalf("Failed to connect to test database: %v", err)
+func TestScoreRenormalisesMissingEvidence(t *testing.T) {
+	// A new host with no traffic and no benchmark history is scored on uptime,
+	// age and incidents only; unknowns are not treated as zero.
+	s, c := Score(Inputs{UptimePct: 100, AgeDays: 0})
+	if c.Correctness != nil || c.Stability != nil {
+		t.Fatal("missing evidence must stay nil")
 	}
-	defer dbClient.Close()
-
-	engine := NewReputationEngine(dbClient)
-
-	// Create test host
-	hostName := "trust-host-" + uuid.New().String()[:8]
-	var hostID string
-	err = dbClient.Pool.QueryRow(ctx, `
-		INSERT INTO hosts (name, tier, region, reputation, status)
-		VALUES ($1, 't2', 'IN-SOUTH', 50, 'active')
-		RETURNING id;
-	`, hostName).Scan(&hostID)
-
-	if err != nil {
-		t.Fatalf("Failed to insert test host: %v", err)
+	// (0.40·100 + 0.10·0 + 0.10·100) / 0.60 = 83.3
+	if s != 83 {
+		t.Fatalf("renormalised score = %d", s)
 	}
+}
 
-	// 1. Initial Reputation Computation
-	t.Run("ComputeInitialReputation", func(t *testing.T) {
-		snap, err := engine.ComputeReputation(ctx, hostID)
-		if err != nil {
-			t.Fatalf("ComputeReputation error: %v", err)
-		}
-		if snap.Score <= 0 {
-			t.Fatalf("Expected positive score, got %d", snap.Score)
-		}
+func TestStability(t *testing.T) {
+	if Stability([]float64{85}) != nil {
+		t.Fatal("one run cannot measure stability")
+	}
+	if v := Stability([]float64{85, 85, 85}); v == nil || *v != 100 {
+		t.Fatalf("identical runs should be 100, got %v", v)
+	}
+	if v := Stability([]float64{50, 100}); v == nil || *v > 70 || *v < 60 {
+		t.Fatalf("CV of 33%% should give ~67, got %v", *v)
+	}
+}
 
-		// Verify host record updated
-		var rep int
-		_ = dbClient.Pool.QueryRow(ctx, `SELECT reputation FROM hosts WHERE id = $1;`, hostID).Scan(&rep)
-		if rep != snap.Score {
-			t.Fatalf("Expected host reputation %d, got %d", snap.Score, rep)
+func TestNextStatusFollowsUML(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+	cases := []struct {
+		from  string
+		score int
+		until *time.Time
+		want  string
+	}{
+		{domain.HostStatusProbation, 70, &past, domain.HostStatusActive},
+		{domain.HostStatusProbation, 70, &future, domain.HostStatusProbation},
+		{domain.HostStatusProbation, 55, &past, domain.HostStatusProbation},
+		{domain.HostStatusProbation, 30, &future, domain.HostStatusDemoted},
+		{domain.HostStatusActive, 39, nil, domain.HostStatusDemoted},
+		{domain.HostStatusActive, 40, nil, domain.HostStatusActive},
+		{domain.HostStatusDemoted, 49, nil, domain.HostStatusDemoted},
+		{domain.HostStatusDemoted, 50, nil, domain.HostStatusActive},
+		{domain.HostStatusOffline, 10, nil, domain.HostStatusOffline},
+		{domain.HostStatusBanned, 100, nil, domain.HostStatusBanned},
+	}
+	for _, c := range cases {
+		if got := nextStatus(c.from, c.score, c.until); got != c.want {
+			t.Errorf("%s @%d → %s, want %s", c.from, c.score, got, c.want)
 		}
-	})
-
-	// 2. Record Trust Incident & Verify Penalty
-	t.Run("RecordIncidentAndPenalty", func(t *testing.T) {
-		inc, err := engine.RecordIncident(ctx, hostID, "benchmark_drift", "high", "VRAM bandwidth dropped by 50%")
-		if err != nil {
-			t.Fatalf("RecordIncident error: %v", err)
-		}
-		if inc.ID == "" {
-			t.Fatal("Expected non-empty incident ID")
-		}
-
-		// Recompute reputation and verify penalty deducted
-		snapAfter, err := engine.ComputeReputation(ctx, hostID)
-		if err != nil {
-			t.Fatalf("ComputeReputation error: %v", err)
-		}
-
-		var newRep int
-		_ = dbClient.Pool.QueryRow(ctx, `SELECT reputation FROM hosts WHERE id = $1;`, hostID).Scan(&newRep)
-		if newRep >= 90 {
-			t.Fatalf("Expected penalty deduction on incident, got reputation %d", newRep)
-		}
-
-		_ = snapAfter
-	})
+	}
 }
