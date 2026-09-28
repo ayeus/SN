@@ -4,8 +4,8 @@ package config
 import (
 	"fmt"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/ayeus/ayeusann/internal/platform"
+	"github.com/redis/go-redis/v9"
 )
 
 // NewRedisClient creates a Redis client from the REDIS_URL environment variable.

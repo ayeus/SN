@@ -1,12 +1,18 @@
 // Package main implements the AyeusANN Inference Gateway.
-// Responsibilities: API key auth, rate limiting, OpenAI wire format, request routing, usage emission.
+//
+// Architecture §4: TLS termination, key auth, per-key rate limits — plus the
+// request router (replica selection, health, retries) embedded per ADR-011.
+// Requests reach hosts through the coordinator's tunnel; usage is metered in
+// the same transaction as the wallet debit (Architecture §9).
 package main
 
 import (
 	"context"
 	"log"
+	"log/slog"
+	"net"
 	"net/http"
-	"strconv"
+	"os"
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/auth"
@@ -15,71 +21,84 @@ import (
 	"github.com/ayeus/ayeusann/internal/platform"
 )
 
-const devServiceSecret = "dev-only-insecure-internal-service-key-0001"
-
 func main() {
-	port, _ := strconv.Atoi(platform.MustEnv("INFERENCE_GW_PORT", "8085"))
-	dbURL := platform.MustEnv("DATABASE_URL", "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable")
-	routerURL := platform.MustEnv("ROUTER_URL", "http://localhost:8084")
-	billingURL := platform.MustEnv("BILLING_URL", "http://localhost:8086")
+	port := platform.EnvInt("INFERENCE_GW_PORT", 8085)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "inference-gateway")
 
-	serviceSecret, err := platform.RequireSecret("INTERNAL_SERVICE_SECRET", devServiceSecret, 32)
+	jwtSecret, err := platform.JWTSecret()
 	if err != nil {
 		log.Fatalf("configuration error: %v", err)
 	}
-
-	svcAuth, err := auth.NewServiceAuthenticator(serviceSecret, auth.ServiceInferenceGateway)
+	internalSecret, err := platform.InternalSecret()
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+	svcAuth, err := auth.NewServiceAuthenticator(internalSecret, auth.ServiceInferenceGateway)
 	if err != nil {
 		log.Fatalf("failed to create service authenticator: %v", err)
 	}
+	tm, err := auth.NewTokenManager(jwtSecret, 15*time.Minute, 7*24*time.Hour)
+	if err != nil {
+		log.Fatalf("failed to create token manager: %v", err)
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	dbClient, err := db.NewClient(ctx, db.Config{URL: dbURL})
+	dbClient, err := platform.ConnectDB(ctx)
 	if err != nil {
 		log.Fatalf("failed to connect to database: %v", err)
 	}
 	defer dbClient.Close()
 
-	// Set up Redis rate limiter (fail-open if Redis unavailable)
-	var rateLimiter *RateLimiter
-	rdb, err := config.NewRedisClient()
-	if err != nil {
-		log.Printf("WARNING: Redis unavailable, rate limiting disabled: %v", err)
+	// Per-key rate limiting (SRS FR-31). Without Redis the gateway still serves,
+	// but says so loudly; in production a missing limiter is a startup error.
+	var limiter *RateLimiter
+	if rdb, err := config.NewRedisClient(); err == nil && rdb.Ping(ctx).Err() == nil {
+		limiter = NewRateLimiter(rdb, platform.EnvInt("RATE_LIMIT_RPM", 60))
+		logger.Info("rate limiter enabled", "rpm", platform.EnvInt("RATE_LIMIT_RPM", 60))
+	} else if platform.IsProduction() {
+		log.Fatalf("configuration error: Redis is required for rate limiting in production")
 	} else {
-		if pingErr := rdb.Ping(ctx).Err(); pingErr != nil {
-			log.Printf("WARNING: Redis ping failed, rate limiting disabled: %v", pingErr)
-		} else {
-			rateLimiter = NewRateLimiter(rdb, 60) // 60 RPM default
-			log.Println("Redis rate limiter enabled (60 RPM per API key)")
-		}
+		logger.Warn("Redis unavailable; rate limiting disabled in development")
 	}
 
-	handler := NewInferenceHandler(dbClient, rateLimiter, routerURL, billingURL, svcAuth)
+	g := &Gateway{
+		db:             dbClient,
+		ledger:         db.NewLedgerService(dbClient),
+		tm:             tm,
+		revocations:    auth.NewPGRevocationStore(dbClient.Pool),
+		limiter:        limiter,
+		router:         newRouter(dbClient, platform.HeartbeatTimeout()),
+		svcAuth:        svcAuth,
+		coordinatorURL: platform.CoordinatorURL(),
+		inferenceHost:  platform.Env("INFERENCE_HOST", ""),
+		log:            logger,
+		client: &http.Client{
+			// No overall timeout: streams legitimately last minutes. The
+			// coordinator enforces per-request deadlines.
+			Transport: &http.Transport{
+				DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+				ResponseHeaderTimeout: 70 * time.Second,
+				MaxIdleConnsPerHost:   64,
+				IdleConnTimeout:       90 * time.Second,
+			},
+		},
+	}
 
-	srv, err := platform.NewServer(platform.ServiceConfig{
-		Name:    "inference-gateway",
-		Version: "0.2.0",
-		Port:    port,
-	})
+	srv, err := platform.NewServer(platform.ServiceConfig{Name: "inference-gateway", Version: "0.3.0", Port: port})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
 
-	// OpenAI-compatible endpoints
-	srv.Mux.HandleFunc("POST /v1/chat/completions", handler.HandleChatCompletions)
-	srv.Mux.HandleFunc("OPTIONS /v1/chat/completions", handler.HandleChatCompletions)
-	srv.Mux.HandleFunc("GET /v1/models", handler.HandleListModels)
+	srv.Mux.HandleFunc("POST /v1/chat/completions", g.HandleInference)
+	srv.Mux.HandleFunc("POST /v1/completions", g.HandleInference)
+	srv.Mux.HandleFunc("POST /v1/embeddings", g.HandleInference)
+	srv.Mux.HandleFunc("GET /v1/models", g.HandleListModels)
 
-	srv.Mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"service":"AyeusANN-inference-gateway","version":"0.2.0"}`))
-	})
-
+	srv.SetReadyCheck(func(ctx context.Context) error { return dbClient.Pool.Ping(ctx) })
 	srv.SetReady()
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
-

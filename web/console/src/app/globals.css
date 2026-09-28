@@ -1,0 +1,168 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens.
+ *   Nil (dye indigo)  — brand and primary actions. India-first product, the
+ *                       colour of Indian indigo rather than UI violet.
+ *   Marigold          — the only hot colour, reserved for live, in-progress
+ *                       signals: a replica powering up, a host coming online.
+ *   Serving green / danger red — outcomes.
+ *   Tier colours are fixed meanings: T1 data centre, T2 lab & workstation,
+ *   T3 personal spot capacity.
+ */
+:root {
+  --bg: #f4f5f9;
+  --surface: #ffffff;
+  --surface-2: #eceef5;
+  --ink: #1b1e2e;
+  --muted: #5d6279;
+  --line: #dcdfea;
+  --nil: #23246a;
+  --nil-hover: #1a1b55;
+  --nil-soft: #e6e7f6;
+  --on-nil: #ffffff;
+  --marigold: #e9a21a;
+  --marigold-soft: #fdf2dc;
+  --serving: #1e8a5a;
+  --serving-soft: #e2f3ea;
+  --danger: #c0392b;
+  --danger-soft: #fbe7e4;
+  --tier1: #23246a;
+  --tier2: #0f6f7c;
+  --tier3: #9a5b00;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111325;
+    --surface: #181b31;
+    --surface-2: #20243f;
+    --ink: #e8e9f2;
+    --muted: #9ea3bf;
+    --line: #2d3252;
+    --nil: #9496f2;
+    --nil-hover: #aeb0f6;
+    --nil-soft: #25285a;
+    --on-nil: #111325;
+    --marigold: #f2b33d;
+    --marigold-soft: #3a2d10;
+    --serving: #3cc07f;
+    --serving-soft: #123524;
+    --danger: #f06a5b;
+    --danger-soft: #3d1a17;
+    --tier1: #9496f2;
+    --tier2: #3db8c7;
+    --tier3: #e0a040;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-nil: var(--nil);
+  --color-nil-hover: var(--nil-hover);
+  --color-nil-soft: var(--nil-soft);
+  --color-on-nil: var(--on-nil);
+  --color-marigold: var(--marigold);
+  --color-marigold-soft: var(--marigold-soft);
+  --color-serving: var(--serving);
+  --color-serving-soft: var(--serving-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-tier1: var(--tier1);
+  --color-tier2: var(--tier2);
+  --color-tier3: var(--tier3);
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, monospace;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 1;
+}
+
+:focus-visible {
+  outline: 2px solid var(--nil);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: var(--marigold-soft);
+}
+
+/* Data tables: the console's primary structure. */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+.table tr:last-child td {
+  border-bottom: 0;
+}
+.table tbody tr[data-href] {
+  cursor: pointer;
+}
+.table tbody tr[data-href]:hover td {
+  background: var(--surface-2);
+}
+
+/* The power-on rail: the one animated element in the product. */
+@keyframes rail-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--marigold) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--marigold) 0%, transparent);
+  }
+}
+.rail-live {
+  animation: rail-pulse 1.6s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.dot-live {
+  animation: dot-pulse 1.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-live,
+  .dot-live {
+    animation: none;
+  }
+}

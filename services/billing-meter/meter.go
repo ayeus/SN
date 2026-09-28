@@ -2,484 +2,450 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
-	"strings"
+	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/ayeus/ayeusann/internal/auth"
+	"github.com/ayeus/ayeusann/internal/billing"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/domain"
+	"github.com/ayeus/ayeusann/internal/httpx"
 	"github.com/ayeus/ayeusann/internal/money"
+	"github.com/ayeus/ayeusann/internal/platform"
+	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-var (
-	ErrMissingFields    = errors.New("meter: required fields missing")
-	ErrModelNotFound    = errors.New("meter: model not found for pricing")
-)
+// ledgerDrift is the Implementation Guide §5 "Money" gate: Σ usage charges must
+// equal Σ usage debits in the ledger. Alert on any non-zero value.
+var ledgerDrift = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "ayeusann_billing_ledger_drift_micros",
+	Help: "Σ usage charges − Σ usage wallet debits over the last 30 days, in micro-units, by currency. Should be 0.",
+}, []string{"currency"})
 
-const (
-	// HostRevenueSharePct is the percentage of customer charges that accrue to the host.
-	HostRevenueSharePct = 0.75 // 75% to host, 25% platform fee
-	// GSTRate is the GST rate for Indian organizations.
-	GSTRate = 0.18
-)
-
-// UsageIngestRequest is sent by the inference gateway after each completed request.
-type UsageIngestRequest struct {
-	RequestID    string  `json:"request_id"`
-	DeploymentID string  `json:"deployment_id"`
-	ReplicaID    string  `json:"replica_id"`
-	HostID       string  `json:"host_id"`
-	ModelName    string  `json:"model_name"`
-	InputTokens  int    `json:"input_tokens"`
-	OutputTokens int    `json:"output_tokens"`
-	GpuSeconds   float64 `json:"gpu_seconds"`
-	Tier         string  `json:"tier"`
-	Status       string  `json:"status"` // success|error|timeout|cancelled
+// Meter serves wallet, usage, invoice and top-up endpoints (SRS §2.8).
+type Meter struct {
+	db       *db.Client
+	ledger   *db.LedgerService
+	log      *slog.Logger
+	razorpay *Razorpay // nil when not configured
+	// allowTestCredit enables the development-only wallet top-up.
+	allowTestCredit bool
 }
 
-// UsageSummaryEntry represents aggregated usage for one day.
-type UsageSummaryEntry struct {
-	Date           string  `json:"date"`
-	RequestCount   int     `json:"request_count"`
-	InputTokens    int64   `json:"input_tokens"`
-	OutputTokens   int64   `json:"output_tokens"`
-	TotalCost      float64 `json:"total_cost"`
-	GpuSecondsUsed float64 `json:"gpu_seconds_used"`
-}
-
-// InvoiceGenerateRequest specifies the billing period for invoice generation.
-type InvoiceGenerateRequest struct {
-	OrgID       string `json:"org_id"`
-	PeriodStart string `json:"period_start"` // YYYY-MM-DD
-	PeriodEnd   string `json:"period_end"`   // YYYY-MM-DD
-}
-
-// MeterService manages usage ingestion, pricing, and billing.
-type MeterService struct {
-	db     *db.Client
-	ledger *db.LedgerService
-}
-
-// NewMeterService creates a new MeterService.
-func NewMeterService(database *db.Client) *MeterService {
-	return &MeterService{
-		db:     database,
-		ledger: db.NewLedgerService(database),
-	}
-}
-
-// IngestUsage records a usage event and debits the customer wallet.
-// Idempotent by request_id — duplicate submissions are silently ignored.
-func (m *MeterService) IngestUsage(ctx context.Context, req UsageIngestRequest) (*domain.UsageEvent, error) {
-	if req.RequestID == "" || req.DeploymentID == "" || req.ReplicaID == "" || req.HostID == "" {
-		return nil, ErrMissingFields
-	}
-
-	if req.Status == "" {
-		req.Status = "success"
-	}
-
-	// Look up model pricing from the deployment
-	var priceInPer1M, priceOutPer1M float64
-	var orgID string
-	pricingQuery := `
-		SELECT m.price_in_per_1m, m.price_out_per_1m, d.org_id
-		FROM deployments d
-		JOIN models m ON m.id = d.model_id
-		WHERE d.id = $1 AND d.deleted_at IS NULL;
-	`
-	err := m.db.Pool.QueryRow(ctx, pricingQuery, req.DeploymentID).Scan(
-		&priceInPer1M, &priceOutPer1M, &orgID,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrModelNotFound
+func (m *Meter) Routes(tm *auth.TokenManager, rev auth.RevocationStore) http.Handler {
+	mux := http.NewServeMux()
+	authn := auth.NewMiddleware(tm, rev)
+	idem := httpx.NewIdempotency(m.db.Pool, func(r *http.Request) string {
+		if c, ok := auth.GetClaims(r.Context()); ok {
+			return c.OrgID
 		}
-		return nil, fmt.Errorf("meter: failed to look up pricing: %w", err)
+		return ""
+	})
+	org := func(h http.HandlerFunc) http.Handler { return authn.Authenticate(idem.Wrap(h)) }
+	billingRole := func(h http.HandlerFunc) http.Handler {
+		return authn.Authenticate(idem.Wrap(auth.RequireRole("admin", "billing")(h)))
 	}
 
-	// Compute charges
-	amountCustomer := computeTokenCost(req.InputTokens, req.OutputTokens, priceInPer1M, priceOutPer1M)
-	amountHost := amountCustomer * HostRevenueSharePct
-
-	// Insert usage event (idempotent via ON CONFLICT)
-	insertQuery := `
-		INSERT INTO usage_events (request_id, deployment_id, replica_id, host_id,
-			input_tokens, output_tokens, gpu_seconds, tier,
-			amount_customer, amount_host, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		ON CONFLICT (request_id) DO NOTHING
-		RETURNING request_id, deployment_id, replica_id, host_id,
-			input_tokens, output_tokens, gpu_seconds, tier,
-			amount_customer, amount_host, ts, status;
-	`
-
-	var event domain.UsageEvent
-	err = m.db.Pool.QueryRow(ctx, insertQuery,
-		req.RequestID, req.DeploymentID, req.ReplicaID, req.HostID,
-		req.InputTokens, req.OutputTokens, req.GpuSeconds, req.Tier,
-		amountCustomer, amountHost, req.Status,
-	).Scan(
-		&event.RequestID, &event.DeploymentID, &event.ReplicaID, &event.HostID,
-		&event.InputTokens, &event.OutputTokens, &event.GpuSeconds, &event.Tier,
-		&event.AmountCustomer, &event.AmountHost, &event.Timestamp, &event.Status,
-	)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Duplicate request_id — idempotent, return success with empty event
-			return &domain.UsageEvent{RequestID: req.RequestID, Status: "duplicate"}, nil
-		}
-		return nil, fmt.Errorf("meter: failed to insert usage event: %w", err)
-	}
-
-	// Debit customer wallet
-	if amountCustomer > 0 && req.Status == "success" {
-		desc := fmt.Sprintf("Inference: %d input + %d output tokens on %s",
-			req.InputTokens, req.OutputTokens, req.DeploymentID[:8])
-		delta, _ := money.FromFloat(-amountCustomer, "USD")
-		_, walletErr := m.ledger.RecordTransaction(ctx, db.TransactionRequest{
-			OrgID:       orgID,
-			Delta:       delta,
-			Kind:        domain.LedgerKindDebit,
-			RefID:       &req.RequestID,
-			Description: &desc,
-		})
-		if walletErr != nil {
-			// Log but don't fail — usage is already recorded, billing will reconcile
-			fmt.Printf("meter: WARNING wallet debit failed for org %s: %v\n", orgID, walletErr)
-		}
-	}
-
-	return &event, nil
+	mux.Handle("GET /v1/billing/wallet", org(m.handleWallet))
+	mux.Handle("GET /v1/billing/ledger", org(m.handleLedger))
+	mux.Handle("POST /v1/billing/topup", billingRole(m.handleTopup))
+	mux.HandleFunc("POST /v1/billing/webhooks/razorpay", m.handleRazorpayWebhook)
+	mux.Handle("GET /v1/usage", org(m.handleUsage))
+	mux.Handle("GET /v1/invoices", org(m.handleListInvoices))
+	mux.Handle("GET /v1/invoices/{id}", org(m.handleGetInvoice))
+	mux.Handle("POST /v1/invoices/generate", billingRole(m.handleGenerateInvoice))
+	return platform.MetricsMiddleware("billing-meter", mux)
 }
 
-// GetUsageSummary returns aggregated daily usage for an organization.
-func (m *MeterService) GetUsageSummary(ctx context.Context, orgID string, deploymentID *string, startDate, endDate string) ([]UsageSummaryEntry, error) {
-	query := `
-		SELECT DATE(ue.ts) as day,
-		       COUNT(*) as request_count,
-		       SUM(ue.input_tokens) as input_tokens,
-		       SUM(ue.output_tokens) as output_tokens,
-		       SUM(ue.amount_customer) as total_cost,
-		       SUM(ue.gpu_seconds) as gpu_seconds
-		FROM usage_events ue
-		JOIN deployments d ON d.id = ue.deployment_id
-		WHERE d.org_id = $1
-		  AND ue.ts >= $2::timestamptz
-		  AND ue.ts < $3::timestamptz
-		  AND ue.status = 'success'
-	`
-	args := []interface{}{orgID, startDate, endDate}
+func claims(r *http.Request) *auth.Claims {
+	c, _ := auth.GetClaims(r.Context())
+	return c
+}
 
-	if deploymentID != nil && *deploymentID != "" {
-		query += " AND ue.deployment_id = $4"
-		args = append(args, *deploymentID)
-	}
+// ─── Wallet ───────────────────────────────────────────────────
 
-	query += " GROUP BY DATE(ue.ts) ORDER BY day DESC;"
-
-	rows, err := m.db.Pool.Query(ctx, query, args...)
+func (m *Meter) handleWallet(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	orgID := claims(r).OrgID
+	balance, err := m.ledger.GetBalance(ctx, orgID)
 	if err != nil {
-		return nil, fmt.Errorf("meter: usage summary query failed: %w", err)
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Failed to read balance")
+		return
+	}
+	cur := balance.Currency()
+
+	var creditLimit, lowThreshold money.Amount
+	_ = m.db.Pool.QueryRow(ctx, `SELECT credit_limit, low_balance_threshold FROM wallet_settings WHERE org_id = $1;`, orgID).
+		Scan(&creditLimit, &lowThreshold)
+
+	_, fx, _ := billing.FXRate(ctx, m.db.Pool, billing.PriceCurrency, cur)
+
+	var spend24h, spend30d money.Amount
+	_ = m.db.Pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(amount_customer) FILTER (WHERE ts >= NOW() - INTERVAL '24 hours'), 0),
+		       COALESCE(SUM(amount_customer), 0)
+		FROM usage_events WHERE org_id = $1 AND ts >= NOW() - INTERVAL '30 days';
+	`, orgID).Scan(&spend24h, &spend30d)
+
+	low := balance.LessThan(money.FromMicros(lowThreshold.Micros(), cur))
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"balance":               balance,
+		"currency":              cur,
+		"credit_limit":          money.FromMicros(creditLimit.Micros(), cur),
+		"low_balance_threshold": money.FromMicros(lowThreshold.Micros(), cur),
+		"low_balance":           low,
+		"spend_24h":             money.FromMicros(spend24h.Micros(), cur),
+		"spend_30d":             money.FromMicros(spend30d.Micros(), cur),
+		"fx_from_usd":           fx,
+		"topup": map[string]any{
+			"razorpay":    m.razorpay != nil,
+			"test_credit": m.allowTestCredit,
+			"key_id":      m.razorpay.keyIDOrEmpty(),
+		},
+	})
+}
+
+func (m *Meter) handleLedger(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := m.db.Pool.Query(r.Context(), `
+		SELECT entry_id, org_id, delta, balance_after, kind, ref_id, description, currency, created_at
+		FROM wallet_ledger WHERE org_id = $1 ORDER BY seq DESC LIMIT $2;
+	`, claims(r).OrgID, limit)
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Failed to read ledger")
+		return
 	}
 	defer rows.Close()
-
-	var entries []UsageSummaryEntry
+	entries := []domain.WalletLedger{}
 	for rows.Next() {
-		var e UsageSummaryEntry
-		var day time.Time
-		if err := rows.Scan(&day, &e.RequestCount, &e.InputTokens, &e.OutputTokens, &e.TotalCost, &e.GpuSecondsUsed); err != nil {
-			return nil, fmt.Errorf("meter: failed to scan usage row: %w", err)
+		var e domain.WalletLedger
+		if err := rows.Scan(&e.EntryID, &e.OrgID, &e.Delta, &e.BalanceAfter, &e.Kind, &e.RefID, &e.Description, &e.Currency, &e.CreatedAt); err == nil {
+			e.Delta = money.FromMicros(e.Delta.Micros(), e.Currency)
+			e.BalanceAfter = money.FromMicros(e.BalanceAfter.Micros(), e.Currency)
+			entries = append(entries, e)
 		}
-		e.Date = day.Format("2006-01-02")
-		entries = append(entries, e)
 	}
-
-	return entries, rows.Err()
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"entries": entries})
 }
 
-// GetBalance returns the current wallet balance for an organization.
-func (m *MeterService) GetBalance(ctx context.Context, orgID string) (money.Amount, error) {
-	return m.ledger.GetBalance(ctx, orgID)
-}
+// ─── Usage (GET /v1/usage?from&to&group_by) ───────────────────
 
-// GenerateInvoice creates an invoice for the specified billing period.
-func (m *MeterService) GenerateInvoice(ctx context.Context, req InvoiceGenerateRequest) (*domain.Invoice, error) {
-	if req.OrgID == "" || req.PeriodStart == "" || req.PeriodEnd == "" {
-		return nil, ErrMissingFields
-	}
-
-	// Aggregate usage for the period
-	aggregateQuery := `
-		SELECT COALESCE(SUM(ue.amount_customer), 0)
-		FROM usage_events ue
-		JOIN deployments d ON d.id = ue.deployment_id
-		WHERE d.org_id = $1
-		  AND ue.ts >= $2::timestamptz
-		  AND ue.ts < $3::timestamptz
-		  AND ue.status = 'success';
-	`
-
-	var subtotal float64
-	err := m.db.Pool.QueryRow(ctx, aggregateQuery, req.OrgID, req.PeriodStart, req.PeriodEnd).Scan(&subtotal)
+func (m *Meter) handleUsage(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	from, to, err := parseRange(q.Get("from"), q.Get("to"))
 	if err != nil {
-		return nil, fmt.Errorf("meter: failed to aggregate usage: %w", err)
+		httpx.WriteProblem(w, http.StatusBadRequest, err.Error())
+		return
 	}
+	var keyExpr, label string
+	switch q.Get("group_by") {
+	case "", "day":
+		keyExpr, label = "TO_CHAR(DATE_TRUNC('day', u.ts), 'YYYY-MM-DD')", "day"
+	case "deployment":
+		keyExpr, label = "d.name", "deployment"
+	case "model":
+		keyExpr, label = "m.name", "model"
+	default:
+		httpx.WriteProblem(w, http.StatusBadRequest, "group_by must be day, deployment or model")
+		return
+	}
+	orgID := claims(r).OrgID
+	rows, err := m.db.Pool.Query(r.Context(), `
+		SELECT `+keyExpr+` AS k, COUNT(*), COUNT(*) FILTER (WHERE u.status <> 'success'),
+		       COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0),
+		       COALESCE(SUM(u.gpu_seconds), 0)::FLOAT8, COALESCE(SUM(u.amount_customer), 0), MAX(u.currency)
+		FROM usage_events u
+		JOIN deployments d ON d.id = u.deployment_id
+		JOIN models m ON m.id = d.model_id
+		WHERE u.org_id = $1 AND u.ts >= $2 AND u.ts < $3
+		GROUP BY k ORDER BY k;
+	`, orgID, from, to)
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Failed to read usage")
+		return
+	}
+	defer rows.Close()
+	type row struct {
+		Key          string       `json:"key"`
+		Requests     int64        `json:"requests"`
+		Errors       int64        `json:"errors"`
+		InputTokens  int64        `json:"input_tokens"`
+		OutputTokens int64        `json:"output_tokens"`
+		GPUSeconds   float64      `json:"gpu_seconds"`
+		Cost         money.Amount `json:"cost"`
+	}
+	out := []row{}
+	for rows.Next() {
+		var x row
+		var cost money.Amount
+		var cur *string
+		if err := rows.Scan(&x.Key, &x.Requests, &x.Errors, &x.InputTokens, &x.OutputTokens, &x.GPUSeconds, &cost, &cur); err != nil {
+			continue
+		}
+		c := "USD"
+		if cur != nil {
+			c = *cur
+		}
+		x.Cost = money.FromMicros(cost.Micros(), c)
+		out = append(out, x)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"group_by": label, "from": from, "to": to, "rows": out})
+}
 
-	gstAmount := subtotal * GSTRate
-	total := subtotal + gstAmount
+func parseRange(fromS, toS string) (time.Time, time.Time, error) {
+	to := time.Now().UTC().Add(time.Minute)
+	from := to.AddDate(0, 0, -30)
+	var err error
+	if fromS != "" {
+		if from, err = parseDate(fromS); err != nil {
+			return from, to, fmt.Errorf("from: %w", err)
+		}
+	}
+	if toS != "" {
+		if to, err = parseDate(toS); err != nil {
+			return from, to, fmt.Errorf("to: %w", err)
+		}
+	}
+	if !from.Before(to) {
+		return from, to, errors.New("from must be before to")
+	}
+	return from, to, nil
+}
 
-	// Generate invoice number: INV-{YYYYMM}-{orgID[:8]}
-	periodStart, _ := time.Parse("2006-01-02", req.PeriodStart)
-	invoiceNumber := fmt.Sprintf("INV-%s-%s", periodStart.Format("200601"), req.OrgID[:8])
+func parseDate(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Parse("2006-01-02", s)
+}
 
-	var invoice domain.Invoice
-	err = m.db.ExecTx(ctx, func(tx pgx.Tx) error {
-		invoiceQuery := `
-			INSERT INTO invoices (org_id, number, period_start, period_end, subtotal, tax_amount, tax_name, tax_rate, total, currency, status)
-			VALUES ($1, $2, $3, $4, $5, $6, 'GST', '0.18', $7, 'USD', 'issued')
-			RETURNING id, org_id, number, period_start, period_end, subtotal, tax_amount, total, status, created_at;
-		`
-		err := tx.QueryRow(ctx, invoiceQuery,
-			req.OrgID, invoiceNumber, req.PeriodStart, req.PeriodEnd,
-			subtotal, gstAmount, total,
-		).Scan(
-			&invoice.ID, &invoice.OrgID, &invoice.Number,
-			&invoice.PeriodStart, &invoice.PeriodEnd,
-			&invoice.Subtotal, &invoice.TaxAmount, &invoice.Total,
-			&invoice.Status, &invoice.CreatedAt,
+// ─── Reconciliation ───────────────────────────────────────────
+
+// Reconcile compares usage charges with the wallet debits that paid for them
+// and publishes the difference per currency.
+func (m *Meter) Reconcile(ctx context.Context) error {
+	rows, err := m.db.Pool.Query(ctx, `
+		WITH charges AS (
+			SELECT currency, SUM(amount_customer) AS amt FROM usage_events
+			WHERE ts >= NOW() - INTERVAL '30 days' AND amount_customer > 0 GROUP BY currency
+		), debits AS (
+			SELECT l.currency, -SUM(l.delta) AS amt
+			FROM wallet_ledger l
+			WHERE l.kind = 'debit' AND l.created_at >= NOW() - INTERVAL '30 days'
+			  AND EXISTS (SELECT 1 FROM usage_events u WHERE u.request_id = l.ref_id AND u.ts >= NOW() - INTERVAL '31 days')
+			GROUP BY l.currency
 		)
-		if err != nil {
-			return fmt.Errorf("meter: failed to create invoice: %w", err)
+		SELECT COALESCE(c.currency, d.currency), COALESCE(c.amt, 0) - COALESCE(d.amt, 0)
+		FROM charges c FULL OUTER JOIN debits d ON d.currency = c.currency;
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cur string
+		var drift money.Amount
+		if err := rows.Scan(&cur, &drift); err != nil {
+			return err
+		}
+		ledgerDrift.WithLabelValues(cur).Set(float64(drift.Micros()))
+		if !drift.IsZero() {
+			m.log.Error("ledger drift detected", "currency", cur, "drift", drift.String())
+		}
+	}
+	return rows.Err()
+}
+
+// ─── Invoices (SRS FR-73) ─────────────────────────────────────
+
+type invoiceRequest struct {
+	PeriodStart string `json:"period_start"` // YYYY-MM-DD, inclusive
+	PeriodEnd   string `json:"period_end"`   // YYYY-MM-DD, exclusive
+}
+
+func (m *Meter) handleGenerateInvoice(w http.ResponseWriter, r *http.Request) {
+	var req invoiceRequest
+	if httpx.DecodeJSON(w, r, &req) != nil {
+		return
+	}
+	start, err1 := time.Parse("2006-01-02", req.PeriodStart)
+	end, err2 := time.Parse("2006-01-02", req.PeriodEnd)
+	if err1 != nil || err2 != nil || !start.Before(end) {
+		httpx.WriteProblem(w, http.StatusBadRequest, "period_start and period_end must be YYYY-MM-DD with start before end")
+		return
+	}
+	inv, err := m.GenerateInvoice(r.Context(), claims(r).OrgID, start, end)
+	if err != nil {
+		m.log.Error("invoice generation failed", "err", err)
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Failed to generate invoice")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"invoice": inv})
+}
+
+// GenerateInvoice builds an invoice for a period from usage events. Amounts are
+// already in the wallet currency; tax comes from the organisation's billing
+// country via tax_jurisdictions (GST 18% for India). Re-running for the same
+// period returns the existing invoice.
+func (m *Meter) GenerateInvoice(ctx context.Context, orgID string, start, end time.Time) (*domain.Invoice, error) {
+	var inv domain.Invoice
+	err := m.db.ExecTx(ctx, func(tx pgx.Tx) error {
+		var currency string
+		var country *string
+		if err := tx.QueryRow(ctx, `SELECT currency, billing_country FROM organizations WHERE id = $1;`, orgID).Scan(&currency, &country); err != nil {
+			return err
+		}
+		number := fmt.Sprintf("INV-%s-%s-%s", start.Format("20060102"), end.Format("20060102"), orgID[:8])
+
+		if err := scanInvoice(tx.QueryRow(ctx, invoiceSelect+` WHERE number = $1 AND org_id = $2;`, number, orgID), &inv); err == nil {
+			return nil
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
 		}
 
-		// Create per-deployment invoice lines
-		linesQuery := `
+		var subtotal money.Amount
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(SUM(amount_customer), 0) FROM usage_events
+			WHERE org_id = $1 AND ts >= $2 AND ts < $3 AND status = 'success';
+		`, orgID, start, end).Scan(&subtotal); err != nil {
+			return err
+		}
+		subtotal = money.FromMicros(subtotal.Micros(), currency)
+
+		taxName, rateStr := "Tax", "0"
+		if country != nil {
+			_ = tx.QueryRow(ctx, `
+				SELECT tax_name, rate::TEXT FROM tax_jurisdictions
+				WHERE country_code = $1 AND region_code IS NULL AND effective_from <= $2
+				  AND (effective_to IS NULL OR effective_to > $2)
+				ORDER BY effective_from DESC LIMIT 1;
+			`, *country, start).Scan(&taxName, &rateStr)
+		}
+		num, den, err := decimalRatio(rateStr)
+		if err != nil {
+			return err
+		}
+		tax, err := subtotal.MulRate(num, den)
+		if err != nil {
+			return err
+		}
+		total, err := subtotal.Add(tax)
+		if err != nil {
+			return err
+		}
+
+		if err := scanInvoice(tx.QueryRow(ctx, `
+			INSERT INTO invoices (org_id, number, period_start, period_end, subtotal, tax_amount, tax_name, tax_rate,
+			                      tax_country, total, currency, fx_rate, status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8::NUMERIC, $9, $10, $11, 1, 'issued')
+			RETURNING `+invoiceColumns+`;
+		`, orgID, number, start, end, subtotal, tax, taxName, rateStr, country, total, currency), &inv); err != nil {
+			return err
+		}
+
+		_, err = tx.Exec(ctx, `
 			INSERT INTO invoice_lines (invoice_id, description, quantity, unit_price, amount)
-			SELECT $1,
-			       'Inference usage: ' || m.name || ' (' || d.name || ')',
-			       SUM(ue.input_tokens + ue.output_tokens),
-			       CASE WHEN SUM(ue.input_tokens + ue.output_tokens) > 0
-			            THEN SUM(ue.amount_customer) / SUM(ue.input_tokens + ue.output_tokens)
-			            ELSE 0 END,
-			       SUM(ue.amount_customer)
-			FROM usage_events ue
-			JOIN deployments d ON d.id = ue.deployment_id
-			JOIN models m ON m.id = d.model_id
-			WHERE d.org_id = $2
-			  AND ue.ts >= $3::timestamptz
-			  AND ue.ts < $4::timestamptz
-			  AND ue.status = 'success'
-			GROUP BY d.id, d.name, m.name;
-		`
-		_, err = tx.Exec(ctx, linesQuery, invoice.ID, req.OrgID, req.PeriodStart, req.PeriodEnd)
-		if err != nil {
-			return fmt.Errorf("meter: failed to create invoice lines: %w", err)
-		}
-
-		return nil
+			SELECT $1, 'Inference — ' || d.name || ' (' || m.name || ', ' || UPPER(u.tier) || ')',
+			       SUM(u.input_tokens + u.output_tokens),
+			       CASE WHEN SUM(u.input_tokens + u.output_tokens) > 0
+			            THEN SUM(u.amount_customer) / SUM(u.input_tokens + u.output_tokens) ELSE 0 END,
+			       SUM(u.amount_customer)
+			FROM usage_events u JOIN deployments d ON d.id = u.deployment_id JOIN models m ON m.id = d.model_id
+			WHERE u.org_id = $2 AND u.ts >= $3 AND u.ts < $4 AND u.status = 'success'
+			GROUP BY d.name, m.name, u.tier;
+		`, inv.ID, orgID, start, end)
+		return err
 	})
-
 	if err != nil {
 		return nil, err
 	}
-
-	return &invoice, nil
+	return &inv, m.loadLines(ctx, &inv)
 }
 
-// ListInvoices returns all invoices for an organization.
-func (m *MeterService) ListInvoices(ctx context.Context, orgID string) ([]domain.Invoice, error) {
-	query := `
-		SELECT id, org_id, number, period_start, period_end,
-		       subtotal, tax_amount, total, status, pdf_url, created_at
-		FROM invoices
-		WHERE org_id = $1
-		ORDER BY period_start DESC;
-	`
-
-	rows, err := m.db.Pool.Query(ctx, query, orgID)
+// decimalRatio turns "0.1800" into 1800/10000 for exact multiplication.
+func decimalRatio(s string) (int64, int64, error) {
+	a, err := money.Parse(s, "")
 	if err != nil {
-		return nil, fmt.Errorf("meter: failed to list invoices: %w", err)
+		return 0, 0, err
+	}
+	return a.Micros(), 1_000_000, nil
+}
+
+const invoiceColumns = `id, org_id, number, period_start, period_end, subtotal, tax_amount, tax_name, tax_rate::TEXT,
+	total, currency, fx_rate::TEXT, tax_country, reverse_charge, status, pdf_url, created_at`
+
+const invoiceSelect = `SELECT ` + invoiceColumns + ` FROM invoices`
+
+func scanInvoice(row pgx.Row, inv *domain.Invoice) error {
+	err := row.Scan(&inv.ID, &inv.OrgID, &inv.Number, &inv.PeriodStart, &inv.PeriodEnd, &inv.Subtotal, &inv.TaxAmount,
+		&inv.TaxName, &inv.TaxRate, &inv.Total, &inv.Currency, &inv.FxRate, &inv.TaxCountry, &inv.ReverseCharge,
+		&inv.Status, &inv.PdfURL, &inv.CreatedAt)
+	if err == nil {
+		for _, a := range []*money.Amount{&inv.Subtotal, &inv.TaxAmount, &inv.Total} {
+			*a = money.FromMicros(a.Micros(), inv.Currency)
+		}
+	}
+	return err
+}
+
+func (m *Meter) loadLines(ctx context.Context, inv *domain.Invoice) error {
+	rows, err := m.db.Pool.Query(ctx, `
+		SELECT id, invoice_id, description, quantity::FLOAT8, unit_price, amount, created_at
+		FROM invoice_lines WHERE invoice_id = $1 ORDER BY description;
+	`, inv.ID)
+	if err != nil {
+		return err
 	}
 	defer rows.Close()
+	inv.Lines = []domain.InvoiceLine{}
+	for rows.Next() {
+		var l domain.InvoiceLine
+		if err := rows.Scan(&l.ID, &l.InvoiceID, &l.Description, &l.Quantity, &l.UnitPrice, &l.Amount, &l.CreatedAt); err != nil {
+			return err
+		}
+		l.UnitPrice = money.FromMicros(l.UnitPrice.Micros(), inv.Currency)
+		l.Amount = money.FromMicros(l.Amount.Micros(), inv.Currency)
+		inv.Lines = append(inv.Lines, l)
+	}
+	return rows.Err()
+}
 
-	var invoices []domain.Invoice
+func (m *Meter) handleListInvoices(w http.ResponseWriter, r *http.Request) {
+	rows, err := m.db.Pool.Query(r.Context(), invoiceSelect+` WHERE org_id = $1 ORDER BY period_start DESC;`, claims(r).OrgID)
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Failed to list invoices")
+		return
+	}
+	defer rows.Close()
+	list := []domain.Invoice{}
 	for rows.Next() {
 		var inv domain.Invoice
-		if err := rows.Scan(
-			&inv.ID, &inv.OrgID, &inv.Number, &inv.PeriodStart, &inv.PeriodEnd,
-			&inv.Subtotal, &inv.TaxAmount, &inv.Total, &inv.Status, &inv.PdfURL, &inv.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("meter: failed to scan invoice: %w", err)
-		}
-		invoices = append(invoices, inv)
-	}
-
-	return invoices, rows.Err()
-}
-
-// computeTokenCost calculates the customer charge based on token counts and pricing.
-func computeTokenCost(inputTokens, outputTokens int, priceInPer1M, priceOutPer1M float64) float64 {
-	inputCost := float64(inputTokens) * priceInPer1M / 1_000_000.0
-	outputCost := float64(outputTokens) * priceOutPer1M / 1_000_000.0
-	return inputCost + outputCost
-}
-
-// ─── HTTP Handlers ────────────────────────────────────────────
-
-// RegisterRoutes registers all billing meter HTTP endpoints on the provided mux.
-func (m *MeterService) RegisterRoutes(mux *http.ServeMux, svcAuth *auth.ServiceAuthenticator, tm *auth.TokenManager, revStore auth.RevocationStore) {
-	authMw := auth.NewMiddleware(tm, revStore)
-
-	// Internal service endpoint: only the inference-gateway may ingest usage
-	mux.Handle("POST /v1/usage", svcAuth.RequireInternalService(auth.ServiceInferenceGateway)(http.HandlerFunc(m.handleIngestUsage)))
-
-	// Org-scoped endpoints: protected by JWT Bearer token + matching org_id
-	mux.Handle("GET /v1/usage/{org_id}", authMw.Authenticate(auth.RequireOrg("org_id")(http.HandlerFunc(m.handleGetUsageSummary))))
-	mux.Handle("GET /v1/balance/{org_id}", authMw.Authenticate(auth.RequireOrg("org_id")(http.HandlerFunc(m.handleGetBalance))))
-	mux.Handle("POST /v1/invoices/generate", authMw.Authenticate(http.HandlerFunc(m.handleGenerateInvoice)))
-	mux.Handle("GET /v1/invoices/{org_id}", authMw.Authenticate(auth.RequireOrg("org_id")(http.HandlerFunc(m.handleListInvoices))))
-}
-
-func (m *MeterService) handleIngestUsage(w http.ResponseWriter, r *http.Request) {
-	var req UsageIngestRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeMeterError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-
-	event, err := m.IngestUsage(r.Context(), req)
-	if err != nil {
-		if errors.Is(err, ErrMissingFields) {
-			writeMeterError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if errors.Is(err, ErrModelNotFound) {
-			writeMeterError(w, http.StatusNotFound, err.Error())
-			return
-		}
-		writeMeterError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	writeMeterJSON(w, http.StatusCreated, event)
-}
-
-func (m *MeterService) handleGetUsageSummary(w http.ResponseWriter, r *http.Request) {
-	orgID := r.PathValue("org_id")
-	if orgID == "" {
-		writeMeterError(w, http.StatusBadRequest, "org_id is required")
-		return
-	}
-
-	startDate := r.URL.Query().Get("start_date")
-	endDate := r.URL.Query().Get("end_date")
-	if startDate == "" {
-		startDate = time.Now().AddDate(0, -1, 0).Format("2006-01-02")
-	}
-	if endDate == "" {
-		endDate = time.Now().AddDate(0, 0, 1).Format("2006-01-02")
-	}
-
-	var deploymentID *string
-	if did := r.URL.Query().Get("deployment_id"); did != "" {
-		deploymentID = &did
-	}
-
-	entries, err := m.GetUsageSummary(r.Context(), orgID, deploymentID, startDate, endDate)
-	if err != nil {
-		writeMeterError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	writeMeterJSON(w, http.StatusOK, map[string]interface{}{
-		"org_id":     orgID,
-		"start_date": startDate,
-		"end_date":   endDate,
-		"entries":    entries,
-	})
-}
-
-func (m *MeterService) handleGetBalance(w http.ResponseWriter, r *http.Request) {
-	orgID := r.PathValue("org_id")
-	if orgID == "" {
-		writeMeterError(w, http.StatusBadRequest, "org_id is required")
-		return
-	}
-
-	balance, err := m.GetBalance(r.Context(), orgID)
-	if err != nil {
-		writeMeterError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	writeMeterJSON(w, http.StatusOK, map[string]interface{}{
-		"org_id":  orgID,
-		"balance": balance,
-	})
-}
-
-func (m *MeterService) handleGenerateInvoice(w http.ResponseWriter, r *http.Request) {
-	var req InvoiceGenerateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeMeterError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-
-	if claims, ok := auth.GetClaims(r.Context()); ok && claims != nil {
-		if claims.OrgID != "" && req.OrgID != claims.OrgID && !strings.EqualFold(claims.Role, "admin") {
-			writeMeterError(w, http.StatusForbidden, "Cannot generate invoice for another organization")
-			return
+		if err := scanInvoice(rows, &inv); err == nil {
+			list = append(list, inv)
 		}
 	}
-
-	invoice, err := m.GenerateInvoice(r.Context(), req)
-	if err != nil {
-		if errors.Is(err, ErrMissingFields) {
-			writeMeterError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeMeterError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	writeMeterJSON(w, http.StatusCreated, invoice)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"invoices": list})
 }
 
-func (m *MeterService) handleListInvoices(w http.ResponseWriter, r *http.Request) {
-	orgID := r.PathValue("org_id")
-	if orgID == "" {
-		writeMeterError(w, http.StatusBadRequest, "org_id is required")
+func (m *Meter) handleGetInvoice(w http.ResponseWriter, r *http.Request) {
+	var inv domain.Invoice
+	if err := scanInvoice(m.db.Pool.QueryRow(r.Context(), invoiceSelect+` WHERE id::TEXT = $1 AND org_id = $2;`,
+		r.PathValue("id"), claims(r).OrgID), &inv); err != nil {
+		httpx.WriteProblem(w, http.StatusNotFound, "Invoice not found")
 		return
 	}
-
-	invoices, err := m.ListInvoices(r.Context(), orgID)
-	if err != nil {
-		writeMeterError(w, http.StatusInternalServerError, err.Error())
+	if err := m.loadLines(r.Context(), &inv); err != nil {
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Failed to read invoice lines")
 		return
 	}
-
-	writeMeterJSON(w, http.StatusOK, map[string]interface{}{
-		"org_id":   orgID,
-		"invoices": invoices,
-		"count":    len(invoices),
-	})
-}
-
-func writeMeterJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(data)
-}
-
-func writeMeterError(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"invoice": inv})
 }

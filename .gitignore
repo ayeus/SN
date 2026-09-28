@@ -51,10 +51,30 @@ deploy/compose/data/
 *.pem
 !deploy/compose/*.pem
 
-# Protobuf generated
-**/gen/
+# Generated protobuf code IS committed (gen/go): the Go module imports it, so a
+# fresh clone must build without buf.
+
+# Local development
+logs/
+dist/
+.dev-pids
 
 # Coverage
 coverage/
 *.coverprofile
 htmlcov/
+
+# Private product documents — never pushed
+SpazeNode Dev Docs Pack/
+
+# Local Claude Code settings
+.claude/
+
+# Stray `go build ./services/<name>` output in the repo root
+/control-api
+/coordinator
+/inference-gateway
+/scheduler
+/gateway
+/billing-meter
+/trust-engine

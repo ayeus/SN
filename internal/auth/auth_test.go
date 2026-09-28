@@ -128,7 +128,7 @@ func TestAudienceSeparation(t *testing.T) {
 		t.Error("an access token was accepted as a refresh token")
 	}
 
-	reg, err := tm.GenerateRegistrationToken("usr_1", "org_1")
+	reg, err := tm.GenerateRegistrationToken("usr_1", "org_1", "t3")
 	if err != nil {
 		t.Fatalf("GenerateRegistrationToken error: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestAuthMiddlewareAndRBAC(t *testing.T) {
 	})
 
 	t.Run("HostInstallerCannotAccessAPI", func(t *testing.T) {
-		reg, err := tm.GenerateRegistrationToken("usr_host", "org_1")
+		reg, err := tm.GenerateRegistrationToken("usr_host", "org_1", "t3")
 		if err != nil {
 			t.Fatalf("GenerateRegistrationToken error: %v", err)
 		}

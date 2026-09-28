@@ -1,134 +1,82 @@
-// Package main implements the AyeusANN Control API.
-// Responsibilities: Auth, CRUD for orgs, users, API keys, models, hosts, deployments.
+// Package main implements the AyeusANN Control API: organisations, users, API
+// keys, the model catalogue, deployments, hosts and the ops console
+// (Architecture §4). It does not serve the frontend; the gateway does.
 package main
 
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
-	"path/filepath"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/auth"
-	"github.com/ayeus/ayeusann/internal/db"
+	"github.com/ayeus/ayeusann/internal/httpx"
+	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/ayeus/ayeusann/internal/platform"
 )
 
-// devJWTSecret is used only when SN_ENV is dev/development/test. In any other
-// environment platform.RequireSecret refuses it and the service will not start.
-const devJWTSecret = "dev-only-insecure-jwt-signing-key-0001"
-
 func main() {
 	port := platform.EnvInt("CONTROL_API_PORT", 8081)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "control-api")
 
-	dbURL, err := platform.RequireEnv("DATABASE_URL",
-		"postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable")
+	jwtSecret, err := platform.JWTSecret()
 	if err != nil {
 		log.Fatalf("configuration error: %v", err)
 	}
-
-	// A weak or missing signing key is a total authentication bypass, so the
-	// service refuses to start rather than falling back to a known default.
-	jwtSecret, err := platform.RequireSecret("JWT_SECRET", devJWTSecret, 32)
+	signupCredit, err := parseCredit(platform.Env("SIGNUP_CREDIT", "500 INR"))
 	if err != nil {
-		log.Fatalf("configuration error: %v", err)
+		log.Fatalf("configuration error: SIGNUP_CREDIT: %v", err)
 	}
 
-	// Initialize DB Client
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	dbClient, err := db.NewClient(ctx, db.Config{URL: dbURL})
+	ctx := context.Background()
+	dbClient, err := platform.ConnectDB(ctx)
 	if err != nil {
 		log.Fatalf("failed to connect to database: %v", err)
 	}
 	defer dbClient.Close()
 
-	// Initialize TokenManager & LedgerService
 	tm, err := auth.NewTokenManager(jwtSecret, 15*time.Minute, 7*24*time.Hour)
 	if err != nil {
 		log.Fatalf("failed to initialize token manager: %v", err)
 	}
-	revocations := auth.NewPGRevocationStore(dbClient.Pool)
-	authMW := auth.NewMiddleware(tm, revocations)
-	ledger := db.NewLedgerService(dbClient)
 
-	// Initialize Server
-	srv, err := platform.NewServer(platform.ServiceConfig{
-		Name:    "control-api",
-		Version: "0.1.0",
-		Port:    port,
+	api := NewAPI(dbClient, tm, auth.NewPGRevocationStore(dbClient.Pool), logger, Config{
+		PublicURL:            platform.PublicURL(),
+		CoordinatorPublicURL: platform.CoordinatorPublicURL(),
+		InferenceHost:        platform.Env("INFERENCE_HOST", ""),
+		HeartbeatTimeout:     platform.HeartbeatTimeout(),
+		PlatformAdminEmails:  httpx.SplitList(platform.Env("PLATFORM_ADMIN_EMAILS", "")),
+		SignupCredit:         signupCredit,
 	})
+
+	srv, err := platform.NewServer(platform.ServiceConfig{Name: "control-api", Version: "0.3.0", Port: port})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
-
-	authHandler := NewAuthHandler(dbClient, tm, revocations, ledger)
-	modelHandler := NewModelHandler(dbClient)
-	hostHandler := NewHostHandler(dbClient, tm)
-
-	// Public Auth Endpoints
-	srv.Mux.HandleFunc("POST /v1/auth/signup", authHandler.HandleSignup)
-	srv.Mux.HandleFunc("POST /v1/auth/login", authHandler.HandleLogin)
-	srv.Mux.HandleFunc("POST /v1/auth/refresh", authHandler.HandleRefresh)
-
-	// Public Model Catalog Endpoints
-	srv.Mux.HandleFunc("GET /v1/models", modelHandler.HandleListModels)
-	srv.Mux.HandleFunc("GET /v1/models/{id}", modelHandler.HandleGetModel)
-
-	// Protected Endpoints
-	protectedMux := http.NewServeMux()
-	protectedMux.HandleFunc("GET /v1/auth/me", authHandler.HandleMe)
-	protectedMux.HandleFunc("POST /v1/auth/logout", authHandler.HandleLogout)
-	protectedMux.HandleFunc("POST /v1/auth/logout-all", authHandler.HandleLogoutAll)
-	protectedMux.Handle("POST /v1/api-keys", auth.RequireRole("admin", "member")(http.HandlerFunc(authHandler.HandleCreateAPIKey)))
-	protectedMux.Handle("GET /v1/api-keys", auth.RequireRole("admin", "member")(http.HandlerFunc(authHandler.HandleListAPIKeys)))
-	protectedMux.Handle("DELETE /v1/api-keys/{id}", auth.RequireRole("admin")(http.HandlerFunc(authHandler.HandleRevokeAPIKey)))
-	protectedMux.Handle("POST /v1/models/byo", auth.RequireRole("admin", "member")(http.HandlerFunc(modelHandler.HandleBYOModel)))
-
-	// Host Management Endpoints
-	protectedMux.Handle("POST /v1/hosts/register-token", auth.RequireRole("admin", "member")(http.HandlerFunc(hostHandler.HandleIssueRegistrationToken)))
-	protectedMux.HandleFunc("GET /v1/hosts", hostHandler.HandleListHosts)
-	protectedMux.HandleFunc("GET /v1/hosts/{id}", hostHandler.HandleGetHost)
-
-	// Everything under the protected mux goes through authentication once, here,
-	// rather than being trusted because it happened to be registered on a
-	// different mux.
-	protected := authMW.Authenticate(protectedMux)
-
-	// Serve Static Frontend UI & Installer Scripts. Resolving the directory at
-	// startup means the service no longer depends on being launched from the
-	// repository root.
-	webDir := platform.Env("WEB_DIR", "web")
-	fileServer := http.FileServer(http.Dir(webDir))
-	srv.Mux.Handle("GET /static/", http.StripPrefix("/static/", fileServer))
-	srv.Mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-		http.ServeFile(w, r, filepath.Join(webDir, "install.sh"))
-	})
-	srv.Mux.HandleFunc("GET /install.ps1", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		http.ServeFile(w, r, filepath.Join(webDir, "install.ps1"))
-	})
-	srv.Mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-			http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
-			return
-		}
-		protected.ServeHTTP(w, r)
-	})
-	// Non-GET traffic that did not match a public route still needs to reach the
-	// protected mux; "GET /" only matches GET.
-	srv.Mux.Handle("/", protected)
-
-	// Readiness reflects the database, so a replica with a dead pool is pulled
-	// from the load balancer instead of serving 500s.
-	srv.SetReadyCheck(func(ctx context.Context) error {
-		return dbClient.Pool.Ping(ctx)
-	})
-
+	srv.Mux.Handle("/v1/", api.Routes())
+	srv.SetReadyCheck(func(ctx context.Context) error { return dbClient.Pool.Ping(ctx) })
 	srv.SetReady()
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// parseCredit reads "500 INR" or "6 USD". "0" disables the grant.
+func parseCredit(s string) (money.Amount, error) {
+	parts := strings.Fields(s)
+	switch len(parts) {
+	case 1:
+		return money.Parse(parts[0], "INR")
+	case 2:
+		return money.Parse(parts[0], strings.ToUpper(parts[1]))
+	default:
+		return money.Amount{}, errBadAction(`expected "<amount> <currency>", e.g. "500 INR"`)
+	}
+}
+
+func platformMetrics(h http.Handler) http.Handler {
+	return platform.MetricsMiddleware("control-api", h)
 }

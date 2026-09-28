@@ -1,32 +1,62 @@
 // Package main implements the AyeusANN Scheduler.
-// Responsibilities: GPU placement (filter→score→reserve), rebalance loops.
+//
+// Architecture §4: "placement + rebalance loops". The scheduler reads intent
+// from Postgres (deployments.desired_state) instead of receiving HTTP calls, so
+// a deployment is placed even if the scheduler was down when it was created,
+// and a replica lost to a failed host is backfilled without anyone asking.
 package main
 
 import (
+	"context"
 	"log"
-	"net/http"
-	"strconv"
+	"log/slog"
+	"os"
+	"time"
 
 	"github.com/ayeus/ayeusann/internal/platform"
 )
 
 func main() {
-	port, _ := strconv.Atoi(platform.MustEnv("SCHEDULER_PORT", "8082"))
+	port := platform.EnvInt("SCHEDULER_PORT", 8082)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "scheduler")
 
-	srv, err := platform.NewServer(platform.ServiceConfig{
-		Name:    "scheduler",
-		Version: "0.1.0",
-		Port:    port,
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dbClient, err := platform.ConnectDB(ctx)
+	if err != nil {
+		log.Fatalf("failed to connect to database: %v", err)
+	}
+	defer dbClient.Close()
+
+	rec := &Reconciler{
+		db:               dbClient,
+		log:              logger,
+		heartbeatTimeout: platform.HeartbeatTimeout(),
+		scheduleTimeout:  time.Duration(platform.EnvInt("SCHEDULE_TIMEOUT_SEC", 600)) * time.Second,
+	}
+	interval := time.Duration(platform.EnvInt("SCHEDULER_INTERVAL_MS", 1000)) * time.Millisecond
+
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := rec.Tick(ctx); err != nil && ctx.Err() == nil {
+					logger.Error("reconcile tick failed", "err", err)
+				}
+			}
+		}
+	}()
+
+	srv, err := platform.NewServer(platform.ServiceConfig{Name: "scheduler", Version: "0.3.0", Port: port})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
-
-	srv.Mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"service":"AyeusANN-scheduler","version":"0.1.0"}`))
-	})
-
+	srv.SetReadyCheck(func(ctx context.Context) error { return dbClient.Pool.Ping(ctx) })
 	srv.SetReady()
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server error: %v", err)

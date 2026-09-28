@@ -1,40 +1,25 @@
 package db_test
 
 import (
-	"os"
 	"context"
 	"crypto/rand"
+	"errors"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ayeus/ayeusann/internal/crypto"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/domain"
 	"github.com/ayeus/ayeusann/internal/money"
+	"github.com/ayeus/ayeusann/internal/testutil"
+	"github.com/google/uuid"
 )
 
-func getTestDBURL() string {
-	if url := os.Getenv("DATABASE_URL"); url != "" {
-		return url
-	}
-	return "postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable"
-}
-
+// setupTestClient connects to the isolated test database (never the dev one);
+// see testutil.DB for skip-versus-fail behaviour.
 func setupTestClient(t *testing.T) *db.Client {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	client, err := db.NewClient(ctx, db.Config{
-		URL:      getTestDBURL(),
-		MaxConns: 5,
-	})
-	if err != nil {
-		t.Fatalf("Failed to connect to test database (%s): %v", getTestDBURL(), err)
-	}
-
-	return client
+	return testutil.DB(t)
 }
 
 func TestDatabasePing(t *testing.T) {
@@ -126,17 +111,25 @@ func TestUsageEventAppendOnlyPartitioning(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Setup dummy org, user, host, model, deployment, replica for FK requirements
-	var orgID, modelID, hostID, deploymentID, replicaID string
+	// Setup dummy org, user, host, deployment, replica for FK requirements
+	var orgID, hostID, deploymentID, replicaID string
+	modelID := "550e8400-e29b-41d4-a716-446655440001" // Genuine catalog model
 
 	_ = client.Pool.QueryRow(ctx, `INSERT INTO organizations (name) VALUES ('UsageTestOrg') RETURNING id`).Scan(&orgID)
-	_ = client.Pool.QueryRow(ctx, `INSERT INTO models (name, family, params_b, license, min_vram_gb, price_in_per_1m, price_out_per_1m) VALUES ($1, 'llama', 8, 'mit', 16, 0.08, 0.22) RETURNING id`, "model-"+uuid.New().String()).Scan(&modelID)
 	_ = client.Pool.QueryRow(ctx, `INSERT INTO hosts (name, tier, region) VALUES ('TestHost', 't1', 'IN-SOUTH') RETURNING id`).Scan(&hostID)
 	_ = client.Pool.QueryRow(ctx, `INSERT INTO deployments (org_id, model_id, name, tier, region) VALUES ($1, $2, 'Dep1', 't1', 'IN-SOUTH') RETURNING id`, orgID, modelID).Scan(&deploymentID)
 	_ = client.Pool.QueryRow(ctx, `INSERT INTO replicas (deployment_id, host_id, state) VALUES ($1, $2, 'serving') RETURNING id`, deploymentID, hostID).Scan(&replicaID)
 
 	requestID := uuid.New().String()
 	ts := time.Now()
+
+	defer func() {
+		_, _ = client.Pool.Exec(context.Background(), "DELETE FROM usage_events WHERE request_id = $1", requestID)
+		_, _ = client.Pool.Exec(context.Background(), "DELETE FROM replicas WHERE id = $1", replicaID)
+		_, _ = client.Pool.Exec(context.Background(), "DELETE FROM deployments WHERE id = $1", deploymentID)
+		_, _ = client.Pool.Exec(context.Background(), "DELETE FROM hosts WHERE id = $1", hostID)
+		_, _ = client.Pool.Exec(context.Background(), "DELETE FROM organizations WHERE id = $1", orgID)
+	}()
 
 	// Insert into partitioned usage_events
 	query := `
@@ -196,10 +189,10 @@ func TestLedgerServiceTransactions(t *testing.T) {
 	ref1 := uuid.New().String()
 	desc1 := "Initial Topup"
 	entry1, err := ledger.RecordTransaction(ctx, db.TransactionRequest{
-		OrgID: orgID,
-		Delta: money.MustParse("50.00", "USD"),
-		Kind:  domain.LedgerKindTopup,
-		RefID: &ref1,
+		OrgID:       orgID,
+		Delta:       money.MustParse("50.00", "USD"),
+		Kind:        domain.LedgerKindTopup,
+		RefID:       &ref1,
 		Description: &desc1,
 	})
 	if err != nil {
@@ -214,10 +207,10 @@ func TestLedgerServiceTransactions(t *testing.T) {
 	ref2 := uuid.New().String()
 	desc2 := "Inference Usage"
 	entry2, err := ledger.RecordTransaction(ctx, db.TransactionRequest{
-		OrgID: orgID,
-		Delta: money.MustParse("-15.00", "USD"),
-		Kind:  domain.LedgerKindDebit,
-		RefID: &ref2,
+		OrgID:       orgID,
+		Delta:       money.MustParse("-15.00", "USD"),
+		Kind:        domain.LedgerKindDebit,
+		RefID:       &ref2,
 		Description: &desc2,
 	})
 	if err != nil {
@@ -234,7 +227,7 @@ func TestLedgerServiceTransactions(t *testing.T) {
 		Delta: money.MustParse("-40.00", "USD"),
 		Kind:  domain.LedgerKindDebit,
 	})
-	if err == nil || err != db.ErrInsufficientBalance {
+	if !errors.Is(err, db.ErrInsufficientBalance) {
 		t.Fatalf("Expected ErrInsufficientBalance, got %v", err)
 	}
 

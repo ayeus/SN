@@ -1,160 +1,92 @@
-# AyeusANN Makefile
-# Usage: make dev          — start full development environment
-#        make lint          — run all linters
-#        make test          — run all tests
-#        make build         — build all services
-#        make migrate       — run database migrations
-#        make migrate-down  — rollback last migration
-#        make seed          — seed the database
-#        make proto         — generate protobuf code
-#        make clean         — clean build artifacts
+# AyeusANN — common tasks. `make help` lists them.
 
-.PHONY: help dev dev-infra dev-services dev-stop build build-go build-agent \
-        test test-go test-agent lint lint-go lint-agent lint-proto \
-        migrate migrate-down seed proto clean fmt
+.PHONY: help dev db services web down status build build-go build-agent build-web dist-agent \
+        test test-go test-agent test-web lint lint-go lint-agent lint-proto proto fmt migrate migrate-down clean
 
-# ─── Variables ────────────────────────────────────────────────
-
-COMPOSE_FILE := deploy/compose/docker-compose.yml
-DB_URL := postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann?sslmode=disable
-
-GO_SERVICES := gateway control-api scheduler coordinator router inference-gateway billing-meter trust-engine
-GO_SVC_DIRS := $(addprefix services/,$(GO_SERVICES))
-
-# ─── Help ─────────────────────────────────────────────────────
+GO_SERVICES := gateway control-api scheduler coordinator inference-gateway billing-meter trust-engine
+TEST_DB_URL := postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann_test?sslmode=disable
+DEV_DB_URL  := postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann_dev?sslmode=disable
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-# ─── Development Environment ─────────────────────────────────
+# ─── Development ─────────────────────────────────────────────
 
-dev: dev-infra migrate seed dev-services ## Start full development environment
-	@echo "\n✅ AyeusANN dev environment is running!"
-	@echo "   Postgres:  localhost:5432"
-	@echo "   Redis:     localhost:6379"
-	@echo "   NATS:      localhost:4222 (monitoring: 8222)"
-	@echo "   MinIO:     localhost:9000 (console: 9001)"
-	@echo "   Gateway:   localhost:8080"
-	@echo "   Control:   localhost:8081"
-	@echo "   Scheduler: localhost:8082"
-	@echo "   Coord:     localhost:8083"
-	@echo "   Router:    localhost:8084"
-	@echo "   InfGW:     localhost:8085"
-	@echo "   Billing:   localhost:8086"
-	@echo "   Trust:     localhost:8087"
+dev: ## Start everything: Postgres, Redis, services, web console
+	scripts/dev.sh up
 
-dev-infra: ## Start infrastructure (PG, Redis, NATS, MinIO)
-	docker compose -f $(COMPOSE_FILE) up -d
-	@echo "Waiting for Postgres to be ready..."
-	@until docker exec ann-postgres pg_isready -U ayeusann > /dev/null 2>&1; do sleep 1; done
-	@echo "Infrastructure ready."
+db: ## Create, migrate and seed the dev and test databases
+	scripts/dev.sh db
 
-dev-services: ## Start all Go services in background
-	@for svc in $(GO_SERVICES); do \
-		echo "Starting $$svc..."; \
-		SN_ENV=dev go run ./services/$$svc/ & \
-	done
-	@echo "All services starting..."
-	@sleep 2
+services: ## Rebuild and restart the Go services
+	scripts/dev.sh services
 
-dev-stop: ## Stop all development processes
-	docker compose -f $(COMPOSE_FILE) down
-	@pkill -f "go run ./services/" 2>/dev/null || true
-	@echo "Dev environment stopped."
+web: ## Start the web console dev server on :3000
+	scripts/dev.sh web
 
-# ─── Build ────────────────────────────────────────────────────
+down: ## Stop services and the console
+	scripts/dev.sh down
 
-build: build-go build-agent ## Build all services
+status: ## Health of every service
+	scripts/dev.sh status
 
-build-go: ## Build all Go services
+migrate: ## Apply migrations to the dev database
+	migrate -path schema/migrations -database "$(DEV_DB_URL)" up
+
+migrate-down: ## Roll back the last dev migration
+	migrate -path schema/migrations -database "$(DEV_DB_URL)" down 1
+
+# ─── Build ───────────────────────────────────────────────────
+
+build: build-go build-agent build-web ## Build everything
+
+build-go: ## Build Go services into ./bin
 	@mkdir -p bin
-	@for svc in $(GO_SERVICES); do \
-		echo "Building $$svc..."; \
-		CGO_ENABLED=0 go build -o bin/$$svc ./services/$$svc/; \
-	done
-	@echo "✅ All Go services built in ./bin/"
+	@for svc in $(GO_SERVICES); do echo "building $$svc"; CGO_ENABLED=0 go build -o bin/$$svc ./services/$$svc/; done
 
-build-agent: ## Build the Rust host agent
+build-agent: ## Build the host agent (release)
 	cd agent && cargo build --release
-	@cp agent/target/release/AyeusANN-agent bin/spazenode-agent 2>/dev/null || true
-	@echo "✅ Agent built"
 
-# ─── Test ─────────────────────────────────────────────────────
+build-web: ## Production build of the web console
+	cd web/console && npm ci --no-audit --no-fund && npm run build
 
-test: test-go ## Run all tests
+dist-agent: build-agent ## Publish this machine's agent build for /downloads
+	@mkdir -p dist/agent
+	@os=$$(uname -s | tr A-Z a-z); arch=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
+	 cp agent/target/release/ayeusann-agent dist/agent/ayeusann-agent-$$os-$$arch && \
+	 echo "published dist/agent/ayeusann-agent-$$os-$$arch"
 
-test-go: ## Run Go tests
-	go test -race -count=1 ./...
+# ─── Test and lint ───────────────────────────────────────────
 
-test-agent: ## Run Rust agent tests
+test: test-go test-agent test-web ## Run all tests
+
+test-go: ## Go tests (integration tests use ayeusann_test; run `make db` first)
+	TEST_DATABASE_URL="$(TEST_DB_URL)" go test -race -count=1 ./...
+
+test-agent: ## Rust agent tests
 	cd agent && cargo test
 
-# ─── Lint ─────────────────────────────────────────────────────
+test-web: ## Type-check the web console
+	cd web/console && npx tsc --noEmit
 
-lint: lint-go lint-proto ## Run all linters
+lint: lint-go lint-agent lint-proto ## Run all linters
 
-lint-go: ## Lint Go code
-	@if command -v golangci-lint > /dev/null 2>&1; then \
-		golangci-lint run ./...; \
-	else \
-		echo "golangci-lint not found, running go vet..."; \
-		go vet ./...; \
-	fi
+lint-go:
+	go vet ./...
 
-lint-agent: ## Lint Rust agent
-	cd agent && cargo clippy -- -D warnings
+lint-agent:
+	cd agent && cargo clippy --all-targets -- -D warnings && cargo fmt -- --check
 
-lint-proto: ## Lint protobuf definitions
+lint-proto:
 	buf lint
 
-# ─── Format ───────────────────────────────────────────────────
+proto: ## Regenerate protobuf code (needs protoc-gen-go and protoc-gen-go-grpc)
+	PATH="$$(go env GOPATH)/bin:$$PATH" buf generate
 
 fmt: ## Format all code
-	gofmt -w .
+	gofmt -w internal services
 	cd agent && cargo fmt
-	buf format -w
 
-# ─── Database ─────────────────────────────────────────────────
-
-migrate: ## Run database migrations
-	migrate -path schema/migrations -database "$(DB_URL)" up
-
-migrate-down: ## Rollback the last migration
-	migrate -path schema/migrations -database "$(DB_URL)" down 1
-
-migrate-force: ## Force migration version (use: make migrate-force V=1)
-	migrate -path schema/migrations -database "$(DB_URL)" force $(V)
-
-seed: ## Seed the database with initial data
-	@for f in schema/seeds/*.sql; do \
-		echo "Seeding: $$f"; \
-		docker exec -i ann-postgres psql -U ayeusann -d ayeusann < "$$f" 2>/dev/null || true; \
-	done
-
-# ─── Protobuf ─────────────────────────────────────────────────
-
-proto: ## Generate protobuf code
-	buf generate
-	@echo "✅ Protobuf code generated in gen/"
-
-# ─── Clean ────────────────────────────────────────────────────
-
-clean: ## Clean build artifacts
-	rm -rf bin/
-	rm -rf gen/
+clean: ## Remove build artefacts
+	rm -rf bin/* dist web/console/.next
 	cd agent && cargo clean
-	@echo "✅ Cleaned"
-
-# ─── Health Check ─────────────────────────────────────────────
-
-check: ## Check health of all services
-	@echo "Checking service health..."
-	@for port in 8080 8081 8082 8083 8084 8085 8086 8087; do \
-		status=$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$$port/healthz 2>/dev/null); \
-		if [ "$$status" = "200" ]; then \
-			echo "  ✅ :$$port — healthy"; \
-		else \
-			echo "  ❌ :$$port — status $$status"; \
-		fi; \
-	done

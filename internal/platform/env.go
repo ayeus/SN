@@ -14,9 +14,9 @@ var knownWeakSecrets = map[string]bool{
 	"dev-secret-key-32-bytes-long-super-secure!":  true,
 	"dev-only-insecure-jwt-signing-key-0001":      true,
 	"dev-only-insecure-internal-service-key-0001": true,
-	"changeme":                                    true,
-	"secret":                                      true,
-	"password":                                    true,
+	"changeme": true,
+	"secret":   true,
+	"password": true,
 }
 
 // IsProduction reports whether the service is running outside a developer machine.

@@ -222,8 +222,12 @@ type Model struct {
 	PricePerHourINR     *money.Amount   `json:"price_per_hour_inr,omitempty"`
 	IsBYO               bool            `json:"is_byo"`
 	QuantizationPresets json.RawMessage `json:"quantization_presets"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
+	// RuntimeRefs maps a serving runtime to the model id inside it.
+	RuntimeRefs   json.RawMessage `json:"runtime_refs"`
+	Description   *string         `json:"description,omitempty"`
+	ContextLength *int            `json:"context_length,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
 type ModelArtifact struct {
@@ -255,6 +259,12 @@ type Host struct {
 	BankEnc         []byte     `json:"-"` // Column-encrypted
 	AgentVersion    *string    `json:"agent_version,omitempty"`
 	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	OS              *string    `json:"os,omitempty"`
+	Runtime         *string    `json:"runtime,omitempty"`
+	RuntimeHealthy  bool       `json:"runtime_healthy"`
+	CachedModels    []string   `json:"cached_models"`
+	Paused          bool       `json:"paused"`
+	ProbationUntil  *time.Time `json:"probation_until,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
@@ -279,7 +289,7 @@ type Benchmark struct {
 	ID            string    `json:"id"`
 	HostID        string    `json:"host_id"`
 	GpuID         *string   `json:"gpu_id,omitempty"`
-	ScoreCompute  float32   `json:"score_compute"`
+	ScoreCompute  *float32  `json:"score_compute,omitempty"`
 	VramBwGbps    *float32  `json:"vram_bw_gbps,omitempty"`
 	DiskReadMbps  *float32  `json:"disk_read_mbps,omitempty"`
 	DiskWriteMbps *float32  `json:"disk_write_mbps,omitempty"`
@@ -320,9 +330,14 @@ type Deployment struct {
 	Endpoint     *string         `json:"endpoint,omitempty"`
 	Quantization *string         `json:"quantization,omitempty"`
 	ConfigJSON   json.RawMessage `json:"config_json"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
-	DeletedAt    *time.Time      `json:"deleted_at,omitempty"`
+	// DesiredState is what the customer asked for (running|paused|stopped);
+	// State is what the platform observes.
+	DesiredState   string     `json:"desired_state"`
+	LastError      *string    `json:"last_error,omitempty"`
+	StateChangedAt time.Time  `json:"state_changed_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
 }
 
 type Replica struct {
@@ -384,8 +399,8 @@ type Invoice struct {
 	// TaxAmount replaces GstAmount: the tax applied depends on the customer's
 	// jurisdiction, and is not always Indian GST.
 	TaxAmount money.Amount `json:"tax_amount"`
-	TaxName   string       `json:"tax_name"`  // GST | VAT | Sales Tax | ...
-	TaxRate   string       `json:"tax_rate"`  // decimal string, e.g. "0.18"
+	TaxName   string       `json:"tax_name"` // GST | VAT | Sales Tax | ...
+	TaxRate   string       `json:"tax_rate"` // decimal string, e.g. "0.18"
 	Total     money.Amount `json:"total"`
 	Currency  string       `json:"currency"`
 	// FxRate is the USD -> Currency rate recorded at invoice time, so a
@@ -468,4 +483,15 @@ type AuditLog struct {
 	DetailsJSON  json.RawMessage `json:"details_json,omitempty"`
 	IPAddress    *net.IP         `json:"ip_address,omitempty"`
 	CreatedAt    time.Time       `json:"created_at"`
+}
+
+type HostTelemetry struct {
+	ID             string          `json:"id"`
+	HostID         string          `json:"host_id"`
+	CpuUsagePct    float32         `json:"cpu_usage_pct"`
+	MemoryUsagePct float32         `json:"memory_usage_pct"`
+	GpuStatus      json.RawMessage `json:"gpu_status"`
+	ActiveJobs     int             `json:"active_jobs"`
+	HostUserActive bool            `json:"host_user_active"`
+	Timestamp      time.Time       `json:"ts"`
 }
