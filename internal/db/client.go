@@ -3,10 +3,12 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -80,9 +82,36 @@ func (c *Client) Ping(ctx context.Context) error {
 	return c.Pool.Ping(ctx)
 }
 
-// ExecTx executes fn within a database transaction.
-// If fn returns an error, the transaction is automatically rolled back.
+// ExecTx executes fn within a database transaction, rolling back if fn returns
+// an error.
+//
+// A transaction that Postgres aborts as a deadlock victim (40P01) or for a
+// serialization failure (40001) did nothing wrong and is safe to run again, so
+// it is retried a few times. Without this a lost race silently dropped the
+// update: a replica's stage event vanished and the replica looked stuck.
+// fn may therefore run more than once and must not have side effects outside
+// the transaction.
 func (c *Client) ExecTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		if err = c.execTxOnce(ctx, fn); err == nil || !retryable(err) || ctx.Err() != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Duration(attempt+1) * 15 * time.Millisecond):
+		}
+	}
+	return err
+}
+
+func retryable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "40001")
+}
+
+func (c *Client) execTxOnce(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("db: failed to begin transaction: %w", err)

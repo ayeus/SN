@@ -17,7 +17,19 @@ MODEL="${MODEL:-gemma-2-2b-it}"
 WORK="$(mktemp -d)"
 AGENTS=()
 RUN="$(uuidgen | tr A-Z a-z | cut -c1-8)"   # fresh host identities each run
-trap 'for p in "${AGENTS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORK"' EXIT
+cleanup() {
+  # Runs on success and on failure: a leftover running deployment would claim
+  # every GPU that connects afterwards.
+  if [ -n "${TOKEN:-}" ]; then
+    [ -n "${DEP:-}" ] && api DELETE "/v1/deployments/$DEP" >/dev/null 2>&1 || true
+    for H in $(api GET /v1/hosts 2>/dev/null | python3 -c "import json,sys; print(' '.join(h['id'] for h in json.load(sys.stdin).get('hosts', [])))" 2>/dev/null); do
+      api DELETE "/v1/hosts/$H" >/dev/null 2>&1 || true
+    done
+  fi
+  for p in "${AGENTS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 pass() { printf '  \033[32mpass\033[0m  %s\n' "$*"; }
 fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; exit 1; }
@@ -127,9 +139,4 @@ done
 [ "$S" = "stopped" ] || fail "deployment did not stop (state $S)"
 pass "deployment stopped"
 
-# 10. Remove the test machines so their identities are released.
-for H in $(api GET /v1/hosts | python3 -c "import json,sys; print(' '.join(h['id'] for h in json.load(sys.stdin)['hosts']))"); do
-  api DELETE "/v1/hosts/$H" >/dev/null
-done
-pass "test hosts decommissioned"
 echo "All checks passed."

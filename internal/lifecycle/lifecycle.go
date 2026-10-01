@@ -138,13 +138,24 @@ func ReleaseGPU(ctx context.Context, q db.Querier, replicaID string) error {
 // can recompute it. A replica that is already terminal is left alone, so a late
 // agent message cannot resurrect a stopped replica.
 func SetReplicaState(ctx context.Context, q db.Querier, replicaID, state, detail, errMsg string) (string, bool, error) {
+	// Lock order is always deployment, then replica. Logging an event takes a
+	// shared lock on the deployment row (foreign key), and Recompute then needs
+	// it exclusively; two replicas of one deployment reporting at once would
+	// each hold the shared lock and deadlock on the upgrade. Taking the
+	// exclusive lock first serialises them instead.
 	var depID, prev string
-	err := q.QueryRow(ctx, `SELECT deployment_id, state FROM replicas WHERE id = $1 FOR UPDATE;`, replicaID).Scan(&depID, &prev)
+	err := q.QueryRow(ctx, `SELECT deployment_id FROM replicas WHERE id = $1;`, replicaID).Scan(&depID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("lifecycle: failed to read replica: %w", err)
+	}
+	if _, err := q.Exec(ctx, `SELECT 1 FROM deployments WHERE id = $1 FOR UPDATE;`, depID); err != nil {
+		return "", false, fmt.Errorf("lifecycle: failed to lock deployment: %w", err)
+	}
+	if err := q.QueryRow(ctx, `SELECT state FROM replicas WHERE id = $1 FOR UPDATE;`, replicaID).Scan(&prev); err != nil {
+		return "", false, fmt.Errorf("lifecycle: failed to lock replica: %w", err)
 	}
 	if IsTerminalReplica(prev) {
 		return depID, false, nil
