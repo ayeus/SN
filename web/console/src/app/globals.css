@@ -23,7 +23,7 @@
   --on-nil: #ffffff;
   --marigold: #e9a21a;
   --marigold-soft: #fdf2dc;
-  --serving: #1e8a5a;
+  --serving: #197a4e;
   --serving-soft: #e2f3ea;
   --danger: #c0392b;
   --danger-soft: #fbe7e4;
@@ -247,6 +247,13 @@ body::before {
 }
 .press:active:not(:disabled) {
   transform: translateY(1px) scale(0.985);
+}
+/* Fingers need a bigger target than a pointer does. */
+@media (pointer: coarse) {
+  button,
+  .press {
+    min-height: 36px;
+  }
 }
 
 /* One orchestrated entrance, used on the landing hero only. */
