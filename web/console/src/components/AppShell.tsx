@@ -33,8 +33,19 @@ function WelcomeNotice() {
   const [dismissed, setDismissed] = useState(false);
   if (!welcome || dismissed) return null;
   return (
-    <Notice tone="success" className="mb-6 flex items-start justify-between gap-4">
-      <span>Your account is ready and {welcome} of credit is in your wallet.</span>
+    <Notice tone={welcome === "none" ? "warn" : "success"} className="mb-6 flex items-start justify-between gap-4">
+      {welcome === "none" ? (
+        <span>
+          Your account is ready. No welcome credit was added because too many accounts were created from this network
+          today.{" "}
+          <Link href="/app/billing" className="font-medium underline">
+            Add funds
+          </Link>{" "}
+          to deploy a model.
+        </span>
+      ) : (
+        <span>Your account is ready and {welcome} of credit is in your wallet.</span>
+      )}
       <button onClick={() => setDismissed(true)} className="text-[13px] text-muted hover:text-ink" aria-label="Dismiss">
         Dismiss
       </button>

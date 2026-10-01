@@ -16,6 +16,7 @@ COORD="${COORD:-http://localhost:50051}"
 MODEL="${MODEL:-gemma-2-2b-it}"
 WORK="$(mktemp -d)"
 AGENTS=()
+RUN="$(uuidgen | tr A-Z a-z | cut -c1-8)"   # fresh host identities each run
 trap 'for p in "${AGENTS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORK"' EXIT
 
 pass() { printf '  \033[32mpass\033[0m  %s\n' "$*"; }
@@ -33,6 +34,11 @@ R=$(curl -sS -X POST "$BASE/v1/auth/signup" -H 'Content-Type: application/json' 
     -d "{\"email\":\"$EMAIL\",\"password\":\"Smoke-Test-2026\",\"name\":\"Smoke Test\",\"country\":\"IN\"}")
 TOKEN=$(echo "$R" | json "['access_token']") || fail "signup: $R"
 BAL0=$(api GET /v1/billing/wallet | json "['balance']['amount']")
+if python3 -c "import sys; sys.exit(0 if float('$BAL0') <= 0 else 1)"; then
+  # Welcome credit is rate-limited per network; fall back to dev test credit.
+  api POST /v1/billing/topup -d '{"amount":"100","method":"test"}' >/dev/null
+  BAL0=$(api GET /v1/billing/wallet | json "['balance']['amount']")
+fi
 pass "signed up $EMAIL, wallet $BAL0 INR"
 
 # 2. Enrol two hosts on this machine (distinct dev instances).
@@ -40,7 +46,7 @@ cargo build --release --quiet --manifest-path agent/Cargo.toml
 for i in a b; do
   REG=$(api POST /v1/hosts/register-token -d '{"tier":"t3","region":"IN-SOUTH"}' | json "['registration_token']")
   agent/target/release/ayeusann-agent --token "$REG" --coordinator "$COORD" --region IN-SOUTH \
-      --data-dir "$WORK/$i" --instance "smoke-$i" > "$WORK/agent-$i.log" 2>&1 &
+      --data-dir "$WORK/$i" --instance "smoke-$RUN-$i" > "$WORK/agent-$i.log" 2>&1 &
   AGENTS+=($!)
 done
 for _ in $(seq 1 60); do
@@ -120,4 +126,10 @@ for _ in $(seq 1 60); do
 done
 [ "$S" = "stopped" ] || fail "deployment did not stop (state $S)"
 pass "deployment stopped"
+
+# 10. Remove the test machines so their identities are released.
+for H in $(api GET /v1/hosts | python3 -c "import json,sys; print(' '.join(h['id'] for h in json.load(sys.stdin)['hosts']))"); do
+  api DELETE "/v1/hosts/$H" >/dev/null
+done
+pass "test hosts decommissioned"
 echo "All checks passed."

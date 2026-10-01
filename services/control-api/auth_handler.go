@@ -19,10 +19,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Signup-credit abuse limits, per rolling 24 hours.
-const (
-	maxGrantsPerIPPerDay     = 3
-	maxGrantsPerDomainPerDay = 25
+// Signup-credit abuse limits, per rolling 24 hours. A shared office or campus
+// network legitimately produces several signups from one address, so both are
+// configuration; local development raises them because every account comes
+// from 127.0.0.1.
+var (
+	maxGrantsPerIPPerDay     = platform.EnvInt("SIGNUP_GRANTS_PER_IP_PER_DAY", 3)
+	maxGrantsPerDomainPerDay = platform.EnvInt("SIGNUP_GRANTS_PER_DOMAIN_PER_DAY", 25)
 )
 
 type SignupRequest struct {

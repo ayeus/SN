@@ -50,7 +50,7 @@ function SignupForm() {
           try {
             const credit = await signup(form);
             const dest = host ? "/app/hosts/new" : "/app/models";
-            router.replace(credit ? `${dest}?welcome=${encodeURIComponent(credit)}` : dest);
+            router.replace(`${dest}?welcome=${encodeURIComponent(credit ?? "none")}`);
           } catch (err) {
             if (err instanceof ApiError) {
               setFields(err.fields);

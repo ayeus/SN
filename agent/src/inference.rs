@@ -443,18 +443,33 @@ mod live {
     async fn live_ollama_streaming_reports_exact_usage() {
         let (data, done) = collect(true, false).await;
         assert!(done.error.is_empty(), "error: {}", done.error);
-        assert!(data.contains(r#""model":"gemma-2-2b-it""#), "model not rewritten: {data}");
+        assert!(
+            data.contains(r#""model":"gemma-2-2b-it""#),
+            "model not rewritten: {data}"
+        );
         assert!(!data.contains("gemma2:2b"), "runtime id leaked: {data}");
-        assert!(data.trim_end().ends_with("data: [DONE]"), "missing [DONE]: {data}");
-        assert!(!data.contains(r#""usage""#), "usage chunk leaked to a client that did not ask: {data}");
-        assert!(done.prompt_tokens > 0 && done.completion_tokens > 0, "no usage: {done:?}");
+        assert!(
+            data.trim_end().ends_with("data: [DONE]"),
+            "missing [DONE]: {data}"
+        );
+        assert!(
+            !data.contains(r#""usage""#),
+            "usage chunk leaked to a client that did not ask: {data}"
+        );
+        assert!(
+            done.prompt_tokens > 0 && done.completion_tokens > 0,
+            "no usage: {done:?}"
+        );
     }
 
     #[tokio::test]
     #[ignore]
     async fn live_ollama_streaming_passes_usage_when_requested() {
         let (data, done) = collect(true, true).await;
-        assert!(data.contains(r#""usage""#), "client asked for usage: {data}");
+        assert!(
+            data.contains(r#""usage""#),
+            "client asked for usage: {data}"
+        );
         assert!(done.completion_tokens > 0);
     }
 
