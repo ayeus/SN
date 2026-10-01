@@ -40,6 +40,18 @@ echo "Smoke test against $BASE with $MODEL"
 curl -sf "$BASE/v1/network/stats" >/dev/null || fail "gateway not reachable at $BASE (run make dev)"
 curl -sf http://127.0.0.1:11434/api/version >/dev/null || fail "Ollama is not running"
 
+# Hosts serve whichever deployment is waiting, so a deployment already short of
+# replicas would take the two hosts enrolled below before the smoke deployment.
+if docker exec ann-postgres true 2>/dev/null; then
+  WAITING=$(docker exec ann-postgres psql -U ayeusann -d "${DEV_DB:-ayeusann_dev}" -Atc "
+    SELECT string_agg(d.name || ' (' || o.name || ')', ', ')
+    FROM deployments d JOIN organizations o ON o.id = d.org_id
+    WHERE d.deleted_at IS NULL AND d.desired_state = 'running' AND d.state <> 'failed'
+      AND (SELECT COUNT(*) FROM replicas r WHERE r.deployment_id = d.id
+           AND r.state NOT IN ('stopped', 'failed', 'stopping')) < GREATEST(d.min_replicas, 1)")
+  [ -z "$WAITING" ] || fail "other deployments are waiting for a host and would take the smoke hosts: $WAITING. Stop or pause them first."
+fi
+
 # 1. Sign up (India → INR wallet with ₹500).
 EMAIL="smoke@$(uuidgen | tr A-Z a-z | cut -c1-8).example.com"
 R=$(curl -sS -X POST "$BASE/v1/auth/signup" -H 'Content-Type: application/json' \
