@@ -151,6 +151,32 @@ func TestRequestIDAndHostPreserved(t *testing.T) {
 	}
 }
 
+// Behind a TLS-terminating proxy the services must see the real client address,
+// or every signup shares the proxy's IP in the abuse limits. At the edge the
+// header is the client's to forge, so it is dropped.
+func TestForwardedForIsKeptOnlyBehindATrustedProxy(t *testing.T) {
+	seen := make(chan string, 1)
+	up := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("X-Forwarded-For")
+	}))
+	defer up.Close()
+	u, _ := url.Parse(up.URL)
+
+	for _, tc := range []struct {
+		trust bool
+		want  string
+	}{
+		{true, "203.0.113.7, 192.0.2.1"},
+		{false, "192.0.2.1"},
+	} {
+		h := NewHandler(Upstreams{ControlAPI: u, Inference: u, Billing: u, Trust: u, TrustProxy: tc.trust})
+		route(h, "GET", "/v1/deployments", "X-Forwarded-For", "203.0.113.7")
+		if got := <-seen; got != tc.want {
+			t.Fatalf("trust=%v: upstream saw X-Forwarded-For %q, want %q", tc.trust, got, tc.want)
+		}
+	}
+}
+
 // A WebSocket upgrade must survive the full gateway stack, including the
 // metrics middleware main() wraps it in. When it didn't, the web console never
 // hydrated behind the gateway and every button was dead.

@@ -1,0 +1,26 @@
+# Keep build contexts small and free of local state and secrets.
+.git
+.github
+.claude
+.env
+.env.*
+!.env.example
+_archive
+bin
+dist
+logs
+docs
+ops
+**/node_modules
+**/.next
+agent/target
+cli/target
+**/.DS_Store
+/control-api
+/coordinator
+/inference-gateway
+/scheduler
+/gateway
+/billing-meter
+/trust-engine
+SpazeNode Dev Docs Pack

@@ -42,6 +42,7 @@ venv/
 .env.local
 .env.*.local
 !.env.example
+deploy/compose/.env.prod
 
 # Docker
 deploy/compose/data/

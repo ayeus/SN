@@ -1,0 +1,216 @@
+# AyeusANN production stack on a single machine: Caddy (TLS) → gateway → services.
+#
+#   cp deploy/compose/.env.prod.example deploy/compose/.env.prod    # fill it in
+#   make prod-up
+#
+# Only Caddy publishes ports. Postgres, Redis and every service stay on the
+# internal network. See docs/deployment.md.
+
+name: ayeusann
+
+x-service: &service
+  image: ayeusann/services:${TAG:-latest}
+  build:
+    context: ../..
+    dockerfile: deploy/docker/services.Dockerfile
+  restart: unless-stopped
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+x-env: &env
+  SN_ENV: production
+  # Caddy terminates TLS; services speak plain HTTP on the internal network.
+  SN_TLS_TERMINATED_BY_PROXY: "true"
+  TRUST_PROXY_HEADERS: "true"
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env.prod}
+  INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:?set INTERNAL_SERVICE_SECRET in .env.prod}
+  DATABASE_URL: &database_url postgres://ayeusann:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}@postgres:5432/ayeusann?sslmode=disable
+  REDIS_URL: redis://redis:6379
+  PUBLIC_URL: https://${APP_DOMAIN:?set APP_DOMAIN in .env.prod}
+  COORDINATOR_PUBLIC_URL: https://${COORDINATOR_DOMAIN:?set COORDINATOR_DOMAIN in .env.prod}
+  INFERENCE_HOST: ${INFERENCE_HOST:-}
+  CONTROL_API_URL: http://control-api:8081
+  SCHEDULER_URL: http://scheduler:8082
+  COORDINATOR_URL: http://coordinator:8083
+  INFERENCE_GATEWAY_URL: http://inference-gateway:8085
+  BILLING_METER_URL: http://billing-meter:8086
+  TRUST_ENGINE_URL: http://trust-engine:8087
+  WEB_URL: http://console:3000
+
+services:
+  # ─── Edge ───────────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      COORDINATOR_DOMAIN: ${COORDINATOR_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env.prod}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - gateway
+      - coordinator
+    healthcheck:
+      # 443 is bound only once the Caddyfile has loaded.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 443"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    logging: *logging
+
+  # ─── Data ───────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ayeusann
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ayeusann
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ayeusann -d ayeusann"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Rate-limit counters only: nothing here needs to survive a restart.
+    command: redis-server --save "" --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+  migrate:
+    image: ayeusann/services:${TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/services.Dockerfile
+    command: migrate-and-seed
+    restart: "no"
+    environment:
+      DATABASE_URL: *database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *logging
+
+  # ─── Services ───────────────────────────────────────────────
+  gateway:
+    <<: *service
+    command: gateway
+    environment:
+      <<: *env
+      CORS_ALLOWED_ORIGINS: https://${APP_DOMAIN}
+    volumes:
+      # Prebuilt host agents served at /downloads (make dist-agent-linux).
+      - ../../dist/agent:/app/downloads:ro
+    healthcheck: &health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  control-api:
+    <<: *service
+    command: control-api
+    environment:
+      <<: *env
+      PLATFORM_ADMIN_EMAILS: ${PLATFORM_ADMIN_EMAILS:-}
+      SIGNUP_CREDIT: ${SIGNUP_CREDIT:-500 INR}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@${APP_DOMAIN}}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8081/readyz"]
+
+  scheduler:
+    <<: *service
+    command: scheduler
+    environment: *env
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8082/readyz"]
+
+  coordinator:
+    <<: *service
+    command: coordinator
+    environment:
+      <<: *env
+      MANIFEST_SIGNING_KEY: ${MANIFEST_SIGNING_KEY:?set MANIFEST_SIGNING_KEY in .env.prod}
+      HOST_PROBATION_DAYS: ${HOST_PROBATION_DAYS:-7}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8083/readyz"]
+
+  inference-gateway:
+    <<: *service
+    command: inference-gateway
+    environment: *env
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8085/readyz"]
+
+  billing-meter:
+    <<: *service
+    command: billing-meter
+    environment:
+      <<: *env
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8086/readyz"]
+
+  trust-engine:
+    <<: *service
+    command: trust-engine
+    environment: *env
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8087/readyz"]
+
+  console:
+    image: ayeusann/console:${TAG:-latest}
+    build:
+      context: ../../web/console
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    logging: *logging
+
+volumes:
+  pgdata:
+  caddydata:
+  caddyconfig:

@@ -88,8 +88,9 @@ func main() {
 			log.Fatalf("failed to load gRPC TLS credentials: %v", err)
 		}
 		opts = append(opts, grpc.Creds(creds))
-	} else if platform.IsProduction() {
-		log.Fatalf("configuration error: GRPC_TLS_CERT_FILE and GRPC_TLS_KEY_FILE are required in production")
+	} else if platform.IsProduction() && !platform.EnvBool("SN_TLS_TERMINATED_BY_PROXY", false) {
+		// Behind a TLS-terminating proxy the coordinator speaks cleartext HTTP/2 (h2c).
+		log.Fatalf("configuration error: set GRPC_TLS_CERT_FILE and GRPC_TLS_KEY_FILE, or SN_TLS_TERMINATED_BY_PROXY=true behind a TLS-terminating proxy")
 	}
 
 	lis, err := net.Listen("tcp", ":"+grpcPort)

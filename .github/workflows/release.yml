@@ -1,0 +1,53 @@
+name: Release
+
+# Tagging vX.Y.Z builds the host agent for each platform and attaches the
+# binaries to a GitHub release, named as the installer expects them.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  agent:
+    name: Agent ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 keeps the glibc floor at 2.35.
+          - { name: linux-amd64,  runner: ubuntu-22.04 }
+          - { name: linux-arm64,  runner: ubuntu-22.04-arm }
+          - { name: darwin-arm64, runner: macos-14 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - run: cd agent && cargo build --release --locked
+      - run: cp agent/target/release/ayeusann-agent ayeusann-agent-${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ayeusann-agent-${{ matrix.name }}
+          path: ayeusann-agent-${{ matrix.name }}
+
+  publish:
+    name: Publish release
+    needs: agent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: sha256sum ayeusann-agent-* > SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" ayeusann-agent-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes
