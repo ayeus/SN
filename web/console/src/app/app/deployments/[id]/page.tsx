@@ -279,7 +279,7 @@ export default function DeploymentPage() {
                         <StateBadge state={r.state} />
                         {r.last_error && r.state === "failed" && <div className="mt-1 max-w-[260px] text-[12px] text-danger">{r.last_error}</div>}
                       </td>
-                      <td className="text-[13px]">{r.gpu_model ?? "—"}</td>
+                      <td className="text-[13px]">{r.gpu_model ?? "-"}</td>
                       <td>
                         <span className="flex items-center gap-2">
                           <TierBadge tier={r.tier} /> <span className="text-[13px] text-muted">{r.region}</span>

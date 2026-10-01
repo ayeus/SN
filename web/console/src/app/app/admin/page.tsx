@@ -60,7 +60,7 @@ export default function AdminPage() {
                     <div className="font-medium">{r.host.name}</div>
                     <div className="font-mono text-[12px] text-muted">{r.host.id.slice(0, 8)}</div>
                   </td>
-                  <td className="text-[13px]">{r.owner_email ?? "—"}</td>
+                  <td className="text-[13px]">{r.owner_email ?? "-"}</td>
                   <td>{r.online ? <StateBadge state={r.host.status} /> : <StateBadge state="offline" />}</td>
                   <td>
                     <Select

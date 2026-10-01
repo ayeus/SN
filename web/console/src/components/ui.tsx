@@ -19,10 +19,10 @@ type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
 
 const buttonClass = (variant: ButtonProps["variant"] = "primary", size: ButtonProps["size"] = "md") =>
   cx(
-    "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap",
+    "press inline-flex cursor-pointer items-center justify-center gap-2 rounded-[10px] font-medium transition-[background,transform,box-shadow] duration-150 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap",
     size === "sm" ? "h-8 px-3 text-[13px]" : "h-10 px-4 text-[14px]",
-    variant === "primary" && "bg-nil text-on-nil hover:bg-nil-hover",
-    variant === "secondary" && "bg-surface text-ink border border-line hover:bg-surface-2",
+    variant === "primary" && "btn-primary text-on-nil",
+    variant === "secondary" && "glass glass-strong text-ink hover:bg-surface-2",
     variant === "ghost" && "text-muted hover:text-ink hover:bg-surface-2",
     variant === "danger" && "bg-surface text-danger border border-line hover:bg-danger-soft",
   );
@@ -87,7 +87,7 @@ export function Field({
 }
 
 const inputClass =
-  "h-10 w-full rounded-lg border border-line bg-surface px-3 text-[14px] text-ink placeholder:text-muted/70 focus:border-nil focus:outline-none focus:ring-2 focus:ring-nil/20 aria-[invalid=true]:border-danger";
+  "h-10 w-full rounded-[10px] border border-line bg-surface px-3 text-[14px] text-ink placeholder:text-muted/70 focus:border-nil focus:outline-none focus:ring-2 focus:ring-nil/20 aria-[invalid=true]:border-danger";
 
 export const Input = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(function Input(
   { className, ...rest },
@@ -153,7 +153,7 @@ export function Panel({
   return (
     // min-w-0: a grid or flex child defaults to min-width:auto, so one long
     // line of code would push the whole page wider than a phone screen.
-    <section className={cx("min-w-0 rounded-xl border border-line bg-surface", className)}>
+    <section className={cx("glass min-w-0 rounded-2xl", className)}>
       {(title || actions) && (
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-5 py-4">
           <div>
@@ -168,12 +168,37 @@ export function Panel({
   );
 }
 
-export function Stat({ label, value, sub }: { label: string; value: React.ReactNode; sub?: React.ReactNode }) {
+export function Stat({
+  label,
+  value,
+  sub,
+  icon: Icon,
+  tone = "nil",
+}: {
+  label: string;
+  value: React.ReactNode;
+  sub?: React.ReactNode;
+  icon?: React.ComponentType<{ size?: number; className?: string }>;
+  tone?: "nil" | "marigold" | "serving" | "tier2";
+}) {
+  const tones = {
+    nil: "bg-nil-soft text-nil",
+    marigold: "bg-marigold-soft text-tier3",
+    serving: "bg-serving-soft text-serving",
+    tier2: "bg-surface-2 text-tier2",
+  };
   return (
-    <div>
-      <div className="text-[13px] text-muted">{label}</div>
-      <div className="mt-1 text-[22px] font-semibold leading-tight tracking-[-0.01em]">{value}</div>
-      {sub && <div className="mt-0.5 text-[13px] text-muted">{sub}</div>}
+    <div className="flex items-start gap-3">
+      {Icon && (
+        <span aria-hidden className={cx("grid h-9 w-9 shrink-0 place-items-center rounded-[10px]", tones[tone])}>
+          <Icon size={18} />
+        </span>
+      )}
+      <div className="min-w-0">
+        <div className="text-[13px] text-muted">{label}</div>
+        <div className="mt-0.5 text-[22px] font-semibold leading-tight tracking-[-0.015em]">{value}</div>
+        {sub && <div className="mt-0.5 text-[13px] text-muted">{sub}</div>}
+      </div>
     </div>
   );
 }

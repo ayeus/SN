@@ -37,7 +37,7 @@ export function EarningsCalculator({ pricing }: { pricing: Pricing }) {
           <Select id="calc-gpu" value={skuId} onChange={(e) => setSkuId(e.target.value)}>
             {skus.map((s) => (
               <option key={s.id} value={s.id}>
-                {s.gpu_model} — {TIERS[s.tier].short} {TIERS[s.tier].name}
+                {s.gpu_model}, {TIERS[s.tier].short} {TIERS[s.tier].name}
               </option>
             ))}
           </Select>

@@ -395,3 +395,25 @@ func TestLoginRateLimit(t *testing.T) {
 		t.Fatal("limits are per key")
 	}
 }
+
+func TestInstallTokenStatus(t *testing.T) {
+	h := newHarness(t)
+	s := h.signup("tok")
+	var tok struct {
+		ID string `json:"token_id"`
+	}
+	if code := h.do("POST", "/v1/hosts/register-token", s.Token, map[string]string{"tier": "t3"}, &tok); code != http.StatusCreated || tok.ID == "" {
+		t.Fatalf("register-token: %d %+v", code, tok)
+	}
+	var st struct {
+		Used   bool    `json:"used"`
+		HostID *string `json:"host_id"`
+	}
+	if code := h.do("GET", "/v1/host-tokens/"+tok.ID, s.Token, nil, &st); code != http.StatusOK || st.Used || st.HostID != nil {
+		t.Fatalf("fresh token should be unused: %d %+v", code, st)
+	}
+	other := h.signup("tok-other")
+	if code := h.do("GET", "/v1/host-tokens/"+tok.ID, other.Token, nil, nil); code != http.StatusNotFound {
+		t.Fatalf("another user must not see the token, got %d", code)
+	}
+}

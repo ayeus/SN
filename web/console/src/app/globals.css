@@ -166,3 +166,112 @@ body {
     animation: none;
   }
 }
+
+/* ── Glass ───────────────────────────────────────────────────────────────
+ * The product's surface language ("Glass" in the design brief): translucent
+ * panels over a soft light source, with an inner highlight for a physical
+ * edge. This is a web approximation built from backdrop-filter; panels fall
+ * back to solid fills when the user asks for reduced transparency.
+ */
+:root {
+  --glass: rgb(255 255 255 / 0.74);
+  --glass-strong: rgb(255 255 255 / 0.9);
+  --glass-edge: rgb(255 255 255 / 0.9);
+  --shadow-tint: 35 36 106; /* nil */
+  --light-a: rgb(35 36 106 / 0.16);
+  --light-b: rgb(233 162 26 / 0.16);
+  --light-c: rgb(15 111 124 / 0.1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --glass: rgb(26 29 53 / 0.66);
+    --glass-strong: rgb(26 29 53 / 0.9);
+    --glass-edge: rgb(255 255 255 / 0.07);
+    --shadow-tint: 0 0 0;
+    --light-a: rgb(148 150 242 / 0.2);
+    --light-b: rgb(242 179 61 / 0.1);
+    --light-c: rgb(61 184 199 / 0.1);
+  }
+}
+
+/* The light source. Fixed and non-interactive so it never repaints on scroll. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(60rem 36rem at 12% -8%, var(--light-a), transparent 62%),
+    radial-gradient(48rem 32rem at 96% 4%, var(--light-b), transparent 60%),
+    radial-gradient(52rem 40rem at 60% 110%, var(--light-c), transparent 62%);
+}
+
+.glass {
+  background: var(--glass);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    0 1px 2px rgb(var(--shadow-tint) / 0.04),
+    0 12px 32px -16px rgb(var(--shadow-tint) / 0.18);
+}
+.glass-strong {
+  background: var(--glass-strong);
+}
+.lift {
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    0 2px 4px rgb(var(--shadow-tint) / 0.05),
+    0 28px 64px -28px rgb(var(--shadow-tint) / 0.4);
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass {
+    background: var(--surface);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+/* Primary action: a lit surface rather than a flat fill. */
+.btn-primary {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--nil) 88%, white), var(--nil));
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.22),
+    0 1px 2px rgb(var(--shadow-tint) / 0.3),
+    0 8px 20px -10px rgb(var(--shadow-tint) / 0.55);
+}
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--nil-hover) 90%, white), var(--nil-hover));
+}
+.press:active:not(:disabled) {
+  transform: translateY(1px) scale(0.985);
+}
+
+/* One orchestrated entrance, used on the landing hero only. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rise {
+    animation: none;
+  }
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}

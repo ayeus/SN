@@ -68,6 +68,7 @@ func (a *API) Routes() http.Handler {
 
 	// ── Hosts (supply side) ──────────────────────────────────
 	mux.Handle("POST /v1/hosts/register-token", member(a.HandleIssueRegistrationToken))
+	mux.Handle("GET /v1/host-tokens/{id}", anyRole(a.HandleRegistrationTokenStatus))
 	mux.Handle("GET /v1/hosts", anyRole(a.HandleListHosts))
 	mux.Handle("GET /v1/hosts/earnings", anyRole(a.HandleAllHostEarnings))
 	mux.Handle("GET /v1/hosts/{id}", anyRole(a.HandleGetHost))

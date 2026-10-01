@@ -8,7 +8,7 @@ const LOCALE = "en-IN";
  * ₹499.99, never as ₹500.00, so a wallet never displays money it doesn't hold.
  */
 export function money(m: Money | undefined | null, opts: { precise?: boolean; balance?: boolean } = {}): string {
-  if (!m) return "—";
+  if (!m) return "-";
   let value = Number(m.amount);
   if (opts.balance) {
     // Truncate exact integer micro-units; truncating value*100 in floating
@@ -57,7 +57,7 @@ export function ago(iso?: string | null): string {
 }
 
 export function dateTime(iso?: string): string {
-  if (!iso) return "—";
+  if (!iso) return "-";
   return new Date(iso).toLocaleString(LOCALE, { dateStyle: "medium", timeStyle: "short" });
 }
 

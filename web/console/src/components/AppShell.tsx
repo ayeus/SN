@@ -19,7 +19,7 @@ import {
   Wallet as WalletIcon,
   X,
 } from "lucide-react";
-import { BRAND } from "@/lib/brand";
+import { Logo } from "./Logo";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { money } from "@/lib/format";
@@ -86,7 +86,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [pathname]);
 
   if (loading || !me) {
-    return <div className="grid min-h-screen place-items-center text-muted">Loading your workspace…</div>;
+    return <div className="grid min-h-[100dvh] place-items-center text-muted">Loading your workspace…</div>;
   }
 
   const items = hostMode ? HOST : DEPLOY;
@@ -95,7 +95,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const nav = (
     <nav className="flex h-full flex-col gap-6 px-3 py-5">
       <Link href="/app" className="px-2 text-[17px] font-semibold tracking-[-0.01em]">
-        {BRAND.name}
+        <Logo />
       </Link>
 
       <div className="grid grid-cols-2 rounded-lg bg-surface-2 p-1 text-[13px] font-medium" role="tablist" aria-label="Workspace">
@@ -125,7 +125,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               aria-current={isActive(i) ? "page" : undefined}
               className={cx(
                 "flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[14px]",
-                isActive(i) ? "bg-nil-soft font-medium text-nil" : "text-muted hover:bg-surface-2 hover:text-ink",
+                isActive(i) ? "bg-nil-soft font-medium text-nil shadow-[inset_2px_0_0_var(--nil)]" : "text-muted hover:bg-surface-2 hover:text-ink",
               )}
             >
               <i.icon size={16} />
@@ -169,21 +169,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           </li>
         </ul>
-        <div className="border-t border-line px-2.5 pt-3 text-[12px] text-muted">
-          <div className="truncate font-medium text-ink">{me.user.name}</div>
-          <div className="truncate">{me.organization.name}</div>
+        <div className="flex items-center gap-2.5 border-t border-line px-2.5 pt-3 text-[12px] text-muted">
+          <span aria-hidden className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-nil text-[12px] font-semibold text-on-nil">
+            {me.user.name
+              .split(/\s+/)
+              .map((w) => w[0])
+              .slice(0, 2)
+              .join("")
+              .toUpperCase()}
+          </span>
+          <div className="min-w-0">
+            <div className="truncate font-medium text-ink">{me.user.name}</div>
+            <div className="truncate">{me.organization.name}</div>
+          </div>
         </div>
       </div>
     </nav>
   );
 
   return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[240px_1fr]">
-      <aside className="sticky top-0 hidden h-screen border-r border-line bg-surface lg:block">{nav}</aside>
+    <div className="min-h-[100dvh] lg:grid lg:grid-cols-[248px_1fr]">
+      <aside className="sticky top-0 hidden h-[100dvh] border-r border-line bg-[var(--glass)] backdrop-blur-xl lg:block">{nav}</aside>
 
       <div className="flex items-center justify-between border-b border-line bg-surface px-4 py-3 lg:hidden">
         <Link href="/app" className="font-semibold">
-          {BRAND.name}
+          <Logo />
         </Link>
         <button onClick={() => setOpen(true)} aria-label="Open navigation" className="rounded-md p-1.5 hover:bg-surface-2">
           <Menu size={20} />

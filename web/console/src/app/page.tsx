@@ -2,68 +2,110 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { BadgeIndianRupee, Cpu, MapPin, PlugZap, ShieldCheck, Workflow } from "lucide-react";
 import { BRAND } from "@/lib/brand";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useData } from "@/lib/hooks";
 import { compact, convert, money, number, TIERS } from "@/lib/format";
 import type { Model, NetworkStats, Pricing, Tier } from "@/lib/types";
-import { ButtonLink } from "@/components/ui";
+import { ButtonLink, TierBadge, cx } from "@/components/ui";
 import { EarningsCalculator } from "@/components/EarningsCalculator";
+import { Logo } from "@/components/Logo";
+import { PowerRail } from "@/components/PowerRail";
 
+const WRAP = "mx-auto w-full max-w-[1200px] px-5 sm:px-8";
+
+/** The product's promise as code: one changed line. The URL is this site's own. */
 function BaseUrlDiff() {
   const [origin, setOrigin] = useState("https://your-endpoint");
-  useEffect(() => {
-    setOrigin(window.location.origin);
-  }, []);
+  useEffect(() => setOrigin(window.location.origin), []);
   return (
-    <figure className="overflow-hidden rounded-xl border border-line bg-[#15172b] text-[#e7e8f3] shadow-[0_24px_60px_-30px_rgba(35,36,106,0.55)]">
-      <figcaption className="border-b border-white/10 px-4 py-2.5 font-mono text-[12px] text-[#9ea3bf]">app.py</figcaption>
-      <pre className="overflow-x-auto px-4 py-4 font-mono text-[13.5px] leading-7">
-        <code>
-          <span className="text-[#9ea3bf]">from openai import OpenAI</span>
-          {"\n\n"}
-          client = OpenAI({"\n"}
-          <span className="block bg-[#c0392b]/20 text-[#f3b1a8]">-    base_url=&quot;https://api.openai.com/v1&quot;,</span>
-          <span className="block bg-[#1e8a5a]/25 text-[#a8e6c5]">+    base_url=&quot;{origin}/v1&quot;,</span>
-          {"     "}api_key=&quot;sk_live_…&quot;,{"\n"}){"\n\n"}
-          <span className="text-[#9ea3bf]"># everything else stays the same</span>
-          {"\n"}client.chat.completions.create(model=<span className="text-[#f2c46b]">&quot;qwen-chat&quot;</span>, …)
-        </code>
-      </pre>
-    </figure>
+    <pre className="overflow-x-auto px-5 py-4 font-mono text-[13px] leading-7 text-[#e7e8f3]">
+      <code>
+        <span className="text-[#9ea3bf]">from openai import OpenAI</span>
+        {"\n\n"}client = OpenAI({"\n"}
+        <span className="block bg-[#c0392b]/20 text-[#f3b1a8]">-    base_url=&quot;https://api.openai.com/v1&quot;,</span>
+        <span className="block bg-[#1e8a5a]/25 text-[#a8e6c5]">+    base_url=&quot;{origin}/v1&quot;,</span>
+        {"     "}api_key=&quot;sk_live_...&quot;,{"\n"})
+      </code>
+    </pre>
   );
 }
 
-function NetworkLine({ stats }: { stats: NetworkStats | null }) {
-  if (!stats) return <div className="h-12" />;
-  if (stats.gpus_online === 0) {
-    return (
-      <p className="text-[14px] text-muted">
-        No GPUs are online on this network yet.{" "}
-        <Link href="/signup?intent=host" className="font-medium text-nil underline-offset-4 hover:underline">
-          Connect the first one
-        </Link>
-        .
-      </p>
-    );
-  }
-  const items = [
-    { v: number(stats.gpus_online), l: stats.gpus_online === 1 ? "GPU online now" : "GPUs online now" },
-    { v: `${number(stats.vram_gb_online)} GB`, l: "of GPU memory" },
-    { v: compact(stats.tokens_24h), l: "tokens served today" },
-  ];
+/** Live supply, straight from /v1/network/stats. Shows honest zeros. */
+function NetworkNow({ stats }: { stats: NetworkStats | null }) {
+  const tiers: Tier[] = ["t1", "t2", "t3"];
   return (
-    <dl className="flex flex-wrap gap-x-10 gap-y-3">
-      {items.map((i) => (
-        <div key={i.l}>
-          <dt className="sr-only">{i.l}</dt>
-          <dd>
-            <span className="text-[20px] font-semibold">{i.v}</span> <span className="text-[14px] text-muted">{i.l}</span>
-          </dd>
-        </div>
-      ))}
-    </dl>
+    <div className="border-t border-white/10 px-5 py-4">
+      <div className="mb-3 flex items-center justify-between text-[13px]">
+        <span className="font-medium text-[#e7e8f3]">Network right now</span>
+        <span className="flex items-center gap-2 text-[#9ea3bf]">
+          <span
+            aria-hidden
+            className={cx("h-2 w-2 rounded-full", stats && stats.gpus_online > 0 ? "bg-[#3cc07f] dot-live" : "bg-[#9ea3bf]/50")}
+          />
+          {!stats ? "Checking" : stats.gpus_online > 0 ? "Live" : "No GPUs online yet"}
+        </span>
+      </div>
+      <dl className="grid grid-cols-3 gap-3">
+        {tiers.map((t) => (
+          <div key={t} className="rounded-xl bg-white/[0.06] px-3 py-2.5">
+            <dt className="text-[12px] text-[#9ea3bf]">
+              {TIERS[t].short} {TIERS[t].name}
+            </dt>
+            <dd className="mt-0.5 text-[20px] font-semibold text-white">
+              {stats ? number(stats.gpus_by_tier[t] ?? 0) : "-"}
+              <span className="ml-1 text-[12px] font-normal text-[#9ea3bf]">GPUs</span>
+            </dd>
+          </div>
+        ))}
+      </dl>
+      {stats && stats.tokens_24h > 0 && (
+        <p className="mt-3 text-[13px] text-[#9ea3bf]">
+          {compact(stats.tokens_24h)} tokens served in the last 24 hours across {number(stats.deployments_serving)} live{" "}
+          {stats.deployments_serving === 1 ? "deployment" : "deployments"}.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Tile({
+  icon: Icon,
+  title,
+  children,
+  className,
+  tone = "glass",
+}: {
+  icon: React.ComponentType<{ size?: number }>;
+  title: string;
+  children: React.ReactNode;
+  className?: string;
+  tone?: "glass" | "nil" | "marigold";
+}) {
+  return (
+    <div
+      className={cx(
+        "flex min-w-0 flex-col gap-3 rounded-2xl p-6",
+        tone === "glass" && "glass",
+        tone === "nil" && "bg-nil text-on-nil",
+        tone === "marigold" && "border border-marigold/40 bg-marigold-soft",
+        className,
+      )}
+    >
+      <span
+        aria-hidden
+        className={cx(
+          "grid h-10 w-10 place-items-center rounded-xl",
+          tone === "nil" ? "bg-white/15" : tone === "marigold" ? "bg-marigold/25 text-tier3" : "bg-nil-soft text-nil",
+        )}
+      >
+        <Icon size={20} />
+      </span>
+      <h3 className="text-[18px] font-semibold tracking-[-0.01em]">{title}</h3>
+      <div className={cx("text-[15px] leading-relaxed", tone === "nil" ? "text-on-nil/80" : "text-muted")}>{children}</div>
+    </div>
   );
 }
 
@@ -74,129 +116,197 @@ export default function Landing() {
   const models = useData(() => api.get<{ models: Model[] }>("/v1/models", false), []);
   const inrRate = pricing.data?.fx_from_usd?.INR;
   const spot = (pricing.data?.spot_price_percent ?? 55) / 100;
+  const hostShare = pricing.data?.host_share_percent;
+  const deployHref = me ? "/app/models" : "/signup";
+  const hostHref = me ? "/app/hosts/new" : "/signup?intent=host";
 
   const tierFrom = (t: Tier) => {
-    const prices = (pricing.data?.gpu_skus ?? []).filter((s) => s.tier === t).map((s) => Number(s.price_per_hour_inr.amount));
-    return prices.length ? Math.min(...prices) : null;
+    const p = (pricing.data?.gpu_skus ?? []).filter((s) => s.tier === t).map((s) => Number(s.price_per_hour_inr.amount));
+    return p.length ? Math.min(...p) : null;
   };
+  const inr = (m: Model["price_in_per_1m"]) => money(inrRate ? convert(m, "INR", inrRate) : m);
+  const cheapest = (models.data?.models ?? []).slice().sort((a, b) => Number(a.price_in_per_1m.amount) - Number(b.price_in_per_1m.amount))[0];
 
   return (
-    <div className="min-h-screen">
-      <header className="mx-auto flex max-w-[1180px] items-center justify-between px-5 py-5 sm:px-8">
-        <Link href="/" className="text-[17px] font-semibold tracking-[-0.01em]">
-          {BRAND.name}
-        </Link>
-        <nav className="flex items-center gap-1 sm:gap-2">
-          <a href="#pricing" className="hidden rounded-md px-3 py-2 text-[14px] text-muted hover:text-ink sm:block">
-            Pricing
-          </a>
-          <a href="#hosts" className="hidden rounded-md px-3 py-2 text-[14px] text-muted hover:text-ink sm:block">
-            Host a GPU
-          </a>
-          {me ? (
-            <ButtonLink href="/app">Open console</ButtonLink>
-          ) : (
-            <>
-              <Link href="/login" className="rounded-md px-3 py-2 text-[14px] text-muted hover:text-ink">
-                Sign in
-              </Link>
-              <ButtonLink href="/signup">Create account</ButtonLink>
-            </>
-          )}
-        </nav>
+    <div className="min-h-[100dvh]">
+      <header className="sticky top-0 z-30 border-b border-line/70 bg-bg/70 backdrop-blur-xl">
+        <div className={cx(WRAP, "flex h-16 items-center justify-between")}>
+          <Link href="/" aria-label={`${BRAND.name} home`}>
+            <Logo />
+          </Link>
+          <nav className="flex items-center gap-1" aria-label="Main">
+            <a href="#how" className="hidden rounded-lg px-3 py-2 text-[14px] text-muted hover:text-ink md:block">
+              How it works
+            </a>
+            <a href="#pricing" className="hidden rounded-lg px-3 py-2 text-[14px] text-muted hover:text-ink md:block">
+              Pricing
+            </a>
+            <a href="#hosts" className="hidden rounded-lg px-3 py-2 text-[14px] text-muted hover:text-ink md:block">
+              Host a GPU
+            </a>
+            {me ? (
+              <ButtonLink href="/app" className="ml-2">
+                Open console
+              </ButtonLink>
+            ) : (
+              <>
+                <Link href="/login" className="rounded-lg px-3 py-2 text-[14px] text-muted hover:text-ink">
+                  Sign in
+                </Link>
+                <ButtonLink href="/signup" className="ml-1">
+                  Create account
+                </ButtonLink>
+              </>
+            )}
+          </nav>
+        </div>
       </header>
 
       <main>
-        <section className="mx-auto grid max-w-[1180px] items-center gap-12 px-5 pb-16 pt-10 sm:px-8 lg:grid-cols-[1.05fr_1fr] lg:pt-16">
-          <div>
-            <h1 className="text-[40px] font-semibold leading-[1.08] tracking-[-0.025em] sm:text-[52px]">
+        <section className={cx(WRAP, "grid items-center gap-12 pb-20 pt-14 lg:grid-cols-[1.25fr_1fr] lg:pt-20")}>
+          <div className="min-w-0">
+            <h1 className="rise text-[40px] font-semibold leading-[1.06] tracking-[-0.03em] sm:text-[50px]" style={{ "--i": 0 } as React.CSSProperties}>
               Open-source models on Indian GPUs, behind the API you already use.
             </h1>
-            <p className="mt-5 max-w-[56ch] text-[17px] leading-relaxed text-muted">
-              Deploy Llama, Qwen or Mistral in minutes and call it with the OpenAI SDK. Pay per token in rupees, starting
-              with ₹500 of free credit. Choose data-centre reliability or spot pricing on community hardware.
+            <p className="rise mt-5 max-w-[52ch] text-[17px] leading-relaxed text-muted" style={{ "--i": 1 } as React.CSSProperties}>
+              Deploy Llama, Qwen or Mistral in minutes, call it with the OpenAI SDK, and pay per token in rupees.
             </p>
-            <div className="mt-8 flex flex-wrap gap-3">
-              <ButtonLink href={me ? "/app/models" : "/signup"}>Deploy a model</ButtonLink>
-              <ButtonLink href={me ? "/app/hosts/new" : "/signup?intent=host"} variant="secondary">
+            <div className="rise mt-8 flex flex-wrap gap-3" style={{ "--i": 2 } as React.CSSProperties}>
+              <ButtonLink href={deployHref} className="h-11 px-5 text-[15px]">
+                Deploy a model
+              </ButtonLink>
+              <ButtonLink href={hostHref} variant="secondary" className="h-11 px-5 text-[15px]">
                 Connect a GPU
               </ButtonLink>
             </div>
-            <div className="mt-10">
-              <NetworkLine stats={stats.data} />
-            </div>
           </div>
-          <BaseUrlDiff />
+
+          <figure
+            className="rise lift min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-[#15172b]"
+            style={{ "--i": 3 } as React.CSSProperties}
+          >
+            <figcaption className="flex items-center gap-2 border-b border-white/10 px-5 py-3 font-mono text-[12px] text-[#9ea3bf]">
+              app.py
+              <span className="ml-auto rounded-md bg-white/10 px-2 py-0.5 font-sans text-[11px] text-[#e7e8f3]">one line changes</span>
+            </figcaption>
+            <BaseUrlDiff />
+            <NetworkNow stats={stats.data} />
+          </figure>
         </section>
 
-        <section className="border-y border-line bg-surface">
-          <div className="mx-auto max-w-[1180px] px-5 py-16 sm:px-8">
-            <h2 className="text-[28px] font-semibold tracking-[-0.015em]">Choose how much reliability you pay for</h2>
-            <p className="mt-2 max-w-[64ch] text-muted">
-              Every machine on the network sits in one of three tiers. The tier decides the SLA, what may run there and
-              the price. Sensitive workloads and bring-your-own weights never run on personal machines.
-            </p>
-            <div className="mt-8 overflow-x-auto">
-              <table className="table min-w-[640px]">
-                <thead>
-                  <tr>
-                    <th>Tier</th>
-                    <th>Who supplies it</th>
-                    <th>Reliability</th>
-                    <th>GPUs online</th>
-                    <th className="text-right">From</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(["t1", "t2", "t3"] as Tier[]).map((t) => (
-                    <tr key={t}>
-                      <td className="font-medium">
-                        {TIERS[t].short} {TIERS[t].name}
-                      </td>
-                      <td className="text-muted">{TIERS[t].who}</td>
-                      <td>{TIERS[t].sla}</td>
-                      <td>{stats.data ? number(stats.data.gpus_by_tier[t] ?? 0) : "—"}</td>
-                      <td className="text-right">{tierFrom(t) != null ? `₹${tierFrom(t)}/GPU-hour` : "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+        <section id="how" className={cx(WRAP, "pb-24")}>
+          <h2 className="max-w-[20ch] text-[30px] font-semibold leading-tight tracking-[-0.02em] sm:text-[36px]">
+            From a model name to a production endpoint
+          </h2>
+          <div className="mt-8 grid gap-4 md:grid-cols-6">
+            <div className="glass min-w-0 rounded-2xl p-6 md:col-span-4">
+              <span aria-hidden className="grid h-10 w-10 place-items-center rounded-xl bg-nil-soft text-nil">
+                <Workflow size={20} />
+              </span>
+              <h3 className="mt-3 text-[18px] font-semibold tracking-[-0.01em]">You watch it power on</h3>
+              <p className="mt-2 max-w-[56ch] text-[15px] leading-relaxed text-muted">
+                Pick a model and a tier. The scheduler reserves a GPU, the host pulls and loads the weights, and the
+                console shows every stage as it happens. A warm GPU is serving in under a minute.
+              </p>
+              <div className="mt-6 rounded-xl border border-line bg-surface p-5">
+                <PowerRail state="warming" />
+              </div>
             </div>
+            <Tile icon={BadgeIndianRupee} title="Billed in rupees, per token" tone="nil" className="md:col-span-2">
+              A prepaid wallet with GST invoices. New accounts in India start with ₹500 of credit.
+              {cheapest && (
+                <span className="mt-3 block text-[14px] text-on-nil">
+                  From {inr(cheapest.price_in_per_1m)} per million input tokens.
+                </span>
+              )}
+            </Tile>
+            <Tile icon={PlugZap} title="Nothing to rewrite" className="md:col-span-2">
+              The endpoint speaks the OpenAI wire format, streaming included. Change the base URL and keep your client,
+              your prompts and your code.
+            </Tile>
+            <Tile icon={MapPin} title="Stays in India" className="md:col-span-2">
+              Pin a deployment to Indian regions and it never schedules outside them. Built for teams that answer to
+              DPDP.
+            </Tile>
+            <Tile icon={ShieldCheck} title="You choose the trust level" tone="marigold" className="md:col-span-2">
+              Data-centre nodes with an SLA, vetted lab machines, or spot capacity on personal hardware at{" "}
+              {Math.round(spot * 100)}% of the price.
+            </Tile>
           </div>
         </section>
 
-        <section id="pricing" className="mx-auto max-w-[1180px] px-5 py-16 sm:px-8">
-          <h2 className="text-[28px] font-semibold tracking-[-0.015em]">Pay per token</h2>
-          <p className="mt-2 max-w-[64ch] text-muted">
-            Managed endpoints are billed per million tokens, per second of use, from a prepaid wallet with GST invoices.
-            Spot capacity costs {Math.round(spot * 100)}% of the on-demand price.
+        <section className={cx(WRAP, "pb-24")}>
+          <h2 className="text-[30px] font-semibold tracking-[-0.02em] sm:text-[36px]">Three tiers of hardware</h2>
+          <p className="mt-3 max-w-[62ch] text-[16px] text-muted">
+            The tier sets the SLA, what may run there and the price. Sensitive workloads and your own weights never run
+            on personal machines.
           </p>
-          <div className="mt-8 overflow-x-auto rounded-xl border border-line bg-surface">
+          <div className="glass mt-8 overflow-x-auto rounded-2xl">
+            <table className="table min-w-[680px]">
+              <thead>
+                <tr>
+                  <th>Tier</th>
+                  <th>Who supplies it</th>
+                  <th>Reliability</th>
+                  <th className="text-right">Online now</th>
+                  <th className="text-right">From</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(["t1", "t2", "t3"] as Tier[]).map((t) => (
+                  <tr key={t}>
+                    <td>
+                      <TierBadge tier={t} long />
+                    </td>
+                    <td className="text-muted">{TIERS[t].who}</td>
+                    <td>{TIERS[t].sla}</td>
+                    <td className="text-right">{stats.data ? `${number(stats.data.gpus_by_tier[t] ?? 0)} GPUs` : "-"}</td>
+                    <td className="text-right font-medium">{tierFrom(t) != null ? `₹${tierFrom(t)} per GPU-hour` : "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="pricing" className={cx(WRAP, "pb-24")}>
+          <h2 className="text-[30px] font-semibold tracking-[-0.02em] sm:text-[36px]">Model pricing</h2>
+          <p className="mt-3 max-w-[62ch] text-[16px] text-muted">
+            Per million tokens, shown in rupees at today&apos;s published rate. You pay only for tokens processed.
+          </p>
+          <div className="glass mt-8 overflow-x-auto rounded-2xl">
             <table className="table min-w-[720px]">
               <thead>
                 <tr>
                   <th>Model</th>
                   <th>Licence</th>
-                  <th className="text-right">Input / 1M</th>
-                  <th className="text-right">Output / 1M</th>
-                  <th className="text-right">Spot output / 1M</th>
+                  <th className="text-right">Input</th>
+                  <th className="text-right">Output</th>
+                  <th className="text-right">Output on spot</th>
                 </tr>
               </thead>
               <tbody>
                 {(models.data?.models ?? []).map((m) => {
-                  const inPrice = inrRate ? convert(m.price_in_per_1m, "INR", inrRate) : m.price_in_per_1m;
-                  const outPrice = inrRate ? convert(m.price_out_per_1m, "INR", inrRate) : m.price_out_per_1m;
-                  const spotOut = { ...outPrice, amount: String(Number(outPrice.amount) * spot) };
+                  const out = inrRate ? convert(m.price_out_per_1m, "INR", inrRate) : m.price_out_per_1m;
                   return (
                     <tr key={m.id}>
                       <td>
-                        <div className="font-medium">{m.name}</div>
-                        <div className="text-[13px] text-muted">{m.params_b}B parameters</div>
+                        <div className="flex items-center gap-2.5 font-medium">
+                          <Cpu size={15} className="text-muted" aria-hidden />
+                          {m.name}
+                        </div>
+                        <div className="ml-[25px] text-[13px] text-muted">{m.params_b}B parameters</div>
                       </td>
                       <td className="text-muted">{m.license}</td>
-                      <td className="text-right">{money(inPrice)}</td>
-                      <td className="text-right">{money(outPrice)}</td>
-                      <td className="text-right">{m.tiers_allowed.includes("t3") ? money(spotOut) : <span className="text-muted">not on spot</span>}</td>
+                      <td className="text-right">{inr(m.price_in_per_1m)}</td>
+                      <td className="text-right">{money(out)}</td>
+                      <td className="text-right">
+                        {m.tiers_allowed.includes("t3") ? (
+                          money({ ...out, amount: String(Number(out.amount) * spot) })
+                        ) : (
+                          <span className="text-muted">T1 and T2 only</span>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
@@ -207,31 +317,66 @@ export default function Landing() {
                     </td>
                   </tr>
                 )}
+                {models.error && (
+                  <tr>
+                    <td colSpan={5} className="text-danger">
+                      Could not load prices: {models.error.message}
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
         </section>
 
-        <section id="hosts" className="border-t border-line bg-surface">
-          <div className="mx-auto max-w-[1180px] px-5 py-16 sm:px-8">
-            <h2 className="text-[28px] font-semibold tracking-[-0.015em]">Your GPU earns while you don&apos;t use it</h2>
-            <p className="mt-2 max-w-[64ch] text-muted">
-              Install one agent and your machine joins the network. It only makes outbound connections, runs jobs in
-              isolation, and you keep {pricing.data?.host_share_percent ?? 75}% of what customers pay for its time.
-            </p>
-            <div className="mt-8">{pricing.data && <EarningsCalculator pricing={pricing.data} />}</div>
-            <div className="mt-8">
-              <ButtonLink href={me ? "/app/hosts/new" : "/signup?intent=host"}>Connect a GPU</ButtonLink>
+        <section id="hosts" className={cx(WRAP, "pb-24")}>
+          <h2 className="max-w-[22ch] text-[30px] font-semibold leading-tight tracking-[-0.02em] sm:text-[36px]">
+            Your GPU earns while you are not using it
+          </h2>
+          <p className="mt-3 max-w-[62ch] text-[16px] text-muted">
+            One agent, outbound connections only, no ports to open.
+            {hostShare != null && ` You keep ${hostShare}% of what customers pay for your machine's time.`}
+          </p>
+          <div className="glass mt-8 rounded-2xl p-6 sm:p-8">
+            {pricing.data ? (
+              <EarningsCalculator pricing={pricing.data} />
+            ) : (
+              <p className="text-muted">{pricing.error ? `Could not load the rate card: ${pricing.error.message}` : "Loading the rate card."}</p>
+            )}
+          </div>
+        </section>
+
+        <section className={cx(WRAP, "pb-24")}>
+          <div className="lift relative overflow-hidden rounded-3xl bg-nil px-8 py-14 text-on-nil sm:px-14">
+            <div aria-hidden className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-marigold/25 blur-3xl" />
+            <h2 className="relative max-w-[18ch] text-[32px] font-semibold leading-tight tracking-[-0.025em] sm:text-[40px]">
+              Your first endpoint is a few minutes away.
+            </h2>
+            <div className="relative mt-8 flex flex-wrap gap-3">
+              <Link
+                href={deployHref}
+                className="press inline-flex h-11 items-center rounded-[10px] bg-on-nil px-5 text-[15px] font-medium text-nil transition-transform"
+              >
+                Deploy a model
+              </Link>
+              <Link
+                href={hostHref}
+                className="press inline-flex h-11 items-center rounded-[10px] border border-on-nil/30 px-5 text-[15px] font-medium text-on-nil transition-transform hover:bg-white/10"
+              >
+                Connect a GPU
+              </Link>
             </div>
           </div>
         </section>
       </main>
 
-      <footer className="mx-auto flex max-w-[1180px] flex-wrap justify-between gap-4 px-5 py-10 text-[13px] text-muted sm:px-8">
-        <span>
-          © {new Date().getFullYear()} {BRAND.company}
-        </span>
-        <span>Prices exclude GST. Data stays in the region you choose.</span>
+      <footer className="border-t border-line">
+        <div className={cx(WRAP, "flex flex-wrap items-center justify-between gap-4 py-8 text-[13px] text-muted")}>
+          <Logo size={22} />
+          <span>
+            © {new Date().getFullYear()} {BRAND.company}. Prices exclude GST.
+          </span>
+        </div>
       </footer>
     </div>
   );

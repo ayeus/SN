@@ -112,7 +112,7 @@ func (s *Server) Run() error {
 
 	s.httpSrv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.Config.Port),
-		Handler:           s.Mux,
+		Handler:           s.accessLog(s.Mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      0, // 0 = no deadline; SSE streams outlive any fixed write timeout
@@ -161,6 +161,38 @@ func (s *Server) Run() error {
 	}
 
 	return s.Shutdown()
+}
+
+// accessLog writes one structured line per request: method, path, status and
+// duration. Probe and metrics endpoints are skipped; they would drown the log.
+// Query strings are never logged, since they can carry tokens.
+func (s *Server) accessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz", "/readyz", "/metrics":
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		fields := []zap.Field{
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path),
+			zap.Int("status", status),
+			zap.Duration("duration", time.Since(start)),
+			zap.String("request_id", r.Header.Get("X-Request-ID")),
+		}
+		if status >= 500 {
+			s.Logger.Error("request", fields...)
+		} else {
+			s.Logger.Info("request", fields...)
+		}
+	})
 }
 
 // Shutdown gracefully stops the server.

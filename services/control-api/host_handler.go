@@ -75,6 +75,7 @@ func (a *API) HandleIssueRegistrationToken(w http.ResponseWriter, r *http.Reques
 	args := fmt.Sprintf("--server %s --token %s --coordinator %s --region %s", a.publicURL, tok.Token, a.coordinatorPublicURL, req.Region)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"registration_token": tok.Token,
+		"token_id":           tok.JTI,
 		"expires_at":         tok.ExpiresAt,
 		"tier":               req.Tier,
 		"region":             req.Region,
@@ -84,6 +85,27 @@ func (a *API) HandleIssueRegistrationToken(w http.ResponseWriter, r *http.Reques
 			"windows_wsl": fmt.Sprintf("wsl -e sh -c \"curl -fsSL %s/install.sh | sh -s -- %s\"", a.publicURL, args),
 			"from_source": fmt.Sprintf("./run-node.sh --token %s --coordinator %s --region %s", tok.Token, a.coordinatorPublicURL, req.Region),
 		},
+	})
+}
+
+// HandleRegistrationTokenStatus reports whether an install token has been
+// used and by which machine, so the console can show the new host the moment
+// it enrols instead of guessing from timestamps.
+func (a *API) HandleRegistrationTokenStatus(w http.ResponseWriter, r *http.Request) {
+	var hostID *string
+	var expires time.Time
+	err := a.db.Pool.QueryRow(r.Context(), `
+		SELECT consumed_by_host::TEXT, expires_at FROM host_registration_tokens
+		WHERE jti::TEXT = $1 AND user_id = $2;
+	`, r.PathValue("id"), claimsOf(r).UserID).Scan(&hostID, &expires)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Install command not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"used":    hostID != nil,
+		"host_id": hostID,
+		"expired": hostID == nil && time.Now().After(expires),
 	})
 }
 
