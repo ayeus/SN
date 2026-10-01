@@ -1,6 +1,9 @@
 package platform
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -121,6 +124,25 @@ func (r *statusRecorder) Flush() {
 		f.Flush()
 	}
 }
+
+// Hijack forwards connection takeover. Without it httputil.ReverseProxy cannot
+// upgrade to WebSocket ("can't switch protocols using non-Hijacker
+// ResponseWriter"), which broke the web console behind the gateway: the Next.js
+// dev client waits for its HMR WebSocket before it hydrates, so every button on
+// every page did nothing.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("platform: underlying ResponseWriter does not support hijacking")
+	}
+	if r.status == 0 {
+		r.status = http.StatusSwitchingProtocols
+	}
+	return h.Hijack()
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // MetricsMiddleware records request counts and latency for every request.
 // The route label comes from the matched ServeMux pattern rather than the raw

@@ -259,7 +259,7 @@ function Wizard() {
               {residentIN ? ", India-resident" : ""}
             </dd>
             <dt className="text-muted">Wallet</dt>
-            <dd>{wallet.data ? money(wallet.data.balance) : "—"}</dd>
+            <dd>{wallet.data ? money(wallet.data.balance, { balance: true }) : "—"}</dd>
           </dl>
 
           <h3 className="mt-8 text-[14px] font-semibold">Price per 1M tokens</h3>

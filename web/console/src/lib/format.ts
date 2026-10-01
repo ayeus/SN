@@ -2,13 +2,23 @@ import type { Money, Tier } from "./types";
 
 const LOCALE = "en-IN";
 
-/** Formats a money value. Small per-request amounts keep more precision. */
-export function money(m: Money | undefined | null, opts: { precise?: boolean } = {}): string {
+/**
+ * Formats a money value. Small per-request amounts keep more precision.
+ * `balance` rounds toward zero to whole paise/cents: ₹499.9998 shows as
+ * ₹499.99, never as ₹500.00, so a wallet never displays money it doesn't hold.
+ */
+export function money(m: Money | undefined | null, opts: { precise?: boolean; balance?: boolean } = {}): string {
   if (!m) return "—";
-  const value = Number(m.amount);
+  let value = Number(m.amount);
+  if (opts.balance) {
+    // Truncate exact integer micro-units; truncating value*100 in floating
+    // point would turn 12.34 into 12.33.
+    const micros = Number.isFinite(m.micros) ? m.micros : Math.round(value * 1e6);
+    value = Math.trunc(micros / 10_000) / 100;
+  }
   const currency = m.currency || "USD";
   const abs = Math.abs(value);
-  const digits = opts.precise || (abs > 0 && abs < 1) ? (abs < 0.01 ? 4 : 2) : 2;
+  const digits = opts.balance ? 2 : opts.precise || (abs > 0 && abs < 1) ? (abs < 0.01 ? 4 : 2) : 2;
   try {
     return new Intl.NumberFormat(LOCALE, {
       style: "currency",

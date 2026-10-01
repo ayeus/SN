@@ -139,6 +139,7 @@ export function Panel({
   actions,
   children,
   className,
+  bodyClassName,
   flush,
 }: {
   title?: React.ReactNode;
@@ -146,10 +147,13 @@ export function Panel({
   actions?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
+  bodyClassName?: string;
   flush?: boolean;
 }) {
   return (
-    <section className={cx("rounded-xl border border-line bg-surface", className)}>
+    // min-w-0: a grid or flex child defaults to min-width:auto, so one long
+    // line of code would push the whole page wider than a phone screen.
+    <section className={cx("min-w-0 rounded-xl border border-line bg-surface", className)}>
       {(title || actions) && (
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-5 py-4">
           <div>
@@ -159,7 +163,7 @@ export function Panel({
           {actions}
         </div>
       )}
-      <div className={flush ? "" : "p-5"}>{children}</div>
+      <div className={cx(flush ? "" : "p-5", bodyClassName)}>{children}</div>
     </section>
   );
 }
@@ -313,20 +317,28 @@ export function CopyField({ value, label, secret }: { value: string; label?: str
   );
 }
 
-export function CodeBlock({ code }: { code: string }) {
+export function CodeBlock({ code, label, wrap }: { code: string; label?: string; wrap?: boolean }) {
   const [copied, copy] = useCopy();
   return (
-    <div className="relative rounded-lg border border-line bg-[#15172b] text-[#e7e8f3]">
-      <button
-        type="button"
-        onClick={() => copy(code)}
-        className="absolute right-2 top-2 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-[#b9bbd4] hover:bg-white/10"
-        aria-label="Copy code"
+    <div className="min-w-0 overflow-hidden rounded-lg border border-line bg-[#15172b] text-[#e7e8f3]">
+      <div className="flex items-center justify-between gap-2 border-b border-white/10 py-1 pl-4 pr-1.5">
+        <span className="truncate font-mono text-[12px] text-[#9ea3bf]">{label ?? ""}</span>
+        <button
+          type="button"
+          onClick={() => copy(code)}
+          className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] text-[#b9bbd4] hover:bg-white/10"
+          aria-label={label ? `Copy ${label}` : "Copy code"}
+        >
+          {copied === code ? <Check size={14} /> : <Copy size={14} />}
+          {copied === code ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre
+        className={cx(
+          "p-4 font-mono text-[13px] leading-relaxed",
+          wrap ? "whitespace-pre-wrap break-all" : "overflow-x-auto",
+        )}
       >
-        {copied === code ? <Check size={14} /> : <Copy size={14} />}
-        {copied === code ? "Copied" : "Copy"}
-      </button>
-      <pre className="overflow-x-auto p-4 pr-20 font-mono text-[13px] leading-relaxed">
         <code>{code}</code>
       </pre>
     </div>

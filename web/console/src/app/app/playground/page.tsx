@@ -31,7 +31,11 @@ function Playground() {
   useEffect(() => {
     if (!target && serving.length) setTarget(serving[0].name);
   }, [serving, target]);
-  useEffect(() => bottom.current?.scrollIntoView({ block: "end" }), [messages]);
+  // Braces matter: scrollIntoView returns a Promise in current browsers, and an
+  // effect that returns anything but a cleanup function crashes React.
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: "end" });
+  }, [messages]);
 
   async function send() {
     const text = input.trim();
@@ -131,8 +135,9 @@ function Playground() {
     <>
       <PageHeader title="Playground" description="Chat with your deployments through the same OpenAI-compatible API your code uses." />
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
-        <Panel flush className="flex min-h-[560px] flex-col">
-          <div className="flex-1 overflow-y-auto px-5 py-5">
+        {/* The Panel body is the flex column: messages grow, the input stays at the bottom. */}
+        <Panel flush bodyClassName="flex h-[min(640px,calc(100vh-220px))] min-h-[420px] flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
             {messages.length === 0 ? (
               <p className="text-muted">Send a message to {target || "your deployment"}.</p>
             ) : (

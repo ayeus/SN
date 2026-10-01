@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 import {
   Boxes,
   CreditCard,
@@ -25,7 +25,22 @@ import { api } from "@/lib/api";
 import { money } from "@/lib/format";
 import { useData } from "@/lib/hooks";
 import type { Wallet } from "@/lib/types";
-import { cx } from "./ui";
+import { Notice, cx } from "./ui";
+
+// Shown once after sign-up, on whichever page sign-up sent the user to.
+function WelcomeNotice() {
+  const welcome = useSearchParams().get("welcome");
+  const [dismissed, setDismissed] = useState(false);
+  if (!welcome || dismissed) return null;
+  return (
+    <Notice tone="success" className="mb-6 flex items-start justify-between gap-4">
+      <span>Your account is ready and {welcome} of credit is in your wallet.</span>
+      <button onClick={() => setDismissed(true)} className="text-[13px] text-muted hover:text-ink" aria-label="Dismiss">
+        Dismiss
+      </button>
+    </Notice>
+  );
+}
 
 type Item = { href: string; label: string; icon: React.ComponentType<{ size?: number }>; exact?: boolean };
 
@@ -55,7 +70,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!loading && !me) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
   }, [loading, me, pathname, router]);
-  useEffect(() => setOpen(false), [pathname]);
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
 
   if (loading || !me) {
     return <div className="grid min-h-screen place-items-center text-muted">Loading your workspace…</div>;
@@ -112,7 +129,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Link href="/app/billing" className="rounded-lg border border-line px-3 py-2.5 hover:bg-surface-2">
             <div className="text-[12px] text-muted">Wallet balance</div>
             <div className={cx("text-[15px] font-semibold", wallet.data.low_balance && "text-danger")}>
-              {money(wallet.data.balance)}
+              {money(wallet.data.balance, { balance: true })}
             </div>
           </Link>
         )}
@@ -174,7 +191,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
 
       <main className="min-w-0 px-4 py-8 sm:px-8 lg:px-10">
-        <div className="mx-auto max-w-[1180px]">{children}</div>
+        <div className="mx-auto max-w-[1180px]">
+          <Suspense>
+            <WelcomeNotice />
+          </Suspense>
+          {children}
+        </div>
       </main>
     </div>
   );

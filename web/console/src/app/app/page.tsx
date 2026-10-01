@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { Suspense } from "react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -14,7 +14,6 @@ import { PowerRail } from "@/components/PowerRail";
 function Overview() {
   const { me } = useAuth();
   const router = useRouter();
-  const welcome = useSearchParams().get("welcome");
   const deps = useData(() => api.get<{ deployments: Deployment[] }>("/v1/deployments"), [], 5000);
   const wallet = useData(() => api.get<Wallet>("/v1/billing/wallet"), [], 15000);
 
@@ -31,14 +30,9 @@ function Overview() {
         actions={<ButtonLink href="/app/models">Deploy a model</ButtonLink>}
       />
 
-      {welcome && (
-        <Notice tone="success" className="mb-6">
-          Your account is ready and {welcome} of credit is in your wallet.
-        </Notice>
-      )}
       {wallet.data?.low_balance && (
         <Notice tone="warn" className="mb-6">
-          Your wallet is running low ({money(wallet.data.balance)}). Deployments pause automatically when it reaches zero.{" "}
+          Your wallet is running low ({money(wallet.data.balance, { balance: true })}). Deployments pause automatically when it reaches zero.{" "}
           <Link href="/app/billing" className="font-medium underline">
             Top up
           </Link>
@@ -47,7 +41,7 @@ function Overview() {
 
       <Panel className="mb-6">
         <div className="grid grid-cols-2 gap-6 md:grid-cols-4">
-          <Stat label="Wallet balance" value={wallet.data ? money(wallet.data.balance) : <Skeleton className="h-7 w-24" />} />
+          <Stat label="Wallet balance" value={wallet.data ? money(wallet.data.balance, { balance: true }) : <Skeleton className="h-7 w-24" />} />
           <Stat label="Spent today" value={wallet.data ? money(wallet.data.spend_24h) : <Skeleton className="h-7 w-20" />} />
           <Stat label="Serving deployments" value={deps.data ? `${serving} of ${list.length}` : <Skeleton className="h-7 w-16" />} />
           <Stat label="Requests today" value={deps.data ? number(requests) : <Skeleton className="h-7 w-16" />} sub={deps.data ? `${compact(tokens)} tokens` : undefined} />

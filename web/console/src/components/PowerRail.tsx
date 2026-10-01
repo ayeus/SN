@@ -19,7 +19,7 @@ export function PowerRail({ state, detail, compact }: { state: DeploymentState; 
 
   return (
     <div>
-      <ol className={cx("grid grid-cols-5", compact ? "gap-1" : "gap-2")} aria-label="Deployment progress">
+      <ol className={cx("grid grid-cols-5", compact ? "gap-1" : "gap-1.5 sm:gap-2")} aria-label="Deployment progress">
         {STAGES.map((s, i) => {
           const reached = !halted && idx !== undefined && i <= idx;
           const current = !halted && i === idx && !done;
@@ -36,11 +36,16 @@ export function PowerRail({ state, detail, compact }: { state: DeploymentState; 
                 )}
               />
               {!compact && (
-                <div className="mt-2">
-                  <div className={cx("text-[13px] font-medium", status === "todo" || halted ? "text-muted" : "text-ink")}>
+                <div className="mt-2 min-w-0">
+                  <div
+                    className={cx(
+                      "truncate text-[11px] font-medium sm:text-[13px]",
+                      status === "todo" || halted ? "text-muted" : "text-ink",
+                    )}
+                  >
                     {s.label}
                   </div>
-                  <div className="truncate text-[12px] text-muted">{s.hint}</div>
+                  <div className="hidden truncate text-[12px] text-muted sm:block">{s.hint}</div>
                 </div>
               )}
             </li>

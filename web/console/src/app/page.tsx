@@ -13,7 +13,9 @@ import { EarningsCalculator } from "@/components/EarningsCalculator";
 
 function BaseUrlDiff() {
   const [origin, setOrigin] = useState("https://your-endpoint");
-  useEffect(() => setOrigin(window.location.origin), []);
+  useEffect(() => {
+    setOrigin(window.location.origin);
+  }, []);
   return (
     <figure className="overflow-hidden rounded-xl border border-line bg-[#15172b] text-[#e7e8f3] shadow-[0_24px_60px_-30px_rgba(35,36,106,0.55)]">
       <figcaption className="border-b border-white/10 px-4 py-2.5 font-mono text-[12px] text-[#9ea3bf]">app.py</figcaption>

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ayeus/ayeusann/internal/platform"
 )
 
 // upstream records which service received a request.
@@ -143,5 +148,61 @@ func TestRequestIDAndHostPreserved(t *testing.T) {
 	}
 	if rec.Header().Get("X-Seen-Host") != "console.example.com" {
 		t.Fatalf("upstream saw host %q", rec.Header().Get("X-Seen-Host"))
+	}
+}
+
+// A WebSocket upgrade must survive the full gateway stack, including the
+// metrics middleware main() wraps it in. When it didn't, the web console never
+// hydrated behind the gateway and every button was dead.
+func TestWebSocketUpgradeThroughGateway(t *testing.T) {
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != "websocket" {
+			http.Error(w, "expected upgrade", http.StatusBadRequest)
+			return
+		}
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("upstream hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = buf.Flush()
+		line := make([]byte, 4)
+		if _, err := io.ReadFull(buf, line); err == nil {
+			_, _ = conn.Write(line)
+		}
+	}))
+	defer echo.Close()
+	web, _ := url.Parse(echo.URL)
+	api, _ := url.Parse("http://127.0.0.1:1")
+
+	h := platform.MetricsMiddleware("gateway", NewHandler(Upstreams{
+		ControlAPI: api, Inference: api, Billing: api, Trust: api, Web: web,
+	}))
+	gw := httptest.NewServer(h)
+	defer gw.Close()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(gw.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = conn.Write([]byte("GET /_next/hmr HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" +
+		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"))
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade through gateway returned %d, want 101", resp.StatusCode)
+	}
+	_, _ = conn.Write([]byte("ping"))
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(br, got); err != nil || string(got) != "ping" {
+		t.Fatalf("no bytes through the upgraded connection: %q %v", got, err)
 	}
 }
