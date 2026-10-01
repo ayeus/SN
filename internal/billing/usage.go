@@ -48,8 +48,8 @@ type UsageResult struct {
 
 // RecordUsage writes the usage event and the wallet debit in one transaction.
 //
-// Only successful requests are charged. Failed requests are still recorded (at
-// zero) because the trust engine derives each host's success rate from them.
+// Successful and client-cancelled requests are charged for their tokens. Failed
+// requests are still recorded (at zero) because the trust engine derives each host's success rate from them.
 //
 // The debit is unbounded: the request has already consumed GPU time, so
 // refusing to record it would only lose revenue. Admission control (a positive
@@ -82,7 +82,9 @@ func RecordUsage(ctx context.Context, client *db.Client, in UsageInput) (*UsageR
 		res.Prices = prices
 
 		chargeUSD := money.Zero(PriceCurrency)
-		if in.Status == StatusSuccess {
+		// Cancelled requests are charged for the tokens generated before the
+		// client disconnected; the GPU time was spent either way.
+		if in.Status == StatusSuccess || in.Status == StatusCancelled {
 			chargeUSD, err = TokenCharge(int64(in.InputTokens), int64(in.OutputTokens), prices)
 			if err != nil {
 				return err

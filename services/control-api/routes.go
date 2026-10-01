@@ -34,6 +34,8 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/auth/signup", a.HandleSignup)
 	mux.HandleFunc("POST /v1/auth/login", a.HandleLogin)
 	mux.HandleFunc("POST /v1/auth/refresh", a.HandleRefresh)
+	mux.HandleFunc("POST /v1/auth/password/forgot", a.HandleForgotPassword)
+	mux.HandleFunc("POST /v1/auth/password/reset", a.HandleResetPassword)
 	mux.Handle("GET /v1/models", optional(a.HandleListModels))
 	mux.Handle("GET /v1/models/{id}", optional(a.HandleGetModel))
 	mux.HandleFunc("GET /v1/regions", a.HandleRegions)

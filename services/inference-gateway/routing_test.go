@@ -68,3 +68,32 @@ func TestPickSpreadsTies(t *testing.T) {
 		}
 	}
 }
+
+func TestDeltaCounterCountsTokensAcrossReads(t *testing.T) {
+	stream := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"completion_tokens\":2}}\n\n" +
+		"data: [DONE]\n\n"
+	// Feed in awkward slices to prove events split across reads still count.
+	for _, size := range []int{1, 7, 64, len(stream)} {
+		var c deltaCounter
+		for i := 0; i < len(stream); i += size {
+			end := min(i+size, len(stream))
+			c.write([]byte(stream[i:end]))
+		}
+		if c.n != 2 {
+			t.Fatalf("chunk size %d: counted %d deltas, want 2", size, c.n)
+		}
+	}
+}
+
+func TestEstimatePromptTokens(t *testing.T) {
+	if n := estimatePromptTokens([]byte(`{"messages":[{"role":"user","content":"12345678"}]}`)); n < 2 || n > 4 {
+		t.Fatalf("estimate = %d", n)
+	}
+	if estimatePromptTokens([]byte(`not json`)) != 0 {
+		t.Fatal("invalid body must estimate 0")
+	}
+}

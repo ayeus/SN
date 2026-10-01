@@ -323,6 +323,10 @@ func (a *API) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	limitKey := strings.ToLower(strings.TrimSpace(req.Email))
+	if ip := clientIP(r); ip != nil {
+		limitKey = *ip + "|" + limitKey
+	}
 
 	var user domain.User
 	var passwordHash *string
@@ -343,6 +347,12 @@ func (a *API) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if passwordHash == nil || !auth.CheckPasswordHash(req.Password, *passwordHash) {
+		// Only failures count toward the limit, so a correct password always
+		// works until the limit is hit by guesses.
+		if !a.loginLimiter.allow(limitKey) {
+			writeError(w, http.StatusTooManyRequests, "Too many failed sign-in attempts. Wait 10 minutes or reset your password.")
+			return
+		}
 		platform.AuthFailuresTotal.WithLabelValues("control-api", "bad_password").Inc()
 		writeError(w, http.StatusUnauthorized, "Invalid email or password")
 		return

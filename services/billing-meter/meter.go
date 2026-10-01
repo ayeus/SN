@@ -315,7 +315,7 @@ func (m *Meter) GenerateInvoice(ctx context.Context, orgID string, start, end ti
 		var subtotal money.Amount
 		if err := tx.QueryRow(ctx, `
 			SELECT COALESCE(SUM(amount_customer), 0) FROM usage_events
-			WHERE org_id = $1 AND ts >= $2 AND ts < $3 AND status = 'success';
+			WHERE org_id = $1 AND ts >= $2 AND ts < $3 AND status IN ('success', 'cancelled');
 		`, orgID, start, end).Scan(&subtotal); err != nil {
 			return err
 		}
@@ -360,7 +360,7 @@ func (m *Meter) GenerateInvoice(ctx context.Context, orgID string, start, end ti
 			            THEN SUM(u.amount_customer) / SUM(u.input_tokens + u.output_tokens) ELSE 0 END,
 			       SUM(u.amount_customer)
 			FROM usage_events u JOIN deployments d ON d.id = u.deployment_id JOIN models m ON m.id = d.model_id
-			WHERE u.org_id = $2 AND u.ts >= $3 AND u.ts < $4 AND u.status = 'success'
+			WHERE u.org_id = $2 AND u.ts >= $3 AND u.ts < $4 AND u.status IN ('success', 'cancelled')
 			GROUP BY d.name, m.name, u.tier;
 		`, inv.ID, orgID, start, end)
 		return err

@@ -96,6 +96,41 @@ func Stability(scores []float64) *float64 {
 	return &v
 }
 
+// sessionGap is the silence after which a host is considered to have gone
+// away rather than hiccuped.
+const sessionGap = 10 * time.Minute
+
+// Uptime is the share of expected minutes in which the host reported telemetry.
+//
+// T1 and T2 carry an SLA (PRD F-10: 99.5% / 99%), so every minute of the window
+// is expected. T3 is best-effort personal hardware with no availability
+// commitment: its owner may close the laptop at any time. For T3 only the
+// minutes inside its online sessions are expected, so the score reflects how
+// stable the machine is while it is serving, not how many hours it was offered.
+func Uptime(minutes []time.Time, windowStart, now time.Time, tier string) float64 {
+	if len(minutes) == 0 {
+		return 0
+	}
+	var expected float64
+	if tier == domain.TierT3 {
+		start := minutes[0]
+		for i := 1; i <= len(minutes); i++ {
+			if i == len(minutes) || minutes[i].Sub(minutes[i-1]) > sessionGap {
+				expected += minutes[i-1].Sub(start).Minutes() + 1
+				if i < len(minutes) {
+					start = minutes[i]
+				}
+			}
+		}
+	} else {
+		expected = now.Sub(windowStart).Minutes()
+	}
+	if expected < 1 {
+		expected = 1
+	}
+	return clamp(float64(len(minutes)) / expected * 100)
+}
+
 func clamp(v float64) float64 { return math.Max(0, math.Min(100, v)) }
 
 // ReputationEngine computes and stores reputation.
@@ -116,26 +151,33 @@ func (e *ReputationEngine) Compute(ctx context.Context, hostID string) (*Snapsho
 	var created time.Time
 	var status string
 	var probationUntil *time.Time
-	if err := e.db.Pool.QueryRow(ctx, `SELECT created_at, status, probation_until FROM hosts WHERE id = $1;`, hostID).
-		Scan(&created, &status, &probationUntil); err != nil {
+	var tier string
+	if err := e.db.Pool.QueryRow(ctx, `SELECT created_at, status, probation_until, tier FROM hosts WHERE id = $1;`, hostID).
+		Scan(&created, &status, &probationUntil, &tier); err != nil {
 		return nil, fmt.Errorf("trust: host %s not found: %w", hostID, err)
 	}
 
-	// Uptime: minutes with at least one telemetry sample over the last 24 h, or
-	// since enrolment if younger.
 	windowStart := created
 	if since := time.Now().Add(-24 * time.Hour); windowStart.Before(since) {
 		windowStart = since
 	}
-	var activeMinutes int
-	if err := e.db.Pool.QueryRow(ctx, `
-		SELECT COUNT(DISTINCT DATE_TRUNC('minute', ts)) FROM host_telemetry WHERE host_id = $1 AND ts >= $2;
-	`, hostID, windowStart).Scan(&activeMinutes); err != nil {
+	rows0, err := e.db.Pool.Query(ctx, `
+		SELECT DISTINCT DATE_TRUNC('minute', ts) AS m FROM host_telemetry
+		WHERE host_id = $1 AND ts >= $2 ORDER BY m;
+	`, hostID, windowStart)
+	if err != nil {
 		return nil, err
 	}
-	windowMinutes := math.Max(1, time.Since(windowStart).Minutes())
+	var minutes []time.Time
+	for rows0.Next() {
+		var m time.Time
+		if rows0.Scan(&m) == nil {
+			minutes = append(minutes, m)
+		}
+	}
+	rows0.Close()
 	in := Inputs{
-		UptimePct: float64(activeMinutes) / windowMinutes * 100,
+		UptimePct: Uptime(minutes, windowStart, time.Now(), tier),
 		AgeDays:   int(time.Since(created).Hours() / 24),
 	}
 
@@ -243,9 +285,10 @@ func (e *ReputationEngine) RecordIncident(ctx context.Context, hostID, kind, sev
 	return &inc, nil
 }
 
-// RecomputeAll refreshes every host that is not banned or decommissioned.
+// RecomputeAll refreshes every connected host. Offline hosts keep their last
+// score: re-scoring a machine that is switched off only measures the absence.
 func (e *ReputationEngine) RecomputeAll(ctx context.Context) (int, error) {
-	rows, err := e.db.Pool.Query(ctx, `SELECT id FROM hosts WHERE deleted_at IS NULL AND status <> 'banned';`)
+	rows, err := e.db.Pool.Query(ctx, `SELECT id FROM hosts WHERE deleted_at IS NULL AND status IN ('probation', 'active', 'demoted', 'draining');`)
 	if err != nil {
 		return 0, err
 	}

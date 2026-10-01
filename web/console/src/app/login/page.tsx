@@ -11,7 +11,9 @@ import { Button, Field, Input, Notice } from "@/components/ui";
 function LoginForm() {
   const { login } = useAuth();
   const router = useRouter();
-  const next = useSearchParams().get("next") || "/app";
+  const params = useSearchParams();
+  const next = params.get("next") || "/app";
+  const justReset = params.get("reset") === "1";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -45,6 +47,7 @@ function LoginForm() {
           }
         }}
       >
+        {justReset && !error && <Notice tone="success">Password updated. Sign in with your new password.</Notice>}
         {error && <Notice tone="error">{error}</Notice>}
         <Field label="Email" htmlFor="email">
           <Input id="email" type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
@@ -62,6 +65,9 @@ function LoginForm() {
         <Button type="submit" loading={busy} className="mt-2">
           Sign in
         </Button>
+        <Link href="/forgot" className="text-center text-[14px] text-muted hover:text-ink">
+          Forgot your password?
+        </Link>
       </form>
     </AuthCard>
   );
