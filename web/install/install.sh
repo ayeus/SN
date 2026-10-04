@@ -72,7 +72,7 @@ fi
 
 # 2. The model runtime the agent drives.
 if [ "$RUNTIME" = "ollama" ]; then
-    if curl -fsS -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+    if curl -fsS -m 3 "${SN_RUNTIME_URL:-http://127.0.0.1:11434}/api/version" >/dev/null 2>&1; then
         say "Ollama is running"
     else
         say "warning: Ollama is not running. Install it from https://ollama.com/download and start it;"

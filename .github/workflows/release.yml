@@ -19,9 +19,11 @@ jobs:
       matrix:
         include:
           # ubuntu-22.04 keeps the glibc floor at 2.35.
-          - { name: linux-amd64,  runner: ubuntu-22.04 }
-          - { name: linux-arm64,  runner: ubuntu-22.04-arm }
-          - { name: darwin-arm64, runner: macos-14 }
+          - { name: linux-amd64,   runner: ubuntu-22.04 }
+          - { name: linux-arm64,   runner: ubuntu-22.04-arm }
+          - { name: darwin-arm64,  runner: macos-14 }
+          # Cross-compiled with MinGW, the same way `make dist-agent-windows` does.
+          - { name: windows-amd64, runner: ubuntu-22.04, target: x86_64-pc-windows-gnu, ext: .exe }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,12 +33,22 @@ jobs:
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
         run: brew install protobuf
-      - run: cd agent && cargo build --release --locked
-      - run: cp agent/target/release/ayeusann-agent ayeusann-agent-${{ matrix.name }}
+      - name: Build
+        if: ${{ !matrix.target }}
+        run: |
+          cd agent && cargo build --release --locked
+          cp target/release/ayeusann-agent ../ayeusann-agent-${{ matrix.name }}
+      - name: Build (cross)
+        if: ${{ matrix.target }}
+        run: |
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+          rustup target add ${{ matrix.target }}
+          cd agent && cargo build --release --locked --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/ayeusann-agent${{ matrix.ext }} ../ayeusann-agent-${{ matrix.name }}${{ matrix.ext }}
       - uses: actions/upload-artifact@v4
         with:
           name: ayeusann-agent-${{ matrix.name }}
-          path: ayeusann-agent-${{ matrix.name }}
+          path: ayeusann-agent-${{ matrix.name }}${{ matrix.ext }}
 
   publish:
     name: Publish release

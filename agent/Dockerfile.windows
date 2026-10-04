@@ -1,0 +1,21 @@
+# Cross-compiles the Windows (x86-64) host agent, so it can be published
+# without a Windows machine or a local Rust toolchain (see
+# `make dist-agent-windows`). Context: repo root.
+#
+# The GNU target links against the C runtime every Windows install ships, so
+# the .exe runs on its own: no Visual C++ redistributable, no extra DLLs.
+
+FROM rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        protobuf-compiler libprotobuf-dev gcc-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add x86_64-pc-windows-gnu
+WORKDIR /src
+COPY proto ./proto
+COPY agent ./agent
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/agent/target \
+    cd agent && cargo build --release --locked --target x86_64-pc-windows-gnu \
+    && cp target/x86_64-pc-windows-gnu/release/ayeusann-agent.exe /ayeusann-agent-windows-amd64.exe
+
+FROM scratch
+COPY --from=build /ayeusann-agent-windows-amd64.exe /ayeusann-agent-windows-amd64.exe

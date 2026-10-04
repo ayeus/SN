@@ -15,7 +15,9 @@ type Issued = {
   expires_at: string;
   tier: Tier;
   region: string;
-  commands: { linux_macos: string; windows_wsl: string; from_source: string };
+  server_url: string;
+  coordinator_url: string;
+  commands: { linux_macos: string; windows: string; windows_wsl: string; from_source: string };
 };
 
 const TIER_HELP: Record<Tier, string> = {
@@ -23,6 +25,23 @@ const TIER_HELP: Record<Tier, string> = {
   t2: "A college lab machine or dedicated workstation with at least a 16 GB GPU. Starts with a 7-day probation, then takes production work.",
   t1: "A data-centre node. Onboarded with our team: site audit, contract and network setup.",
 };
+
+const WHERE_TO_RUN: Record<keyof Issued["commands"], string> = {
+  linux_macos: "Paste it into a terminal on the machine with the GPU.",
+  windows: "Paste it into PowerShell on the machine with the GPU. It runs natively; no WSL needed.",
+  windows_wsl: "Paste it into PowerShell. It runs the Linux agent inside WSL2, where Ollama must be installed too.",
+  from_source: "Run it from a checkout of this repository on the machine with the GPU. Needs Rust.",
+};
+
+/** The host an install command points at, when it is only reachable from this machine. */
+function loopbackOnly(url: string): boolean {
+  try {
+    const h = new URL(url).hostname;
+    return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+  } catch {
+    return false;
+  }
+}
 
 export default function AddMachinePage() {
   const { me } = useAuth();
@@ -46,7 +65,7 @@ export default function AddMachinePage() {
   const joined = hosts.data?.hosts.find((h) => h.id === hostId);
 
   useEffect(() => {
-    if (navigator.userAgent.includes("Windows")) setOs("windows_wsl");
+    if (navigator.userAgent.includes("Windows")) setOs("windows");
   }, []);
 
   async function generate() {
@@ -110,7 +129,7 @@ export default function AddMachinePage() {
           <div className="mt-6 rounded-lg bg-surface-2 p-4 text-[14px]">
             <p className="font-medium">Before you run the command</p>
             <p className="mt-1 text-muted">
-              The agent runs models through a local runtime. On laptops, desktops and Macs install{" "}
+              The agent runs models through a local runtime. On Windows and Linux laptops, desktops and on Macs install{" "}
               <a href="https://ollama.com/download" target="_blank" rel="noreferrer" className="font-medium text-nil underline-offset-4 hover:underline">
                 Ollama
               </a>{" "}
@@ -133,6 +152,7 @@ export default function AddMachinePage() {
               {(
                 [
                   ["linux_macos", "macOS or Linux"],
+                  ["windows", "Windows"],
                   ["windows_wsl", "Windows (WSL)"],
                   ["from_source", "From this repo"],
                 ] as const
@@ -149,10 +169,23 @@ export default function AddMachinePage() {
               ))}
             </div>
             <CodeBlock code={issued.commands[os]} />
+            <p className="mt-3 text-[13px] text-muted">{WHERE_TO_RUN[os]}</p>
             <p className="mt-3 text-[13px] text-muted">
               The machine enrols as <TierBadge tier={issued.tier} long /> in {issued.region}. After the first run it reconnects on its own;
               you won&apos;t need this token again.
             </p>
+            {loopbackOnly(issued.coordinator_url) ? (
+              <Notice tone="warn" className="mt-4">
+                This command points at <span className="font-mono">{new URL(issued.coordinator_url).host}</span>, so it only works on
+                this computer. To add a different machine, connect this computer to a network, or open the console using an
+                address the other machine can reach, then create a new command.
+              </Notice>
+            ) : (
+              <p className="mt-3 text-[13px] text-muted">
+                The machine must be able to reach <span className="font-mono">{new URL(issued.server_url).host}</span> and{" "}
+                <span className="font-mono">{new URL(issued.coordinator_url).host}</span>: the same Wi-Fi or LAN, or a shared VPN.
+              </p>
+            )}
           </Panel>
 
           <Panel title="Your machine">

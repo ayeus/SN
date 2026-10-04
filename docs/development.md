@@ -80,6 +80,12 @@ scripts/smoke.sh    # end to end against a running `make dev` and Ollama
 `scripts/smoke.sh` signs up, enrols two hosts, deploys, streams a chat, checks
 the usage records, kills a host to test failover, and stops the deployment.
 
+`scripts/smoke-remote.sh` checks that a machine other than this one can join:
+a clean Linux container enrols with the console's install command and serves a
+deployment called through this machine's network address. It needs Docker and
+`make dist-agent-linux ARCH=<arm64|amd64>` first. See
+[connect-a-gpu.md](connect-a-gpu.md) for doing the same with a real machine.
+
 Go integration tests skip when the test database is unreachable. Set
 `SN_REQUIRE_DB=1` to make them fail instead, as CI does.
 

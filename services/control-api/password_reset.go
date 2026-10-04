@@ -154,7 +154,7 @@ func (a *API) HandleForgotPassword(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "Could not create a reset link")
 			return
 		}
-		link := a.publicURL + "/reset?token=" + token
+		link := a.publicBase(r) + "/reset?token=" + token
 		body := "Someone asked to reset the password for this account.\n\nSet a new password (link valid for 1 hour):\n" + link +
 			"\n\nIf this wasn't you, ignore this email; your password is unchanged."
 		if err := a.mailer.Send(email, "Reset your password", body); err != nil {

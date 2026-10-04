@@ -8,6 +8,8 @@ mod session;
 mod state;
 mod telemetry;
 
+// Generated code: tonic returns `Status` by value, which newer clippy flags.
+#[allow(clippy::result_large_err)]
 pub mod proto {
     tonic::include_proto!("ayeusann.agent.v1");
 }
@@ -78,6 +80,7 @@ struct Args {
     reset: bool,
 }
 
+#[cfg(windows)]
 fn command_output(cmd: &str, args: &[&str]) -> String {
     std::process::Command::new(cmd)
         .args(args)
@@ -88,12 +91,18 @@ fn command_output(cmd: &str, args: &[&str]) -> String {
 }
 
 fn hostname() -> String {
-    let h = command_output("hostname", &[]);
-    if h.is_empty() {
-        "ayeusann-host".into()
-    } else {
-        h
-    }
+    sysinfo::System::host_name()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "ayeusann-host".into())
+}
+
+/// The user's home directory: HOME on Unix, USERPROFILE on Windows.
+fn home_dir() -> PathBuf {
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(|k| std::env::var_os(k).filter(|v| !v.is_empty()))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn os_name() -> String {
@@ -105,13 +114,41 @@ fn os_name() -> String {
     }
 }
 
+/// The operating system's own identifier for this installation, where it has
+/// one that can be read without elevated rights.
+#[cfg(windows)]
+fn machine_id() -> Option<String> {
+    // HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid, set at install time.
+    command_output(
+        "reg",
+        &[
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Cryptography",
+            "/v",
+            "MachineGuid",
+        ],
+    )
+    .lines()
+    .find(|l| l.contains("MachineGuid"))
+    .and_then(|l| l.split_whitespace().last())
+    .map(str::to_string)
+}
+
+#[cfg(not(windows))]
+fn machine_id() -> Option<String> {
+    std::fs::read_to_string("/etc/machine-id")
+        .ok()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+}
+
 /// A stable identity for this machine. Two agents on one machine are the same
 /// host unless --instance says otherwise (development only).
 fn fingerprint(gpus: &[gpu::GpuInfo], fake: bool, instance: Option<&str>) -> String {
     let base = if let (false, Some(g)) = (fake, gpus.first()) {
         format!("host:{}", g.fingerprint)
-    } else if let Ok(id) = std::fs::read_to_string("/etc/machine-id") {
-        format!("machine:{}", id.trim())
+    } else if let Some(id) = machine_id() {
+        format!("machine:{id}")
     } else {
         format!("hostname:{}", hostname())
     };
@@ -127,7 +164,7 @@ fn fingerprint(gpus: &[gpu::GpuInfo], fake: bool, instance: Option<&str>) -> Str
 /// (SRS FR-50).
 fn preflight(gpus: &[gpu::GpuInfo]) -> Result<()> {
     if gpus.is_empty() {
-        bail!("no supported GPU found. NVIDIA GPUs need the driver and nvidia-smi installed; Apple Silicon is detected automatically.");
+        bail!("no supported GPU found. NVIDIA GPUs need the driver installed (it provides nvidia-smi); Apple Silicon is detected automatically.");
     }
     for g in gpus {
         if g.model.to_uppercase().contains("NVIDIA") {
@@ -154,6 +191,7 @@ async fn main() -> Result<()> {
     fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_ansi(session::colour())
         .compact()
         .init();
 
@@ -164,9 +202,10 @@ async fn main() -> Result<()> {
         coordinator = coordinator.replace(":8083", ":50051");
     }
 
-    let mut data_dir = args.data_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".ayeusann")
-    });
+    let mut data_dir = args
+        .data_dir
+        .clone()
+        .unwrap_or_else(|| home_dir().join(".ayeusann"));
     if let Some(i) = &args.instance {
         data_dir = data_dir.join(format!("instance-{i}"));
     }
@@ -217,8 +256,8 @@ async fn main() -> Result<()> {
     let facts = HostFacts {
         hostname: hostname(),
         os: os_name(),
-        os_version: command_output("uname", &["-r"]),
-        kernel: command_output("uname", &["-v"]),
+        os_version: sysinfo::System::os_version().unwrap_or_default(),
+        kernel: sysinfo::System::kernel_version().unwrap_or_default(),
         region: args.region.clone(),
         gpus,
         fingerprint: fp,

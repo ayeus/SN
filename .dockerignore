@@ -21,6 +21,5 @@ cli/target
 /inference-gateway
 /scheduler
 /gateway
-/billing-meter
 /trust-engine
 SpazeNode Dev Docs Pack

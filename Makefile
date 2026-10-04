@@ -1,7 +1,7 @@
 # AyeusANN — common tasks. `make help` lists them.
 
 .PHONY: help dev db services web down status build build-go build-agent build-web dist-agent \
-        dist-agent-linux images prod-up prod-down prod-logs prod-status \
+        dist-agent-linux dist-agent-windows images prod-up prod-down prod-logs prod-status \
         test test-go test-agent test-web lint lint-go lint-agent lint-proto proto fmt migrate migrate-down clean
 
 GO_SERVICES := gateway control-api scheduler coordinator inference-gateway trust-engine
@@ -59,6 +59,10 @@ dist-agent: build-agent ## Publish this machine's agent build for /downloads
 
 dist-agent-linux: ## Build the Linux agent in Docker for /downloads (ARCH=amd64|arm64)
 	docker build -f agent/Dockerfile --platform linux/$(or $(ARCH),amd64) --output type=local,dest=dist/agent .
+
+dist-agent-windows: ## Cross-compile the Windows agent in Docker for /downloads
+	@mkdir -p dist/agent
+	docker build -f agent/Dockerfile.windows --output type=local,dest=dist/agent .
 
 # ─── Production (single machine, Docker Compose) ─────────────
 

@@ -70,10 +70,27 @@ func WebURL() string              { return Env("WEB_URL", "http://localhost:3000
 
 // PublicURL is the externally reachable base URL of the gateway. It appears in
 // install commands and in the endpoint shown to customers.
-func PublicURL() string { return Env("PUBLIC_URL", "http://localhost:8080") }
+//
+// In development it may be left unset, and is then empty: the control API
+// hands out the address each request arrived on, so the stack is usable from
+// other machines on the network without configuration. Production never
+// trusts the request for this (a forged Host header would otherwise end up in
+// password-reset emails), so it falls back to a fixed default.
+func PublicURL() string {
+	if IsProduction() {
+		return Env("PUBLIC_URL", "http://localhost:8080")
+	}
+	return Env("PUBLIC_URL", "")
+}
 
 // CoordinatorPublicURL is where host agents dial the coordinator's gRPC port.
-func CoordinatorPublicURL() string { return Env("COORDINATOR_PUBLIC_URL", "http://localhost:50051") }
+// Unset in development means "the request's host, on the gRPC port".
+func CoordinatorPublicURL() string {
+	if IsProduction() {
+		return Env("COORDINATOR_PUBLIC_URL", "http://localhost:50051")
+	}
+	return Env("COORDINATOR_PUBLIC_URL", "")
+}
 
 // HeartbeatTimeout is how long a host may be silent before it is offline.
 // SRS FR-40: heartbeat every 5 s, 3 missed → drained.

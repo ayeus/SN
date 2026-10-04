@@ -50,6 +50,8 @@ client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk_live_...")
 client.chat.completions.create(model="<deployment-name>", messages=[{"role": "user", "content": "Hi"}])
 ```
 
+To use a GPU that sits in a different computer (a friend's laptop, a lab machine), follow [docs/connect-a-gpu.md](docs/connect-a-gpu.md). `make dev` prints the address other machines on your network use.
+
 To verify the whole flow automatically, run `scripts/smoke.sh`. It signs up, enrols two hosts, deploys, streams, checks the usage records, kills a host to test failover, and stops the deployment.
 
 ## Commands
@@ -66,6 +68,7 @@ To verify the whole flow automatically, run `scripts/smoke.sh`. It signs up, enr
 | `make proto` | Regenerate protobuf code |
 | `make dist-agent` | Publish this machine's agent build so the installer can download it |
 | `make dist-agent-linux` | Build the Linux agent in Docker for the installer |
+| `make dist-agent-windows` | Cross-compile the Windows agent in Docker for the installer |
 | `make prod-up` | Build, migrate and start the production stack ([guide](docs/deployment.md)) |
 
 Logs are written to `logs/<service>.log`.
@@ -101,9 +104,9 @@ proto/            Agent ↔ coordinator gRPC contract (generated code in gen/go)
 schema/           SQL migrations and seed data (catalogue, GPU rate card)
 web/console/      Next.js console: landing page, customer console, host console, ops
 web/install/      Host installers served at /install.sh
-scripts/          dev.sh (local environment), smoke.sh (end-to-end test)
+scripts/          dev.sh (local environment), smoke.sh and smoke-remote.sh (end-to-end tests)
 deploy/           Dockerfiles and docker-compose (dev infrastructure, production stack)
-docs/             Development and deployment guides, architecture decision records
+docs/             Guides (development, connecting a GPU, deployment), architecture decision records
 _archive/         Superseded code kept for reference (old frontends, standalone router)
 ```
 
@@ -115,7 +118,7 @@ _archive/         Superseded code kept for reference (old frontends, standalone 
 - Streaming inference through the OpenAI SDK
 - Per-request usage records (requests, tokens, latency) for customers and hosts
 - Failover
-- Host onboarding
+- Host onboarding from other machines: one-line installers for macOS, Linux and Windows
 - Reputation scoring
 - Ops console
 

@@ -10,7 +10,9 @@
 #
 # Open http://localhost:8080 (gateway) once it is up. To add your own machine as
 # a host, sign in, open Hosts > Add a machine, and run the "From this repo"
-# command in another terminal.
+# command in another terminal. Other machines on the same network can open the
+# console and connect their GPUs through this machine's network address, which
+# `up` and `status` print (see docs/connect-a-gpu.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,8 +31,9 @@ SERVICES=(control-api scheduler coordinator inference-gateway trust-engine gatew
 export SN_ENV=dev
 export DATABASE_URL="$PG_URL_BASE/$DEV_DB?sslmode=disable"
 export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
-export PUBLIC_URL="${PUBLIC_URL:-http://localhost:8080}"
-export COORDINATOR_PUBLIC_URL="${COORDINATOR_PUBLIC_URL:-http://localhost:50051}"
+# PUBLIC_URL and COORDINATOR_PUBLIC_URL are deliberately not set: in development
+# the control API hands out the address each request arrived on, so install
+# commands work on other machines. Set them in .env to pin an address.
 export WEB_URL="${WEB_URL:-http://localhost:3000}"
 export CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS:-http://localhost:3000}"
 export HOST_PROBATION_DAYS="${HOST_PROBATION_DAYS:-0}"     # dev hosts take work immediately
@@ -114,6 +117,20 @@ status() {
     if [ "$code" = "200" ]; then mark="ok"; else mark="DOWN ($code) — see logs/${SERVICES[$i]}.log"; fi
     printf "  %-18s :%s  %s\n" "${SERVICES[$i]}" "${ports[$i]}" "$mark"
   done
+  # The addresses install commands carry. They differ from localhost when this
+  # machine is on a network, which is what lets other machines join.
+  local addr server coord
+  addr=$(curl -s -m 2 "http://localhost:8080/v1/network/address" || true)
+  server=$(printf '%s' "$addr" | sed -n 's/.*"server_url":"\([^"]*\)".*/\1/p')
+  coord=$(printf '%s' "$addr" | sed -n 's/.*"coordinator_url":"\([^"]*\)".*/\1/p')
+  case "$server" in
+    ""|*localhost*|*127.0.0.1*) ;;
+    *)
+      echo
+      echo "  From other machines on this network: $server"
+      echo "  (agents connect to ${coord#http://}; allow incoming connections if your firewall asks)"
+      ;;
+  esac
 }
 
 case "${1:-up}" in

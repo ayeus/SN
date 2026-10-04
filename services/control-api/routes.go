@@ -40,6 +40,7 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("GET /v1/models/{id}", optional(a.HandleGetModel))
 	mux.HandleFunc("GET /v1/regions", a.HandleRegions)
 	mux.HandleFunc("GET /v1/network/stats", a.HandleNetworkStats)
+	mux.HandleFunc("GET /v1/network/address", a.HandleNetworkAddress)
 
 	// ── Session and organisation ─────────────────────────────
 	mux.Handle("GET /v1/auth/me", anyRole(a.HandleMe))

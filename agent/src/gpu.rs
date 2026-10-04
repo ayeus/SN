@@ -181,6 +181,7 @@ impl GpuDetector {
     }
 
     /// Parses macOS system_profiler displays and hardware output
+    #[cfg(any(target_os = "macos", test))]
     pub fn parse_macos_profiler(stdout: &str) -> Option<GpuInfo> {
         let mut chip_name = "Apple Silicon GPU".to_string();
         let mut memory_gb = 0;

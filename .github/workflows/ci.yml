@@ -69,6 +69,12 @@ jobs:
       - run: cd agent && cargo clippy --all-targets -- -D warnings
       - run: cd agent && cargo test
       - run: cd agent && cargo build --release
+      # The Windows agent is cross-compiled; keep it building and warning-free.
+      - name: Windows target
+        run: |
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+          rustup target add x86_64-pc-windows-gnu
+          cd agent && cargo clippy --target x86_64-pc-windows-gnu -- -D warnings
 
   web:
     name: Web console

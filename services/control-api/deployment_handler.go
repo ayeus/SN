@@ -164,7 +164,7 @@ func (a *API) HandleCreateDeployment(w http.ResponseWriter, r *http.Request) {
 			req.ScaleToZero, req.BurstToSpot, req.ResidentIN, req.Quantization).Scan(&id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE deployments SET endpoint = $2 WHERE id = $1;`, id, a.endpointFor(id)); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE deployments SET endpoint = $2 WHERE id = $1;`, id, a.endpointFor(r, id)); err != nil {
 			return err
 		}
 		if err := lifecycle.Event(ctx, tx, id, nil, "state", lifecycle.Pending,
@@ -198,7 +198,7 @@ func (a *API) HandleCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		"deployment": view,
 		"api_key":    key,
 		"secret":     secret,
-		"base_url":   a.endpointFor(view.ID),
+		"base_url":   a.endpointFor(r, view.ID),
 		"model":      view.Name,
 	})
 }
@@ -373,7 +373,7 @@ func (a *API) HandleGetDeployment(w http.ResponseWriter, r *http.Request) {
 		"replicas":        reps,
 		"usage_24h":       day,
 		"usage_last_hour": hour,
-		"base_url":        a.endpointFor(v.ID),
+		"base_url":        a.endpointFor(r, v.ID),
 		"model":           v.Name,
 	})
 }

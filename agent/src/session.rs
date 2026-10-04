@@ -563,6 +563,13 @@ fn benchmark_message(f: &HostFacts) -> AgentMessage {
     }
 }
 
+/// Whether to colour terminal output. The classic Windows console prints
+/// escape codes literally, and so does anything that is not a terminal.
+pub fn colour() -> bool {
+    use std::io::IsTerminal;
+    !cfg!(windows) && std::io::stderr().is_terminal()
+}
+
 fn print_banner(f: &HostFacts, tier: &str, status: &str, runtime: &Runtime) {
     let gpu = f
         .gpus
@@ -570,7 +577,11 @@ fn print_banner(f: &HostFacts, tier: &str, status: &str, runtime: &Runtime) {
         .map(|g| format!("{} ({} GB)", g.model, g.vram_gb))
         .unwrap_or_else(|| "no GPU".into());
     eprintln!();
-    eprintln!("  \x1b[1;32m●\x1b[0m \x1b[1mHost online\x1b[0m");
+    if colour() {
+        eprintln!("  \x1b[1;32m●\x1b[0m \x1b[1mHost online\x1b[0m");
+    } else {
+        eprintln!("  * Host online");
+    }
     eprintln!("    GPU       {gpu}");
     eprintln!("    Tier      {}   status: {status}", tier.to_uppercase());
     eprintln!(
@@ -580,9 +591,7 @@ fn print_banner(f: &HostFacts, tier: &str, status: &str, runtime: &Runtime) {
     );
     eprintln!("    Region    {}", f.region);
     eprintln!();
-    eprintln!(
-        "    Keep this running to stay online. Track jobs and earnings in the console under Hosts."
-    );
+    eprintln!("    Keep this running to stay online. Track its jobs in the console under Hosts.");
     eprintln!("    Press Ctrl+C to stop; running jobs are moved to other hosts.");
     eprintln!();
 }

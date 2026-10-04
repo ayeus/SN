@@ -35,6 +35,16 @@ func (a *API) HandleRegions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"regions": out})
 }
 
+// HandleNetworkAddress reports the addresses this installation hands out: the
+// gateway URL other machines open, and the gRPC URL agents dial. They are the
+// same values an install command carries.
+func (a *API) HandleNetworkAddress(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"server_url":      a.publicBase(r),
+		"coordinator_url": a.coordinatorBase(r),
+	})
+}
+
 // HandleNetworkStats reports aggregate supply for the public site. It exposes
 // counts only: no host ids, addresses, fingerprints or owners (the old public
 // hosts endpoint leaked all of those).

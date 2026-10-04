@@ -21,8 +21,13 @@ type API struct {
 	revocations auth.RevocationStore
 	log         *slog.Logger
 
-	publicURL            string // gateway base URL shown to customers
-	coordinatorPublicURL string // where agents dial the coordinator
+	// publicURL and coordinatorPublicURL are the configured addresses of the
+	// gateway and of the coordinator's gRPC port. Empty means "follow the
+	// request" (see addresses.go).
+	publicURL            string
+	coordinatorPublicURL string
+	coordinatorGRPCPort  string
+	lanIP                func() string
 	inferenceHost        string // optional {dep-id}.<host> endpoints (SRS FR-22)
 	heartbeatTimeout     time.Duration
 	platformAdmins       map[string]bool
@@ -34,8 +39,11 @@ type API struct {
 
 // Config is the environment-derived part of API.
 type Config struct {
+	// PublicURL and CoordinatorPublicURL may be empty in development, where the
+	// addresses handed out follow the request.
 	PublicURL            string
 	CoordinatorPublicURL string
+	CoordinatorGRPCPort  string
 	InferenceHost        string
 	HeartbeatTimeout     time.Duration
 	PlatformAdminEmails  []string
@@ -50,13 +58,18 @@ func NewAPI(database *db.Client, tm *auth.TokenManager, rev auth.RevocationStore
 	if cfg.HeartbeatTimeout <= 0 {
 		cfg.HeartbeatTimeout = 15 * time.Second
 	}
+	if cfg.CoordinatorGRPCPort == "" {
+		cfg.CoordinatorGRPCPort = "50051"
+	}
 	api := &API{
 		db:                   database,
 		tm:                   tm,
 		revocations:          rev,
 		log:                  log,
 		publicURL:            strings.TrimRight(cfg.PublicURL, "/"),
-		coordinatorPublicURL: cfg.CoordinatorPublicURL,
+		coordinatorPublicURL: strings.TrimRight(cfg.CoordinatorPublicURL, "/"),
+		coordinatorGRPCPort:  cfg.CoordinatorGRPCPort,
+		lanIP:                localNetworkIP,
 		inferenceHost:        cfg.InferenceHost,
 		heartbeatTimeout:     cfg.HeartbeatTimeout,
 		platformAdmins:       admins,
@@ -110,9 +123,9 @@ func (a *API) requirePlatformAdmin(next http.HandlerFunc) http.Handler {
 }
 
 // endpointFor is the base URL a customer points an OpenAI client at.
-func (a *API) endpointFor(deploymentID string) string {
+func (a *API) endpointFor(r *http.Request, deploymentID string) string {
 	if a.inferenceHost != "" {
 		return "https://" + deploymentID + "." + a.inferenceHost + "/v1"
 	}
-	return a.publicURL + "/v1"
+	return a.publicBase(r) + "/v1"
 }

@@ -40,6 +40,7 @@ func main() {
 	api := NewAPI(dbClient, tm, auth.NewPGRevocationStore(dbClient.Pool), logger, Config{
 		PublicURL:            platform.PublicURL(),
 		CoordinatorPublicURL: platform.CoordinatorPublicURL(),
+		CoordinatorGRPCPort:  platform.Env("COORDINATOR_GRPC_PORT", "50051"),
 		InferenceHost:        platform.Env("INFERENCE_HOST", ""),
 		HeartbeatTimeout:     platform.HeartbeatTimeout(),
 		PlatformAdminEmails:  httpx.SplitList(platform.Env("PLATFORM_ADMIN_EMAILS", "")),

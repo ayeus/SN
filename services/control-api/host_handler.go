@@ -71,18 +71,22 @@ func (a *API) HandleIssueRegistrationToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	args := fmt.Sprintf("--server %s --token %s --coordinator %s --region %s", a.publicURL, tok.Token, a.coordinatorPublicURL, req.Region)
+	server, coordinator := a.publicBase(r), a.coordinatorBase(r)
+	args := fmt.Sprintf("--server %s --token %s --coordinator %s --region %s", server, tok.Token, coordinator, req.Region)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"registration_token": tok.Token,
 		"token_id":           tok.JTI,
 		"expires_at":         tok.ExpiresAt,
 		"tier":               req.Tier,
 		"region":             req.Region,
-		"coordinator_url":    a.coordinatorPublicURL,
+		"server_url":         server,
+		"coordinator_url":    coordinator,
 		"commands": map[string]string{
-			"linux_macos": fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- %s", a.publicURL, args),
-			"windows_wsl": fmt.Sprintf("wsl -e sh -c \"curl -fsSL %s/install.sh | sh -s -- %s\"", a.publicURL, args),
-			"from_source": fmt.Sprintf("./run-node.sh --token %s --coordinator %s --region %s", tok.Token, a.coordinatorPublicURL, req.Region),
+			"linux_macos": fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- %s", server, args),
+			"windows": fmt.Sprintf("& ([scriptblock]::Create((irm %s/install.ps1))) -Server %s -Token %s -Coordinator %s -Region %s",
+				server, server, tok.Token, coordinator, req.Region),
+			"windows_wsl": fmt.Sprintf("wsl -e sh -c \"curl -fsSL %s/install.sh | sh -s -- %s\"", server, args),
+			"from_source": fmt.Sprintf("./run-node.sh --token %s --coordinator %s --region %s", tok.Token, coordinator, req.Region),
 		},
 	})
 }
