@@ -3,16 +3,21 @@
 #   & ([scriptblock]::Create((irm <server>/install.ps1))) -Server <server> -Token <token> `
 #       -Coordinator <grpc-url> -Region IN-SOUTH
 #
-# Installs the agent to %USERPROFILE%\.ayeusann\bin and starts it. The token is
-# single-use; after the first run the agent reconnects with its stored
-# credential, so later starts need no arguments at all.
+# Installs the agent to %USERPROFILE%\.ayeusann\bin and sets it up to run in
+# the background and start again at every login. The token is single-use; after
+# enrolling, the agent reconnects with its stored credential and remembered
+# settings.
+#
+#   -Foreground   run in this window instead of in the background
+#   -NoStart      install only
 param(
     [string]$Server = "",
     [string]$Token = "",
-    [string]$Coordinator = "http://127.0.0.1:50051",
-    [string]$Region = "IN-SOUTH",
-    [string]$Runtime = "ollama",
-    [switch]$NoStart
+    [string]$Coordinator = "",
+    [string]$Region = "",
+    [string]$Runtime = "",
+    [switch]$NoStart,
+    [switch]$Foreground
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,7 +66,7 @@ if (-not $Downloaded) {
 }
 
 # 2. The model runtime the agent drives.
-if ($Runtime -eq "ollama") {
+if (-not $Runtime -or $Runtime -eq "ollama") {
     try {
         Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri "http://127.0.0.1:11434/api/version" | Out-Null
         Say "Ollama is running"
@@ -86,10 +91,17 @@ if ($Smi) {
 Say "installed to $Bin"
 Write-Host ""
 
+# Only what was asked for is passed on: anything left out keeps the value the
+# agent remembered from its last enrolment.
+$AgentArgs = @()
+if ($Token) { $AgentArgs += @("--token", $Token) }
+if ($Coordinator) { $AgentArgs += @("--coordinator", $Coordinator) }
+if ($Region) { $AgentArgs += @("--region", $Region) }
+if ($Runtime) { $AgentArgs += @("--runtime", $Runtime) }
+
 if ($NoStart) {
-    $ShownToken = if ($Token) { $Token } else { "<token>" }
-    Write-Host "Start it with:"
-    Write-Host "  & `"$Bin`" --token $ShownToken --coordinator $Coordinator --region $Region"
+    Write-Host "Run it in the background with:"
+    Write-Host "  & `"$Bin`" service install $($AgentArgs -join ' ')"
     Write-Host ""
     exit 0
 }
@@ -97,12 +109,16 @@ if (-not $Token -and -not (Test-Path $State)) {
     Fail "-Token is required for the first run; create one in the console under Hosts > Add a machine."
 }
 
-Write-Host "Starting the agent. Keep this window open; press Ctrl+C to stop."
-Write-Host "Next time, start it again with just: & `"$Bin`""
-Write-Host ""
-if ($Token) {
-    & $Bin --token $Token --coordinator $Coordinator --region $Region --runtime $Runtime
-} else {
-    & $Bin --coordinator $Coordinator --region $Region --runtime $Runtime
+if (-not $Foreground) {
+    & $Bin service install @AgentArgs
+    if ($LASTEXITCODE -eq 0) { Write-Host ""; exit 0 }
+    if ($LASTEXITCODE -ne 3) { exit $LASTEXITCODE }
+    Write-Host ""
+    Write-Host "Running it in this window instead."
 }
+
+Write-Host "Starting the agent. Keep this window open; press Ctrl+C to stop."
+Write-Host "Start it again later with: & `"$Bin`""
+Write-Host ""
+& $Bin @AgentArgs
 exit $LASTEXITCODE

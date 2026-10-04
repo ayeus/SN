@@ -18,6 +18,18 @@ pub struct State {
     pub tier: Option<String>,
     /// Unix seconds of the last benchmark sent (PRD F-12: weekly re-runs).
     pub last_benchmark_at: Option<i64>,
+
+    // Settings from the last successful enrolment or `service install`, so the
+    // agent can be started again with no arguments.
+    pub region: Option<String>,
+    pub runtime: Option<String>,
+    pub runtime_url: Option<String>,
+    pub fake_gpu: Option<bool>,
+    /// A registration token waiting to be used by a background start. Cleared
+    /// as soon as the coordinator accepts it.
+    pub pending_token: Option<String>,
+    /// Why the coordinator last refused this machine, if it did.
+    pub last_error: Option<String>,
 }
 
 pub fn path(data_dir: &Path) -> PathBuf {
@@ -54,6 +66,16 @@ pub fn clear(data_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // An agent upgraded in place must keep its enrolment.
+    #[test]
+    fn reads_state_written_before_settings_were_remembered() {
+        let old = br#"{"host_id":"h1","host_credential":"hc_x","manifest_public_key":"k","coordinator_url":"http://c:50051","tier":"t3","last_benchmark_at":1}"#;
+        let st: State = serde_json::from_slice(old).unwrap();
+        assert_eq!(st.host_credential.as_deref(), Some("hc_x"));
+        assert_eq!(st.coordinator_url.as_deref(), Some("http://c:50051"));
+        assert!(st.region.is_none() && st.pending_token.is_none() && st.last_error.is_none());
+    }
 
     #[test]
     fn round_trips_with_private_permissions() {

@@ -67,9 +67,41 @@ in):
    on the host: in a terminal on macOS or Linux, in PowerShell on Windows.
 
 The command installs the agent, enrols the machine with a single-use token and
-starts it. The console shows the machine within a minute. Keep the agent
-running; to start it again later, run the agent with no arguments (the installer
-prints the path).
+sets it up to run in the background. The console shows the machine within a
+minute. The terminal can be closed: the agent keeps running, and starts again
+whenever the host restarts or its owner logs in.
+
+### Managing the agent on the host
+
+The agent lives in `~/.ayeusann` (on Windows, `%USERPROFILE%\.ayeusann`).
+
+| To | Run |
+|---|---|
+| See whether it is running and connected | `~/.ayeusann/bin/ayeusann-agent service status` |
+| Read its log | `~/.ayeusann/agent.log` |
+| Stop it and stop starting it at login | `~/.ayeusann/bin/ayeusann-agent service uninstall` |
+| Start it in the background again | `~/.ayeusann/bin/ayeusann-agent service install` |
+| Run it in a terminal instead | `~/.ayeusann/bin/ayeusann-agent` |
+| Enrol again with a new token | `~/.ayeusann/bin/ayeusann-agent service install --token <token>` |
+
+Stopping the agent keeps the machine enrolled; starting it again brings the
+same machine back, with the coordinator address and settings it enrolled with.
+Pausing from the console (**Host > Machines > Pause**) is the lighter option
+when the owner just wants the GPU back for a while.
+
+How it runs in the background depends on the system, and none of it needs
+administrator rights:
+
+| System | Mechanism | Restarts after a crash |
+|---|---|---|
+| macOS | A launchd agent in `~/Library/LaunchAgents` | Yes, within 30 seconds |
+| Linux | A systemd user unit, with lingering so it also starts at boot | Yes, after 30 seconds |
+| Windows | The user's Run registry key | No: it starts again at the next login |
+
+On a Linux system without systemd (some containers, WSL without systemd
+enabled) the installer runs the agent in the terminal instead and says so.
+Pass `--foreground` to the installer (`-Foreground` on Windows) to ask for that
+on any system.
 
 ## 4. Deploy and call it
 
@@ -130,7 +162,8 @@ production stack, which adds TLS: see [deployment.md](deployment.md).
 | The host cannot connect at all | A firewall on the platform machine is blocking ports 8080 and 50051, or the machines are on different networks (guest Wi-Fi often isolates devices from each other). |
 | The machine is online but shows "Runtime not reachable" | Ollama is not running on the host. Start it. |
 | "no supported GPU found" | The NVIDIA driver is missing or `nvidia-smi` is not on the PATH. |
-| "registration rejected" | The token was already used or is older than 24 hours. Create a new command. |
+| "The coordinator refused this machine" | The token was already used or is older than 24 hours. Create a new command. |
+| The machine went offline and nothing is on screen | The agent runs in the background. `ayeusann-agent service status` says whether it is running and why it was last refused; `~/.ayeusann/agent.log` has the detail. |
 | The deployment stays in "Waiting for capacity" | No free GPU qualifies. The deployment page says why: usually the model needs more GPU memory than the host has, or the host is paused. |
 
 ## What has been tested
@@ -139,6 +172,11 @@ production stack, which adds TLS: see [deployment.md](deployment.md).
 container plays the host: it enrols with the console's one-line command, serves
 a deployment, and is called through the platform's network address.
 
+The background service has been exercised on macOS (launchd) and on Linux
+(systemd user session): install, enrolment, restart after the process is
+killed, uninstall, and reinstalling without a token.
+
 The Windows agent is cross-compiled and has been run under Wine far enough to
 start, read its arguments and report a missing GPU. It has not yet been run on
-a real Windows machine with an NVIDIA GPU; treat the first such run as a test.
+a real Windows machine with an NVIDIA GPU, and neither has its background
+service; treat the first such run as a test.

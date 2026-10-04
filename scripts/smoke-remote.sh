@@ -64,6 +64,14 @@ done
 [ "$N" -ge 1 ] || { docker logs "$NAME" 2>&1 | tail -30; fail "the remote machine never came online"; }
 HOST=$(echo "$H" | json "['hosts'][0]['id']")
 pass "remote machine online: $(echo "$H" | python3 -c "import json,sys; h=json.load(sys.stdin)['hosts'][0]; print(h['name'], '/', h['os'], '/', h['gpus'][0]['model'])")"
+# Read the log into a variable first: with pipefail, `grep -q` closing the pipe
+# early would make a successful match look like a failure.
+LOGS=$(docker logs "$NAME" 2>&1)
+case "$LOGS" in
+  *"Running it in this terminal instead"*) ;;
+  *) echo "$LOGS" | tail -20; fail "a container has no service manager, so the installer should have fallen back to the terminal" ;;
+esac
+pass "installer fell back to running in the terminal (no service manager in a container)"
 
 # 3. A deployment lands on it and answers through the network address.
 MID=$(curl -sS "$BASE/v1/models" | python3 -c "import json,sys; print([m['id'] for m in json.load(sys.stdin)['models'] if m['name']=='$MODEL'][0])")

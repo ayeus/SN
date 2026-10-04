@@ -37,7 +37,7 @@ Then open **http://localhost:8080**:
 1. Create an account.
 2. Connect this machine as a host:
    - Go to **Host → Add a machine → Create install command**.
-   - Run the **From this repo** command in a new terminal and leave it running.
+   - Run the **From this repo** command in a new terminal and leave it running. (The other tabs install the agent as a background service that starts at login, which is what you want on a machine that is not for development.)
 3. Deploy a model:
    - Go to **Deploy → Models**.
    - Deploy `gemma-2-2b-it` on T3 and watch it reach **Serving**.

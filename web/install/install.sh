@@ -4,17 +4,21 @@
 #   curl -fsSL <server>/install.sh | sh -s -- --server <server> --token <token> \
 #        --coordinator <grpc-url> --region IN-SOUTH
 #
-# Installs the agent to ~/.ayeusann/bin and starts it. The token is single-use;
-# after the first run the agent reconnects with its stored credential, so later
-# starts need no arguments at all.
+# Installs the agent to ~/.ayeusann/bin and sets it up to run in the background
+# and start again at every login. The token is single-use; after enrolling, the
+# agent reconnects with its stored credential and remembered settings.
+#
+#   --foreground   run in this terminal instead of in the background
+#   --no-start     install only
 set -eu
 
 SERVER=""
 TOKEN=""
-COORDINATOR="${SN_COORDINATOR_URL:-http://127.0.0.1:50051}"
-REGION="${SN_REGION:-IN-SOUTH}"
-RUNTIME="${SN_RUNTIME:-ollama}"
+COORDINATOR=""
+REGION=""
+RUNTIME=""
 START=1
+FOREGROUND=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -24,8 +28,9 @@ while [ "$#" -gt 0 ]; do
         --region) REGION="$2"; shift 2 ;;
         --runtime) RUNTIME="$2"; shift 2 ;;
         --no-start) START=0; shift ;;
+        --foreground) FOREGROUND=1; shift ;;
         -h|--help)
-            sed -n '2,9p' "$0" 2>/dev/null || true
+            sed -n '2,12p' "$0" 2>/dev/null || true
             exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
@@ -71,7 +76,7 @@ else
 fi
 
 # 2. The model runtime the agent drives.
-if [ "$RUNTIME" = "ollama" ]; then
+if [ "${RUNTIME:-${SN_RUNTIME:-ollama}}" = "ollama" ]; then
     if curl -fsS -m 3 "${SN_RUNTIME_URL:-http://127.0.0.1:11434}/api/version" >/dev/null 2>&1; then
         say "Ollama is running"
     else
@@ -91,16 +96,30 @@ fi
 say "installed to $BIN"
 printf '\n'
 
+# Only what was asked for is passed on: anything left out keeps the value the
+# agent remembered from its last enrolment.
+set --
+[ -n "$TOKEN" ] && set -- "$@" --token "$TOKEN"
+[ -n "$COORDINATOR" ] && set -- "$@" --coordinator "$COORDINATOR"
+[ -n "$REGION" ] && set -- "$@" --region "$REGION"
+[ -n "$RUNTIME" ] && set -- "$@" --runtime "$RUNTIME"
+
 if [ "$START" -eq 0 ]; then
-    printf 'Start it with:\n  %s --token %s --coordinator %s --region %s\n\n' "$BIN" "${TOKEN:-<token>}" "$COORDINATOR" "$REGION"
+    printf 'Run it in the background with:\n  %s service install %s\n\n' "$BIN" "$*"
     exit 0
 fi
 [ -n "$TOKEN" ] || [ -f "$HOME/.ayeusann/agent-state.json" ] || fail "--token is required for the first run; create one in the console under Hosts > Add a machine."
 
-printf 'Starting the agent. Keep this terminal open; press Ctrl+C to stop.\n'
-printf 'Next time, start it again with just: %s\n\n' "$BIN"
-if [ -n "$TOKEN" ]; then
-    exec "$BIN" --token "$TOKEN" --coordinator "$COORDINATOR" --region "$REGION" --runtime "$RUNTIME"
-else
-    exec "$BIN" --coordinator "$COORDINATOR" --region "$REGION" --runtime "$RUNTIME"
+if [ "$FOREGROUND" -eq 0 ]; then
+    RC=0
+    "$BIN" service install "$@" || RC=$?
+    case "$RC" in
+        0) printf '\n'; exit 0 ;;
+        3) printf '\nRunning it in this terminal instead.\n' ;;   # no service manager here
+        *) exit "$RC" ;;
+    esac
 fi
+
+printf 'Starting the agent. Keep this terminal open; press Ctrl+C to stop.\n'
+printf 'Start it again later with: %s\n\n' "$BIN"
+exec "$BIN" "$@"

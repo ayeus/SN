@@ -3,6 +3,7 @@
 
 use crate::benchmark::BenchmarkReport;
 use crate::gpu::GpuInfo;
+use crate::output::{self, Out};
 use crate::proto::agent_service_client::AgentServiceClient;
 use crate::proto::{
     agent_message, coordinator_message, AgentMessage, BenchmarkReport as ProtoBenchmark,
@@ -15,6 +16,7 @@ use crate::{inference, manifest, telemetry};
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -69,6 +71,7 @@ pub struct Session<'a> {
     pub runtime: Runtime,
     pub heartbeat: Duration,
     pub shared: Arc<Shared>,
+    pub fake_gpu: bool,
 }
 
 async fn channel(url: &str) -> Result<Channel> {
@@ -218,6 +221,12 @@ impl Session<'_> {
         st.host_id = Some(resp.host_id.clone());
         st.tier = Some(resp.tier.clone());
         st.coordinator_url = Some(self.coordinator_url.to_string());
+        st.region = Some(self.facts.region.clone());
+        st.runtime = Some(self.runtime.kind.name().to_string());
+        st.runtime_url = Some(self.runtime.base_url().to_string());
+        st.fake_gpu = Some(self.fake_gpu);
+        st.pending_token = None;
+        st.last_error = None;
         state::save(&self.data_dir, &st).context("saving host credential")?;
         let pinned_key = resp.manifest_public_key.clone();
 
@@ -563,35 +572,41 @@ fn benchmark_message(f: &HostFacts) -> AgentMessage {
     }
 }
 
-/// Whether to colour terminal output. The classic Windows console prints
-/// escape codes literally, and so does anything that is not a terminal.
-pub fn colour() -> bool {
-    use std::io::IsTerminal;
-    !cfg!(windows) && std::io::stderr().is_terminal()
-}
-
 fn print_banner(f: &HostFacts, tier: &str, status: &str, runtime: &Runtime) {
     let gpu = f
         .gpus
         .first()
         .map(|g| format!("{} ({} GB)", g.model, g.vram_gb))
         .unwrap_or_else(|| "no GPU".into());
-    eprintln!();
-    if colour() {
-        eprintln!("  \x1b[1;32m●\x1b[0m \x1b[1mHost online\x1b[0m");
+    let title = if output::colour() {
+        "  \x1b[1;32m●\x1b[0m \x1b[1mHost online\x1b[0m"
     } else {
-        eprintln!("  * Host online");
+        "  * Host online"
+    };
+    let mut lines = vec![
+        String::new(),
+        title.to_string(),
+        format!("    GPU       {gpu}"),
+        format!("    Tier      {}   status: {status}", tier.to_uppercase()),
+        format!(
+            "    Runtime   {} at {}",
+            runtime.kind.name(),
+            runtime.base_url()
+        ),
+        format!("    Region    {}", f.region),
+        String::new(),
+    ];
+    if !output::is_file() {
+        lines.push(
+            "    Keep this running to stay online. Track its jobs in the console under Hosts."
+                .into(),
+        );
+        lines.push("    Press Ctrl+C to stop; running jobs are moved to other hosts.".into());
+        lines.push(
+            "    To keep it running in the background instead: ayeusann-agent service install"
+                .into(),
+        );
+        lines.push(String::new());
     }
-    eprintln!("    GPU       {gpu}");
-    eprintln!("    Tier      {}   status: {status}", tier.to_uppercase());
-    eprintln!(
-        "    Runtime   {} at {}",
-        runtime.kind.name(),
-        runtime.base_url()
-    );
-    eprintln!("    Region    {}", f.region);
-    eprintln!();
-    eprintln!("    Keep this running to stay online. Track its jobs in the console under Hosts.");
-    eprintln!("    Press Ctrl+C to stop; running jobs are moved to other hosts.");
-    eprintln!();
+    let _ = writeln!(Out, "{}", lines.join("\n"));
 }

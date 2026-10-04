@@ -171,8 +171,11 @@ export default function AddMachinePage() {
             <CodeBlock code={issued.commands[os]} />
             <p className="mt-3 text-[13px] text-muted">{WHERE_TO_RUN[os]}</p>
             <p className="mt-3 text-[13px] text-muted">
-              The machine enrols as <TierBadge tier={issued.tier} long /> in {issued.region}. After the first run it reconnects on its own;
-              you won&apos;t need this token again.
+              The machine enrols as <TierBadge tier={issued.tier} long /> in {issued.region}.{" "}
+              {os === "from_source"
+                ? "The agent runs in that terminal until you stop it."
+                : "The agent then keeps running in the background and starts again at every login, so the terminal can be closed."}{" "}
+              You won&apos;t need this token again.
             </p>
             {loopbackOnly(issued.coordinator_url) ? (
               <Notice tone="warn" className="mt-4">

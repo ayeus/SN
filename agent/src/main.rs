@@ -3,7 +3,9 @@ mod gpu;
 mod inference;
 mod manifest;
 mod network;
+mod output;
 mod runtime;
+mod service;
 mod session;
 mod state;
 mod telemetry;
@@ -16,7 +18,7 @@ pub mod proto {
 
 use anyhow::{bail, Result};
 use benchmark::BenchmarkSuite;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use gpu::GpuDetector;
 use network::MeshManager;
 use session::{HostFacts, Outcome, Session, Shared};
@@ -30,54 +32,114 @@ use tracing_subscriber::{fmt, EnvFilter};
 const MIN_NVIDIA_DRIVER: u32 = 535;
 
 /// AyeusANN host agent: connects this machine's GPU to the network.
+///
+/// With no subcommand it runs in this terminal until stopped. `service install`
+/// runs it in the background instead and starts it again at every login.
 #[derive(Parser, Debug)]
 #[command(name = "ayeusann-agent", version, about)]
+struct Cli {
+    #[command(flatten)]
+    args: Args,
+
+    #[command(subcommand)]
+    command: Option<Cmd>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Run the agent in the background and start it at login.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceAction {
+    /// Set up the background service and start it. Takes the same options as
+    /// a normal run (--token, --coordinator, --region, ...) and remembers them.
+    Install,
+    /// Stop the background agent and stop starting it at login. The machine
+    /// stays enrolled.
+    Uninstall,
+    /// Show whether the background agent is set up and running.
+    Status,
+}
+
+// Every option is global so it can be given before or after a subcommand.
+// Options left out fall back to what the last enrolment used, then to the
+// defaults named below.
+#[derive(clap::Args, Debug)]
 struct Args {
     /// One-time registration token from the host console. Only needed for the
     /// first run; afterwards the agent reconnects with its stored credential.
-    #[arg(long, env = "SN_REGISTRATION_TOKEN")]
+    #[arg(long, env = "SN_REGISTRATION_TOKEN", global = true)]
     token: Option<String>,
 
-    /// Coordinator gRPC endpoint.
+    /// Coordinator gRPC endpoint [default: the one last enrolled with, else
+    /// http://127.0.0.1:50051].
     #[arg(
         long = "coordinator",
         visible_alias = "coordinator-url",
         env = "SN_COORDINATOR_URL",
-        default_value = "http://127.0.0.1:50051"
+        global = true
     )]
-    coordinator: String,
+    coordinator: Option<String>,
 
-    /// Region this machine is in (e.g. IN-SOUTH).
-    #[arg(long, env = "SN_REGION", default_value = "IN-SOUTH")]
-    region: String,
+    /// Region this machine is in [default: IN-SOUTH].
+    #[arg(long, env = "SN_REGION", global = true)]
+    region: Option<String>,
 
-    /// Model runtime to drive: ollama or vllm.
-    #[arg(long, env = "SN_RUNTIME", default_value = "ollama")]
-    runtime: String,
+    /// Model runtime to drive: ollama or vllm [default: ollama].
+    #[arg(long, env = "SN_RUNTIME", global = true)]
+    runtime: Option<String>,
 
-    /// Runtime base URL (default: the runtime's standard local port).
-    #[arg(long, env = "SN_RUNTIME_URL")]
+    /// Runtime base URL [default: the runtime's standard local port].
+    #[arg(long, env = "SN_RUNTIME_URL", global = true)]
     runtime_url: Option<String>,
 
-    /// Where the host credential is stored (default: ~/.ayeusann).
-    #[arg(long, env = "SN_DATA_DIR")]
+    /// Where the host credential and settings are stored [default: ~/.ayeusann].
+    #[arg(long, env = "SN_DATA_DIR", global = true)]
     data_dir: Option<PathBuf>,
 
     /// Heartbeat interval in seconds (SRS FR-40: 5 s).
-    #[arg(long, env = "SN_HEARTBEAT_INTERVAL", default_value = "5")]
+    #[arg(
+        long,
+        env = "SN_HEARTBEAT_INTERVAL",
+        default_value = "5",
+        global = true
+    )]
     heartbeat_interval: u64,
 
     /// Development only: report a simulated RTX 4090 instead of real hardware.
-    #[arg(long, env = "SN_FAKE_GPU", default_value = "false")]
+    #[arg(long, env = "SN_FAKE_GPU", global = true)]
     fake_gpu: bool,
 
     /// Development only: run several agents on one machine as distinct hosts.
-    #[arg(long, env = "SN_INSTANCE", hide = true)]
+    #[arg(long, env = "SN_INSTANCE", hide = true, global = true)]
     instance: Option<String>,
 
     /// Forget the stored credential and enrol again with --token.
-    #[arg(long)]
+    #[arg(long, global = true)]
     reset: bool,
+
+    /// Write output to this file instead of the terminal.
+    #[arg(long, global = true)]
+    log_file: Option<PathBuf>,
+
+    /// Set by the background service: detach from any console window.
+    #[arg(long, hide = true, global = true)]
+    background: bool,
+}
+
+/// How long a background agent waits before asking again after the
+/// coordinator refused it. A refusal is not fixed by retrying quickly; it is
+/// fixed by `service install --token ...`, which restarts the agent anyway.
+const REFUSED_RETRY: Duration = Duration::from_secs(15 * 60);
+
+#[cfg(windows)]
+extern "system" {
+    fn FreeConsole() -> i32;
 }
 
 #[cfg(windows)]
@@ -187,46 +249,105 @@ fn preflight(gpus: &[gpu::GpuInfo]) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let Cli { args, command } = Cli::parse();
+
+    let base_dir = args
+        .data_dir
+        .clone()
+        .unwrap_or_else(|| home_dir().join(".ayeusann"));
+    let data_dir = match &args.instance {
+        Some(i) => base_dir.join(format!("instance-{i}")),
+        None => base_dir.clone(),
+    };
+
+    if let Some(Cmd::Service { action }) = command {
+        let spec = service::Spec::new(&base_dir, &data_dir, args.instance.as_deref())?;
+        let code = match action {
+            ServiceAction::Install => service::install(
+                &spec,
+                service::Settings {
+                    token: args.token,
+                    coordinator: args.coordinator,
+                    region: args.region,
+                    runtime: args.runtime,
+                    runtime_url: args.runtime_url,
+                    fake_gpu: args.fake_gpu,
+                    reset: args.reset,
+                },
+            ),
+            ServiceAction::Uninstall => service::uninstall(&spec),
+            ServiceAction::Status => service::status(&spec),
+        };
+        std::process::exit(code);
+    }
+
+    if let Some(path) = &args.log_file {
+        output::to_file(path)?;
+    }
+    if args.background {
+        // Started by the login item on Windows, the agent would otherwise sit
+        // in a console window of its own.
+        #[cfg(windows)]
+        unsafe {
+            FreeConsole();
+        }
+        let _ = std::fs::create_dir_all(&data_dir);
+        let _ = std::fs::write(data_dir.join("agent.pid"), std::process::id().to_string());
+    }
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     fmt()
         .with_env_filter(filter)
         .with_target(false)
-        .with_ansi(session::colour())
+        .with_ansi(output::colour())
+        .with_writer(|| output::Out)
         .compact()
         .init();
 
-    let args = Args::parse();
-    let mut coordinator = args.coordinator.clone();
-    if coordinator.ends_with(":8083") {
-        // 8083 is the coordinator's HTTP port; agents speak gRPC on 50051.
-        coordinator = coordinator.replace(":8083", ":50051");
-    }
-
-    let mut data_dir = args
-        .data_dir
-        .clone()
-        .unwrap_or_else(|| home_dir().join(".ayeusann"));
-    if let Some(i) = &args.instance {
-        data_dir = data_dir.join(format!("instance-{i}"));
-    }
     if args.reset {
         state::clear(&data_dir);
         info!("stored credential cleared");
     }
 
-    let kind = runtime::Kind::parse(&args.runtime)?;
+    // Anything not given on the command line comes from the last enrolment, so
+    // a restart needs no arguments.
+    let saved = state::load(&data_dir);
+    let mut coordinator = args
+        .coordinator
+        .clone()
+        .or(saved.coordinator_url)
+        .unwrap_or_else(|| "http://127.0.0.1:50051".into());
+    if coordinator.ends_with(":8083") {
+        // 8083 is the coordinator's HTTP port; agents speak gRPC on 50051.
+        coordinator = coordinator.replace(":8083", ":50051");
+    }
+    let region = args
+        .region
+        .clone()
+        .or(saved.region)
+        .unwrap_or_else(|| "IN-SOUTH".into());
+    let runtime_name = args
+        .runtime
+        .clone()
+        .or(saved.runtime)
+        .unwrap_or_else(|| "ollama".into());
+    let fake_gpu = args.fake_gpu || saved.fake_gpu.unwrap_or(false);
+    let token = args.token.clone().or(saved.pending_token);
+
+    let kind = runtime::Kind::parse(&runtime_name)?;
     let runtime_url = args
         .runtime_url
         .clone()
+        .or(saved.runtime_url)
         .unwrap_or_else(|| kind.default_url().to_string());
     let rt = runtime::Runtime::new(kind, &runtime_url)?;
 
     info!(version = env!("CARGO_PKG_VERSION"), coordinator = %coordinator, runtime = kind.name(), "starting host agent");
-    if args.fake_gpu {
+    if fake_gpu {
         warn!("FAKE GPU MODE: reporting simulated hardware. Development only.");
     }
 
-    let mut gpus = GpuDetector::new(args.fake_gpu).detect();
+    let mut gpus = GpuDetector::new(fake_gpu).detect();
     if let Some(i) = &args.instance {
         for g in &mut gpus {
             g.uuid = format!("{}-instance-{i}", g.uuid);
@@ -249,8 +370,8 @@ async fn main() -> Result<()> {
         );
     }
 
-    let fp = fingerprint(&gpus, args.fake_gpu, args.instance.as_deref());
-    let bench = BenchmarkSuite::new(args.fake_gpu, &coordinator, &fp).run_all();
+    let fp = fingerprint(&gpus, fake_gpu, args.instance.as_deref());
+    let bench = BenchmarkSuite::new(fake_gpu, &coordinator, &fp).run_all();
     let (_wg_private, wg_public) = MeshManager::generate_keypair();
 
     let facts = HostFacts {
@@ -258,7 +379,7 @@ async fn main() -> Result<()> {
         os: os_name(),
         os_version: sysinfo::System::os_version().unwrap_or_default(),
         kernel: sysinfo::System::kernel_version().unwrap_or_default(),
-        region: args.region.clone(),
+        region,
         gpus,
         fingerprint: fp,
         wg_public_key: wg_public,
@@ -271,18 +392,29 @@ async fn main() -> Result<()> {
         loop {
             let s = Session {
                 coordinator_url: &coordinator,
-                token: args.token.as_deref(),
+                token: token.as_deref(),
                 data_dir: data_dir.clone(),
                 facts: &facts,
                 runtime: rt.clone(),
                 heartbeat: Duration::from_secs(args.heartbeat_interval.max(1)),
                 shared: shared.clone(),
+                fake_gpu,
             };
             let started = std::time::Instant::now();
             match s.run().await {
                 Outcome::Rejected(reason) => {
                     error!("registration rejected: {reason}");
-                    return 1;
+                    // Recorded so `service install` and `service status` can
+                    // say why the machine is not online.
+                    let mut st = state::load(&data_dir);
+                    st.last_error = Some(reason);
+                    let _ = state::save(&data_dir, &st);
+                    if !args.background {
+                        return 1;
+                    }
+                    // Nobody is watching a background agent exit, and its
+                    // supervisor would only start it straight back up.
+                    tokio::time::sleep(REFUSED_RETRY).await;
                 }
                 Outcome::Disconnected(e) => {
                     if started.elapsed() > Duration::from_secs(60) {
