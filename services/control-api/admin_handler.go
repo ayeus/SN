@@ -1,16 +1,13 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/domain"
 	"github.com/ayeus/ayeusann/internal/httpx"
 	"github.com/ayeus/ayeusann/internal/lifecycle"
-	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -215,42 +212,4 @@ func (a *API) HandleAdminKillDeployment(w http.ResponseWriter, r *http.Request) 
 	}
 	a.audit(r, "deployment.kill", "deployment", id, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopping", "id": id})
-}
-
-// HandleAdminCredit issues a manual credit or refund to an organisation
-// (UML §1 UC15). Amount is in the organisation's wallet currency.
-func (a *API) HandleAdminCredit(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	var req struct {
-		Amount string `json:"amount"`
-		Note   string `json:"note"`
-		Kind   string `json:"kind"` // credit | refund
-	}
-	if httpx.DecodeJSON(w, r, &req) != nil {
-		return
-	}
-	if req.Kind == "" {
-		req.Kind = domain.LedgerKindCredit
-	}
-	if req.Kind != domain.LedgerKindCredit && req.Kind != domain.LedgerKindRefund {
-		writeError(w, http.StatusBadRequest, "kind must be credit or refund")
-		return
-	}
-	currency := a.orgCurrency(r.Context(), id)
-	amt, err := money.Parse(req.Amount, currency)
-	if err != nil || !amt.IsPositive() {
-		writeError(w, http.StatusBadRequest, "amount must be a positive decimal")
-		return
-	}
-	note := strings.TrimSpace(req.Note)
-	if note == "" {
-		note = "Manual " + req.Kind + " by operations"
-	}
-	entry, err := a.ledger.RecordTransaction(r.Context(), db.TransactionRequest{OrgID: id, Delta: amt, Kind: req.Kind, Description: &note})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to credit: %v", err))
-		return
-	}
-	a.audit(r, "org."+req.Kind, "organization", id, map[string]any{"amount": amt.String(), "currency": currency, "note": note})
-	writeJSON(w, http.StatusCreated, map[string]any{"entry": entry})
 }

@@ -1,26 +1,19 @@
 "use client";
 
 import { api } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
 import { useData } from "@/lib/hooks";
-import { convert, money, TIERS } from "@/lib/format";
-import type { Model, Pricing } from "@/lib/types";
+import { TIERS } from "@/lib/format";
+import type { Model } from "@/lib/types";
 import { ButtonLink, Notice, PageHeader, Panel, Skeleton, TierBadge } from "@/components/ui";
 
 export default function ModelsPage() {
-  const { me } = useAuth();
   const models = useData(() => api.get<{ models: Model[] }>("/v1/models"), []);
-  const pricing = useData(() => api.get<Pricing>("/v1/pricing", false), []);
-  const currency = me?.organization.currency ?? "USD";
-  const rate = pricing.data?.fx_from_usd?.[currency];
-  const spot = (pricing.data?.spot_price_percent ?? 55) / 100;
-  const show = (m: Model["price_in_per_1m"]) => money(rate ? convert(m, currency, rate) : m);
 
   return (
     <>
       <PageHeader
         title="Models"
-        description={`Open-source models you can deploy. Prices are per million tokens in ${currency}; spot (T3) is ${Math.round(spot * 100)}% of on-demand.`}
+        description="Open-source models you can deploy. Each one shows the GPU memory it needs and the tiers it can run on."
       />
       {models.error && <Notice tone="error">{models.error.message}</Notice>}
       <Panel flush>
@@ -45,9 +38,7 @@ export default function ModelsPage() {
                   </p>
                 </div>
                 <div className="text-[14px]">
-                  <div>
-                    {show(m.price_in_per_1m)} in, {show(m.price_out_per_1m)} out
-                  </div>
+                  <div>Needs {m.min_vram_gb} GB of GPU memory</div>
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
                     {m.tiers_allowed.map((t) => (
                       <span key={t} title={TIERS[t].who}>

@@ -6,8 +6,8 @@ import { useEffect, useRef, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, ApiError } from "@/lib/api";
 import { useData } from "@/lib/hooks";
-import { compact, money, number, time } from "@/lib/format";
-import type { Deployment, DeploymentEvent, Money, Replica } from "@/lib/types";
+import { compact, number, time } from "@/lib/format";
+import type { Deployment, DeploymentEvent, Replica, UsageSummary } from "@/lib/types";
 import { Button, ButtonLink, Confirm, CopyField, Notice, PageHeader, Panel, Skeleton, Stat, StateBadge, TierBadge, cx } from "@/components/ui";
 import { PowerRail } from "@/components/PowerRail";
 import { Snippets } from "@/components/Snippets";
@@ -15,8 +15,8 @@ import { Snippets } from "@/components/Snippets";
 type Detail = {
   deployment: Deployment;
   replicas: Replica[];
-  usage_24h: { requests: number; errors: number; input_tokens: number; output_tokens: number; cost: Money };
-  cost_last_hour: Money;
+  usage_24h: UsageSummary;
+  usage_last_hour: UsageSummary;
   base_url: string;
   model: string;
 };
@@ -212,8 +212,8 @@ export default function DeploymentPage() {
           <div className="grid grid-cols-2 gap-6">
             <Stat label="Requests" value={number(data.usage_24h.requests)} sub={data.usage_24h.errors ? `${data.usage_24h.errors} failed` : undefined} />
             <Stat label="Tokens" value={compact(data.usage_24h.input_tokens + data.usage_24h.output_tokens)} sub={`${compact(data.usage_24h.output_tokens)} generated`} />
-            <Stat label="Cost today" value={money(data.usage_24h.cost)} />
-            <Stat label="Cost, last hour" value={money(data.cost_last_hour, { precise: true })} sub="Live rate" />
+            <Stat label="Requests, last hour" value={number(data.usage_last_hour.requests)} sub={data.usage_last_hour.errors ? `${data.usage_last_hour.errors} failed` : undefined} />
+            <Stat label="Tokens, last hour" value={compact(data.usage_last_hour.input_tokens + data.usage_last_hour.output_tokens)} />
           </div>
         </Panel>
       </div>
@@ -312,7 +312,7 @@ export default function DeploymentPage() {
       <Confirm
         open={confirmStop}
         title={`Stop ${d.name}?`}
-        body="Replicas shut down and the endpoint stops answering. Its API keys are revoked. Usage history and invoices are kept."
+        body="Replicas shut down and the endpoint stops answering. Its API keys are revoked. Usage history is kept."
         confirmLabel="Stop deployment"
         busy={busy === "stop"}
         onConfirm={stop}

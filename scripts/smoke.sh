@@ -3,7 +3,7 @@
 # stack (`make dev`) and a local Ollama with the model below pulled:
 #
 #   sign up → enrol two hosts → deploy (2 replicas) → SERVING → streamed chat →
-#   OpenAI SDK call → usage metered, wallet debited, host credited → kill one
+#   OpenAI SDK call → usage recorded for the customer and the host → kill one
 #   host → requests keep succeeding → stop the deployment
 #
 #   scripts/smoke.sh            # uses gemma2:2b via gemma-2-2b-it
@@ -52,18 +52,12 @@ if docker exec ann-postgres true 2>/dev/null; then
   [ -z "$WAITING" ] || fail "other deployments are waiting for a host and would take the smoke hosts: $WAITING. Stop or pause them first."
 fi
 
-# 1. Sign up (India → INR wallet with ₹500).
+# 1. Sign up.
 EMAIL="smoke@$(uuidgen | tr A-Z a-z | cut -c1-8).example.com"
 R=$(curl -sS -X POST "$BASE/v1/auth/signup" -H 'Content-Type: application/json' \
     -d "{\"email\":\"$EMAIL\",\"password\":\"Smoke-Test-2026\",\"name\":\"Smoke Test\",\"country\":\"IN\"}")
 TOKEN=$(echo "$R" | json "['access_token']") || fail "signup: $R"
-BAL0=$(api GET /v1/billing/wallet | json "['balance']['amount']")
-if python3 -c "import sys; sys.exit(0 if float('$BAL0') <= 0 else 1)"; then
-  # Welcome credit is rate-limited per network; fall back to dev test credit.
-  api POST /v1/billing/topup -d '{"amount":"100","method":"test"}' >/dev/null
-  BAL0=$(api GET /v1/billing/wallet | json "['balance']['amount']")
-fi
-pass "signed up $EMAIL, wallet $BAL0 INR"
+pass "signed up $EMAIL"
 
 # 2. Enrol two hosts on this machine (distinct dev instances).
 cargo build --release --quiet --manifest-path agent/Cargo.toml
@@ -125,13 +119,14 @@ else
   echo "  skip  OpenAI Python SDK not installed (pip install openai)"
 fi
 
-# 7. Money: wallet debited, host credited 75%.
+# 7. Usage: every request is recorded for the customer and for the hosts.
 sleep 1
-BAL1=$(api GET /v1/billing/wallet | json "['balance']['amount']")
-python3 -c "import sys; sys.exit(0 if float('$BAL1') < float('$BAL0') else 1)" || fail "wallet not debited ($BAL0 → $BAL1)"
-EARN=$(api GET /v1/hosts/earnings | json "['summary']['lifetime']['amount']")
-python3 -c "import sys; sys.exit(0 if float('$EARN') > 0 else 1)" || fail "host earned nothing"
-pass "wallet $BAL0 → $BAL1 INR; hosts earned $EARN INR"
+REQS=$(api GET /v1/usage/daily | python3 -c "import json,sys; print(sum(d['requests'] for d in json.load(sys.stdin)['days']))")
+[ "$REQS" -ge 2 ] || fail "customer usage shows $REQS requests, expected at least 2"
+SERVED=$(api GET /v1/hosts/activity | json "['summary']['lifetime']['requests']")
+TOKENS=$(api GET /v1/hosts/activity | json "['summary']['lifetime']['tokens']")
+[ "$SERVED" -ge 2 ] && [ "$TOKENS" -gt 0 ] || fail "host activity shows $SERVED requests and $TOKENS tokens"
+pass "usage recorded: $REQS requests for the customer; hosts served $SERVED requests, $TOKENS tokens"
 
 # 8. Failover: kill one host, requests keep working (NFR-2: < 5 s).
 kill "${AGENTS[0]}"

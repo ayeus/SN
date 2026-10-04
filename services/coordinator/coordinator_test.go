@@ -694,7 +694,7 @@ func TestTunnelStreamsTheAnswerAndReportsUsage(t *testing.T) {
 		t.Fatalf("content type = %q, want text/event-stream", res.Header.Get("Content-Type"))
 	}
 	if p, c := res.Trailer.Get(TrailerPromptTokens), res.Trailer.Get(TrailerCompletionTokens); p != "7" || c != "2" {
-		t.Fatalf("usage trailers = %q/%q, want 7/2: billing depends on them", p, c)
+		t.Fatalf("usage trailers = %q/%q, want 7/2: usage records depend on them", p, c)
 	}
 	sess.mu.Lock()
 	left := len(sess.inflight)

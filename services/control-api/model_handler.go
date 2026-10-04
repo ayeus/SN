@@ -12,34 +12,22 @@ import (
 
 	"github.com/ayeus/ayeusann/internal/domain"
 	"github.com/ayeus/ayeusann/internal/httpx"
-	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
-// platformCurrency is the currency catalogue token prices are quoted in.
-const platformCurrency = "USD"
-
 // modelSelect is the column list every model read shares.
 const modelSelect = `
-	SELECT id, name, family, params_b, license, min_vram_gb, tiers_allowed,
-	       price_in_per_1m, price_out_per_1m, price_per_hour_inr, is_byo,
+	SELECT id, name, family, params_b, license, min_vram_gb, tiers_allowed, is_byo,
 	       quantization_presets, runtime_refs, description, context_length, created_at, updated_at
 	FROM models`
 
 func scanModel(row pgx.Row) (domain.Model, error) {
 	var m domain.Model
 	err := row.Scan(
-		&m.ID, &m.Name, &m.Family, &m.ParamsB, &m.License, &m.MinVramGB, &m.TiersAllowed,
-		&m.PriceInPer1M, &m.PriceOutPer1M, &m.PricePerHourINR, &m.IsBYO,
+		&m.ID, &m.Name, &m.Family, &m.ParamsB, &m.License, &m.MinVramGB, &m.TiersAllowed, &m.IsBYO,
 		&m.QuantizationPresets, &m.RuntimeRefs, &m.Description, &m.ContextLength, &m.CreatedAt, &m.UpdatedAt,
 	)
-	m.PriceInPer1M = money.FromMicros(m.PriceInPer1M.Micros(), platformCurrency)
-	m.PriceOutPer1M = money.FromMicros(m.PriceOutPer1M.Micros(), platformCurrency)
-	if m.PricePerHourINR != nil {
-		v := money.FromMicros(m.PricePerHourINR.Micros(), "INR")
-		m.PricePerHourINR = &v
-	}
 	return m, err
 }
 
@@ -54,9 +42,6 @@ func httpxDecodeOptional(r *http.Request, dst any) error {
 // modelNamePattern keeps model names URL- and path-safe: they end up in
 // endpoint URLs and, for BYO models, in paths on host machines.
 var modelNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$`)
-
-// maxTokenPrice caps a BYO price so a typo cannot become an invoice.
-var maxTokenPrice = money.MustParse("1000", "USD")
 
 var sha256Pattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
@@ -153,15 +138,13 @@ func (a *API) HandleGetModel(w http.ResponseWriter, r *http.Request) {
 }
 
 type BYOModelRequest struct {
-	Name          string           `json:"name"`
-	Family        string           `json:"family"`
-	ParamsB       float32          `json:"params_b"`
-	License       string           `json:"license"`
-	MinVramGB     int              `json:"min_vram_gb"`
-	TiersAllowed  []string         `json:"tiers_allowed"`
-	PriceInPer1M  money.Amount     `json:"price_in_per_1m"`
-	PriceOutPer1M money.Amount     `json:"price_out_per_1m"`
-	Artifact      *ArtifactRequest `json:"artifact,omitempty"`
+	Name         string           `json:"name"`
+	Family       string           `json:"family"`
+	ParamsB      float32          `json:"params_b"`
+	License      string           `json:"license"`
+	MinVramGB    int              `json:"min_vram_gb"`
+	TiersAllowed []string         `json:"tiers_allowed"`
+	Artifact     *ArtifactRequest `json:"artifact,omitempty"`
 }
 
 type ArtifactRequest struct {
@@ -187,13 +170,6 @@ func (req *BYOModelRequest) validate() error {
 		return errors.New("params_b must be between 0 and 100000")
 	case req.MinVramGB <= 0 || req.MinVramGB > 100_000:
 		return errors.New("min_vram_gb must be between 1 and 100000")
-	}
-	req.PriceInPer1M = money.FromMicros(req.PriceInPer1M.Micros(), platformCurrency)
-	req.PriceOutPer1M = money.FromMicros(req.PriceOutPer1M.Micros(), platformCurrency)
-	for label, p := range map[string]money.Amount{"price_in_per_1m": req.PriceInPer1M, "price_out_per_1m": req.PriceOutPer1M} {
-		if p.IsNegative() || p.GreaterThan(maxTokenPrice) {
-			return fmt.Errorf("%s must be between 0 and %s", label, maxTokenPrice.Display())
-		}
 	}
 	if art := req.Artifact; art != nil {
 		art.Version = strings.TrimSpace(art.Version)
@@ -260,12 +236,10 @@ func (a *API) HandleBYOModel(w http.ResponseWriter, r *http.Request) {
 		m, err = scanModel(tx.QueryRow(ctx, `
 			INSERT INTO models (name, family, params_b, license, min_vram_gb, tiers_allowed,
 			                    price_in_per_1m, price_out_per_1m, is_byo, owner_org_id, quantization_presets)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, '[]'::jsonb)
-			RETURNING id, name, family, params_b, license, min_vram_gb, tiers_allowed,
-			          price_in_per_1m, price_out_per_1m, price_per_hour_inr, is_byo,
+			VALUES ($1, $2, $3, $4, $5, $6, 0, 0, TRUE, $7, '[]'::jsonb)
+			RETURNING id, name, family, params_b, license, min_vram_gb, tiers_allowed, is_byo,
 			          quantization_presets, runtime_refs, description, context_length, created_at, updated_at;
-		`, req.Name, req.Family, req.ParamsB, req.License, req.MinVramGB, tiers,
-			req.PriceInPer1M, req.PriceOutPer1M, claims.OrgID))
+		`, req.Name, req.Family, req.ParamsB, req.License, req.MinVramGB, tiers, claims.OrgID))
 		if err != nil {
 			return err
 		}

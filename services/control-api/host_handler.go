@@ -12,7 +12,6 @@ import (
 	"github.com/ayeus/ayeusann/internal/domain"
 	"github.com/ayeus/ayeusann/internal/httpx"
 	"github.com/ayeus/ayeusann/internal/lifecycle"
-	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -115,8 +114,8 @@ type HostSummary struct {
 	Online        bool         `json:"online"`
 	GPUs          []domain.GPU `json:"gpus"`
 	ActiveJobs    int          `json:"active_jobs"`
-	EarningsTotal money.Amount `json:"earnings_total"`
-	EarningsToday money.Amount `json:"earnings_today"`
+	RequestsTotal int64        `json:"requests_total"`
+	RequestsToday int64        `json:"requests_today"`
 }
 
 const hostColumns = `
@@ -168,9 +167,8 @@ func (a *API) HandleListHosts(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.Pool.Query(ctx, `
 		SELECT `+hostColumns+`,
 		       (SELECT COUNT(*) FROM replicas x WHERE x.host_id = h.id AND x.state IN ('pending','pulling','loading','warming','serving','degraded')),
-		       COALESCE((SELECT SUM(amount_host) FROM usage_events u WHERE u.host_id = h.id), 0),
-		       COALESCE((SELECT SUM(amount_host) FROM usage_events u WHERE u.host_id = h.id AND u.ts >= DATE_TRUNC('day', NOW())), 0),
-		       COALESCE((SELECT currency FROM usage_events u WHERE u.host_id = h.id ORDER BY ts DESC LIMIT 1), 'INR')
+		       (SELECT COUNT(*) FROM usage_events u WHERE u.host_id = h.id AND u.status = 'success'),
+		       (SELECT COUNT(*) FROM usage_events u WHERE u.host_id = h.id AND u.status = 'success' AND u.ts >= DATE_TRUNC('day', NOW()))
 		FROM hosts h
 		WHERE h.user_id = $1 AND h.deleted_at IS NULL
 		ORDER BY h.created_at DESC;
@@ -185,16 +183,12 @@ func (a *API) HandleListHosts(w http.ResponseWriter, r *http.Request) {
 	var ids []string
 	for rows.Next() {
 		var s HostSummary
-		var total, today money.Amount
-		var currency string
-		h, err := scanHost(rows, &s.ActiveJobs, &total, &today, &currency)
+		h, err := scanHost(rows, &s.ActiveJobs, &s.RequestsTotal, &s.RequestsToday)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to read hosts")
 			return
 		}
 		s.Host, s.Online = h, a.online(h)
-		s.EarningsTotal = money.FromMicros(total.Micros(), currency)
-		s.EarningsToday = money.FromMicros(today.Micros(), currency)
 		list = append(list, s)
 		ids = append(ids, h.ID)
 	}
@@ -314,84 +308,81 @@ func (a *API) HandleGetHost(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// EarningsSummary is a host owner's accrued revenue share (PRD F-14).
-type EarningsSummary struct {
-	Currency string       `json:"currency"`
-	Today    money.Amount `json:"today"`
-	MTD      money.Amount `json:"month_to_date"`
-	Lifetime money.Amount `json:"lifetime"`
-	Requests int64        `json:"requests"`
-	Tokens   int64        `json:"tokens"`
+// ActivitySummary is the work a host owner's machines have served.
+type ActivitySummary struct {
+	Today    WorkCount `json:"today"`
+	MTD      WorkCount `json:"month_to_date"`
+	Lifetime WorkCount `json:"lifetime"`
 }
 
-func (a *API) earnings(ctx context.Context, hostFilter string, arg any) (EarningsSummary, []map[string]any, error) {
-	var e EarningsSummary
-	var today, mtd, life money.Amount
+// WorkCount is successful requests and the tokens they processed.
+type WorkCount struct {
+	Requests int64 `json:"requests"`
+	Tokens   int64 `json:"tokens"`
+}
+
+func (a *API) activity(ctx context.Context, hostFilter string, arg any) (ActivitySummary, []map[string]any, error) {
+	var s ActivitySummary
 	err := a.db.Pool.QueryRow(ctx, `
-		SELECT COALESCE(MAX(currency), 'INR'),
-		       COALESCE(SUM(amount_host) FILTER (WHERE ts >= DATE_TRUNC('day', NOW())), 0),
-		       COALESCE(SUM(amount_host) FILTER (WHERE ts >= DATE_TRUNC('month', NOW())), 0),
-		       COALESCE(SUM(amount_host), 0),
-		       COUNT(*) FILTER (WHERE status = 'success'),
+		SELECT COUNT(*) FILTER (WHERE ts >= DATE_TRUNC('day', NOW())),
+		       COALESCE(SUM(input_tokens + output_tokens) FILTER (WHERE ts >= DATE_TRUNC('day', NOW())), 0),
+		       COUNT(*) FILTER (WHERE ts >= DATE_TRUNC('month', NOW())),
+		       COALESCE(SUM(input_tokens + output_tokens) FILTER (WHERE ts >= DATE_TRUNC('month', NOW())), 0),
+		       COUNT(*),
 		       COALESCE(SUM(input_tokens + output_tokens), 0)
-		FROM usage_events WHERE `+hostFilter+`;
-	`, arg).Scan(&e.Currency, &today, &mtd, &life, &e.Requests, &e.Tokens)
+		FROM usage_events WHERE status = 'success' AND `+hostFilter+`;
+	`, arg).Scan(&s.Today.Requests, &s.Today.Tokens, &s.MTD.Requests, &s.MTD.Tokens, &s.Lifetime.Requests, &s.Lifetime.Tokens)
 	if err != nil {
-		return e, nil, err
+		return s, nil, err
 	}
-	e.Today = money.FromMicros(today.Micros(), e.Currency)
-	e.MTD = money.FromMicros(mtd.Micros(), e.Currency)
-	e.Lifetime = money.FromMicros(life.Micros(), e.Currency)
 
 	rows, err := a.db.Pool.Query(ctx, `
-		SELECT DATE_TRUNC('day', ts) AS d, SUM(amount_host), COUNT(*)
-		FROM usage_events WHERE `+hostFilter+` AND ts >= NOW() - INTERVAL '30 days'
+		SELECT DATE_TRUNC('day', ts) AS d, COUNT(*), COALESCE(SUM(input_tokens + output_tokens), 0)
+		FROM usage_events WHERE status = 'success' AND `+hostFilter+` AND ts >= NOW() - INTERVAL '30 days'
 		GROUP BY d ORDER BY d;
 	`, arg)
 	if err != nil {
-		return e, nil, err
+		return s, nil, err
 	}
 	defer rows.Close()
 	series := []map[string]any{}
 	for rows.Next() {
 		var d time.Time
-		var amt money.Amount
-		var n int64
-		if err := rows.Scan(&d, &amt, &n); err == nil {
-			series = append(series, map[string]any{"date": d.Format("2006-01-02"), "earnings": money.FromMicros(amt.Micros(), e.Currency), "requests": n})
+		var n, tokens int64
+		if err := rows.Scan(&d, &n, &tokens); err == nil {
+			series = append(series, map[string]any{"date": d.Format("2006-01-02"), "requests": n, "tokens": tokens})
 		}
 	}
-	return e, series, rows.Err()
+	return s, series, rows.Err()
 }
 
-// HandleHostEarnings: today / MTD / lifetime, a 30-day series and a per-GPU
+// HandleHostActivity: today / month / lifetime, a 30-day series and a per-GPU
 // breakdown for one host.
-func (a *API) HandleHostEarnings(w http.ResponseWriter, r *http.Request) {
+func (a *API) HandleHostActivity(w http.ResponseWriter, r *http.Request) {
 	h, err := a.ownHost(r)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Host not found")
 		return
 	}
-	sum, series, err := a.earnings(r.Context(), "host_id = $1", h.ID)
+	sum, series, err := a.activity(r.Context(), "host_id = $1", h.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to compute earnings")
+		writeError(w, http.StatusInternalServerError, "Failed to read activity")
 		return
 	}
 	perGPU := []map[string]any{}
 	rows, err := a.db.Pool.Query(r.Context(), `
-		SELECT g.model, g.uuid, COALESCE(SUM(u.amount_host), 0), COUNT(u.request_id)
+		SELECT g.model, g.uuid, COUNT(u.request_id), COALESCE(SUM(u.input_tokens + u.output_tokens), 0)
 		FROM gpus g
 		LEFT JOIN replicas rp ON rp.gpu_id = g.id
-		LEFT JOIN usage_events u ON u.replica_id = rp.id
+		LEFT JOIN usage_events u ON u.replica_id = rp.id AND u.status = 'success'
 		WHERE g.host_id = $1 GROUP BY g.model, g.uuid ORDER BY g.model;
 	`, h.ID)
 	if err == nil {
 		for rows.Next() {
 			var model, uuid string
-			var amt money.Amount
-			var n int64
-			if err := rows.Scan(&model, &uuid, &amt, &n); err == nil {
-				perGPU = append(perGPU, map[string]any{"gpu_model": model, "gpu_uuid": uuid, "earnings": money.FromMicros(amt.Micros(), sum.Currency), "requests": n})
+			var n, tokens int64
+			if err := rows.Scan(&model, &uuid, &n, &tokens); err == nil {
+				perGPU = append(perGPU, map[string]any{"gpu_model": model, "gpu_uuid": uuid, "requests": n, "tokens": tokens})
 			}
 		}
 		rows.Close()
@@ -399,12 +390,12 @@ func (a *API) HandleHostEarnings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"summary": sum, "daily": series, "per_gpu": perGPU})
 }
 
-// HandleAllHostEarnings aggregates every host the caller owns.
-func (a *API) HandleAllHostEarnings(w http.ResponseWriter, r *http.Request) {
-	sum, series, err := a.earnings(r.Context(),
+// HandleAllHostActivity aggregates every host the caller owns.
+func (a *API) HandleAllHostActivity(w http.ResponseWriter, r *http.Request) {
+	sum, series, err := a.activity(r.Context(),
 		"host_id IN (SELECT id FROM hosts WHERE user_id = $1)", claimsOf(r).UserID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to compute earnings")
+		writeError(w, http.StatusInternalServerError, "Failed to read activity")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"summary": sum, "daily": series})
@@ -443,67 +434,6 @@ func (a *API) HandleHostTelemetry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"samples": samples})
-}
-
-// HandleHostPayouts lists payout lines. Payouts need completed KYC — PAN and a
-// verified bank account — before the first transfer (PRD F-13, SRS FR-74).
-func (a *API) HandleHostPayouts(w http.ResponseWriter, r *http.Request) {
-	h, err := a.ownHost(r)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "Host not found")
-		return
-	}
-	rows, err := a.db.Pool.Query(r.Context(), `
-		SELECT pl.id, pb.week_start, pb.week_end, pl.gross, pl.tds_amount, pl.net, pl.status, pl.created_at
-		FROM payout_lines pl JOIN payout_batches pb ON pb.id = pl.batch_id
-		WHERE pl.host_id = $1 ORDER BY pb.week_start DESC LIMIT 52;
-	`, h.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to read payouts")
-		return
-	}
-	defer rows.Close()
-	payouts := []map[string]any{}
-	for rows.Next() {
-		var id, status string
-		var ws, we, created time.Time
-		var gross, tds, net money.Amount
-		if err := rows.Scan(&id, &ws, &we, &gross, &tds, &net, &status, &created); err == nil {
-			payouts = append(payouts, map[string]any{"id": id, "week_start": ws, "week_end": we, "gross": gross, "tds": tds, "net": net, "status": status})
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"kyc_status": h.KycStatus,
-		"payouts":    payouts,
-		"note":       "Weekly payouts start once KYC (PAN + bank verification) is complete. TDS under section 194-O is withheld at 1%.",
-	})
-}
-
-// HandleHostTaxDocs lists Form 16A / TDS certificates (SRS FR-74).
-func (a *API) HandleHostTaxDocs(w http.ResponseWriter, r *http.Request) {
-	h, err := a.ownHost(r)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "Host not found")
-		return
-	}
-	rows, err := a.db.Pool.Query(r.Context(), `
-		SELECT id, doc_type, period_start, period_end, pdf_url FROM tax_docs WHERE host_id = $1 ORDER BY period_start DESC;
-	`, h.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to read tax documents")
-		return
-	}
-	defer rows.Close()
-	docs := []map[string]any{}
-	for rows.Next() {
-		var id, kind string
-		var ps, pe time.Time
-		var url *string
-		if err := rows.Scan(&id, &kind, &ps, &pe, &url); err == nil {
-			docs = append(docs, map[string]any{"id": id, "doc_type": kind, "period_start": ps, "period_end": pe, "pdf_url": url})
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"tax_docs": docs})
 }
 
 type HostControlsRequest struct {

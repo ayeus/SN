@@ -34,7 +34,6 @@ Fill in `.env.prod`:
 | `MANIFEST_SIGNING_KEY` | `openssl rand -base64 32` |
 | `PLATFORM_ADMIN_EMAILS` | Accounts that may open the operations console |
 | `SMTP_*` | A mail relay. Without one, password reset emails cannot be sent |
-| `RAZORPAY_*` | Live keys. Without them, wallet top-ups are unavailable |
 
 Then:
 
@@ -102,7 +101,7 @@ They are not reachable from outside.
 - Sets HSTS, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
   `Permissions-Policy` and a `Content-Security-Policy` that forbids framing.
 - Passes the client address to the services (`TRUST_PROXY_HEADERS=true`), which
-  the signup and login abuse limits depend on. A forwarded-for header sent by a
+  the login abuse limits depend on. A forwarded-for header sent by a
   client is discarded.
 
 ## Limits of this setup

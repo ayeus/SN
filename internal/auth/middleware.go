@@ -117,7 +117,7 @@ func RequireRole(allowedRoles ...string) func(http.Handler) http.Handler {
 
 // RequireOrg ensures the authenticated caller belongs to an organization and that
 // it matches the org_id in the request path. This is the check that stops one
-// tenant from reading another tenant's balance, usage, or invoices.
+// tenant from reading another tenant's organisation or usage.
 func RequireOrg(pathValue string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

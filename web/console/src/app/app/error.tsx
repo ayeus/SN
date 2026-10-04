@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { Button, ButtonLink, Notice } from "@/components/ui";
 
-// Keeps the console shell (navigation, wallet) usable when one page fails.
+// Keeps the console shell (navigation) usable when one page fails.
 export default function ConsoleError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
     console.error("[console] page error", error);

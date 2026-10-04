@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/auth"
-	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/ayeus/ayeusann/internal/testutil"
+	"github.com/ayeus/ayeusann/internal/usage"
 	"github.com/google/uuid"
 )
 
@@ -37,7 +37,6 @@ func newHarness(t *testing.T) *harness {
 		PublicURL:            "http://gateway.test",
 		CoordinatorPublicURL: "http://coordinator.test:50051",
 		HeartbeatTimeout:     15 * time.Second,
-		SignupCredit:         money.MustParse("500", "INR"),
 	})
 	return &harness{t: t, api: api, h: api.Routes()}
 }
@@ -51,7 +50,7 @@ func (h *harness) do(method, path, token string, body any, out any, headers ...s
 		buf = bytes.NewReader(b)
 	}
 	req := httptest.NewRequest(method, path, buf)
-	// Signup credits are rate-limited per IP; give every request its own.
+	// Sign-in attempts are rate-limited per address; give every request its own.
 	req.RemoteAddr = fmt.Sprintf("10.%d.%d.%d:4000", rand.IntN(250), rand.IntN(250), rand.IntN(250)+1)
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
@@ -88,7 +87,7 @@ func (h *harness) signup(prefix string) session {
 	return session{Token: resp.AccessToken, OrgID: resp.Organization.ID}
 }
 
-func TestSignupDefaultsToIndiaWithRupeeCredit(t *testing.T) {
+func TestSignupDefaultsToIndia(t *testing.T) {
 	h := newHarness(t)
 	var resp AuthResponse
 	code := h.do("POST", "/v1/auth/signup", "", map[string]string{
@@ -97,15 +96,11 @@ func TestSignupDefaultsToIndiaWithRupeeCredit(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("status %d", code)
 	}
-	if resp.Organization.Currency != "INR" || resp.Organization.DefaultRegion != "IN-SOUTH" {
-		t.Fatalf("expected an INR org in IN-SOUTH, got %s / %s", resp.Organization.Currency, resp.Organization.DefaultRegion)
+	if resp.Organization.Country == nil || *resp.Organization.Country != "IN" || resp.Organization.DefaultRegion != "IN-SOUTH" {
+		t.Fatalf("expected an Indian org in IN-SOUTH, got %v / %s", resp.Organization.Country, resp.Organization.DefaultRegion)
 	}
-	if resp.PromotionalCredit != "500.00 INR" {
-		t.Fatalf("expected ₹500 welcome credit (SRS FR-70), got %q", resp.PromotionalCredit)
-	}
-	bal, err := h.api.ledger.GetBalance(t.Context(), resp.Organization.ID)
-	if err != nil || bal.String() != "500.000000" || bal.Currency() != "INR" {
-		t.Fatalf("wallet = %v %v", bal, err)
+	if resp.AccessToken == "" || resp.Role != "admin" {
+		t.Fatalf("signup must return a session for the org admin, got role %q", resp.Role)
 	}
 }
 
@@ -222,6 +217,35 @@ func TestDeploymentLifecycleAPI(t *testing.T) {
 		t.Fatalf("another org must not see the deployment, got %d", code)
 	}
 
+	// Usage is counted per organisation: a served request shows up for its
+	// owner and never for another tenant.
+	var hostID, replicaID string
+	ctx := t.Context()
+	if err := h.api.db.Pool.QueryRow(ctx, `INSERT INTO hosts (name, tier, region) VALUES ('usage-' || gen_random_uuid(), 't3', 'IN-SOUTH') RETURNING id`).Scan(&hostID); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.api.db.Pool.QueryRow(ctx, `INSERT INTO replicas (deployment_id, host_id, state) VALUES ($1, $2, 'serving') RETURNING id`, created.Deployment.ID, hostID).Scan(&replicaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := usage.Record(ctx, h.api.db, usage.Event{
+		RequestID: uuid.NewString(), OrgID: s.OrgID, DeploymentID: created.Deployment.ID, ReplicaID: replicaID, HostID: hostID,
+		ModelID: created.Deployment.ModelID, Tier: "t3", InputTokens: 10, OutputTokens: 15,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var daily struct {
+		Days []struct{ Requests, Tokens int64 } `json:"days"`
+	}
+	if code := h.do("GET", "/v1/usage/daily", s.Token, nil, &daily); code != http.StatusOK || len(daily.Days) != 1 || daily.Days[0].Requests != 1 || daily.Days[0].Tokens != 25 {
+		t.Fatalf("daily usage: %d %+v, want one day with 1 request and 25 tokens", code, daily.Days)
+	}
+	if code := h.do("GET", "/v1/usage/daily", other.Token, nil, &daily); code != http.StatusOK || len(daily.Days) != 0 {
+		t.Fatalf("another org sees this org's usage: %d %+v", code, daily.Days)
+	}
+	if _, err := h.api.db.Pool.Exec(ctx, `UPDATE replicas SET state = 'stopped' WHERE id = $1`, replicaID); err != nil {
+		t.Fatal(err)
+	}
+
 	// Pause, bad resume/retry, stop.
 	if code := h.do("PATCH", path, s.Token, map[string]string{"action": "retry"}, nil); code != http.StatusConflict {
 		t.Fatalf("retry of a non-failed deployment should conflict, got %d", code)
@@ -286,13 +310,10 @@ func TestHostOnboardingAPI(t *testing.T) {
 			t.Fatalf("public stats must not expose %q", leaked)
 		}
 	}
-	var pricing struct {
-		Skus      []any             `json:"gpu_skus"`
-		FX        map[string]string `json:"fx_from_usd"`
-		HostShare int               `json:"host_share_percent"`
-	}
-	if code := h.do("GET", "/v1/pricing", "", nil, &pricing); code != http.StatusOK || len(pricing.Skus) == 0 || pricing.FX["INR"] == "" || pricing.HostShare != 75 {
-		t.Fatalf("pricing incomplete (did you run the seeds?): %d %+v", code, pricing)
+	for _, key := range []string{"gpus_by_tier", "gpus_free_by_tier"} {
+		if _, ok := stats[key].(map[string]any); !ok {
+			t.Fatalf("network stats must report %s per tier, got %v", key, stats[key])
+		}
 	}
 }
 
@@ -300,7 +321,7 @@ func TestBYORules(t *testing.T) {
 	h := newHarness(t)
 	s := h.signup("byo")
 	base := map[string]any{"name": "my-ft-" + uuid.NewString()[:6], "family": "llama", "params_b": 8, "license": "llama3",
-		"min_vram_gb": 16, "price_in_per_1m": "0.10", "price_out_per_1m": "0.30"}
+		"min_vram_gb": 16}
 
 	withT3 := map[string]any{}
 	for k, v := range base {

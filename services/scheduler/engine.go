@@ -39,9 +39,6 @@ type deployment struct {
 // Tick runs one reconciliation pass.
 func (r *Reconciler) Tick(ctx context.Context) error {
 	var errs []error
-	if err := r.pauseExhaustedWallets(ctx); err != nil {
-		errs = append(errs, fmt.Errorf("spend cap: %w", err))
-	}
 	deps, err := r.loadDeployments(ctx)
 	if err != nil {
 		return err
@@ -103,45 +100,6 @@ func (r *Reconciler) loadDeployments(ctx context.Context) ([]deployment, error) 
 		out = append(out, d)
 	}
 	return out, rows.Err()
-}
-
-// pauseExhaustedWallets enforces the hard spend cap (SRS FR-72, UML §4
-// SERVING → PAUSED): a running deployment whose organisation has no spendable
-// balance is paused until the customer tops up and resumes it.
-func (r *Reconciler) pauseExhaustedWallets(ctx context.Context) error {
-	rows, err := r.db.Pool.Query(ctx, `
-		UPDATE deployments d
-		SET desired_state = 'paused', updated_at = NOW(),
-		    last_error = 'Paused automatically: wallet balance exhausted. Top up and resume to continue.'
-		FROM (
-		    SELECT o.id AS org_id
-		    FROM organizations o
-		    JOIN LATERAL (
-		        SELECT balance_after FROM wallet_ledger WHERE org_id = o.id ORDER BY seq DESC LIMIT 1
-		    ) b ON TRUE
-		    LEFT JOIN wallet_settings ws ON ws.org_id = o.id
-		    WHERE b.balance_after + COALESCE(ws.credit_limit, 0) <= 0
-		) broke
-		WHERE d.org_id = broke.org_id AND d.desired_state = 'running' AND d.deleted_at IS NULL
-		RETURNING d.id;
-	`)
-	if err != nil {
-		return err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	rows.Close()
-	for _, id := range ids {
-		r.log.Info("deployment paused by spend cap", "deployment_id", id)
-		_ = lifecycle.Event(ctx, r.db.Pool, id, nil, "error", lifecycle.Paused,
-			"Paused automatically: wallet balance exhausted. Top up and resume to continue.")
-	}
-	return rows.Err()
 }
 
 // drain moves a paused or stopped deployment's replicas toward STOPPED. A

@@ -6,7 +6,7 @@ import { useAuth } from "@/lib/auth";
 import { useData } from "@/lib/hooks";
 import { ago, dateTime } from "@/lib/format";
 import type { Host, Tier } from "@/lib/types";
-import { Button, Confirm, Field, Input, Notice, PageHeader, Panel, Select, StateBadge, TierBadge } from "@/components/ui";
+import { Button, Confirm, Notice, PageHeader, Panel, Select, StateBadge, TierBadge } from "@/components/ui";
 
 type FleetRow = { host: Host; online: boolean; owner_email?: string; gpus: number; active_jobs: number };
 type Incident = { id: string; host_name: string; kind: string; severity: string; action?: string; resolved: boolean; created_at: string };
@@ -17,7 +17,6 @@ export default function AdminPage() {
   const incidents = useData(me?.is_platform_admin ? () => api.get<{ incidents: Incident[] }>("/v1/admin/incidents") : null, [me?.is_platform_admin], 30_000);
   const [msg, setMsg] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const [ban, setBan] = useState<FleetRow | null>(null);
-  const [credit, setCredit] = useState({ org: "", amount: "", note: "" });
 
   if (!me?.is_platform_admin) return <Notice tone="error">This area is for platform operators.</Notice>;
 
@@ -98,51 +97,26 @@ export default function AdminPage() {
         </div>
       </Panel>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Panel title="Trust incidents" flush>
-          {(incidents.data?.incidents ?? []).length === 0 ? (
-            <p className="p-5 text-muted">No incidents.</p>
-          ) : (
-            <table className="table">
-              <tbody>
-                {incidents.data!.incidents.map((i) => (
-                  <tr key={i.id}>
-                    <td className="font-medium">{i.host_name}</td>
-                    <td>
-                      {i.kind} ({i.severity})
-                    </td>
-                    <td className="text-muted">{i.action ?? "open"}</td>
-                    <td className="text-right text-[13px] text-muted">{dateTime(i.created_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </Panel>
-
-        <Panel title="Manual credit" description="Credits or refunds an organisation's wallet in its own currency.">
-          <form
-            className="grid gap-3"
-            onSubmit={(e) => {
-              e.preventDefault();
-              run(() => api.post(`/v1/admin/orgs/${credit.org.trim()}/credit`, { amount: credit.amount, note: credit.note }, { idempotent: true }), "Credit issued.");
-            }}
-          >
-            <Field label="Organisation ID" htmlFor="c-org">
-              <Input id="c-org" value={credit.org} onChange={(e) => setCredit({ ...credit, org: e.target.value })} required />
-            </Field>
-            <Field label="Amount" htmlFor="c-amt">
-              <Input id="c-amt" type="number" min="0.01" step="0.01" value={credit.amount} onChange={(e) => setCredit({ ...credit, amount: e.target.value })} required />
-            </Field>
-            <Field label="Reason" htmlFor="c-note">
-              <Input id="c-note" value={credit.note} onChange={(e) => setCredit({ ...credit, note: e.target.value })} />
-            </Field>
-            <Button type="submit" className="justify-self-start">
-              Issue credit
-            </Button>
-          </form>
-        </Panel>
-      </div>
+      <Panel title="Trust incidents" flush>
+        {(incidents.data?.incidents ?? []).length === 0 ? (
+          <p className="p-5 text-muted">No incidents.</p>
+        ) : (
+          <table className="table">
+            <tbody>
+              {incidents.data!.incidents.map((i) => (
+                <tr key={i.id}>
+                  <td className="font-medium">{i.host_name}</td>
+                  <td>
+                    {i.kind} ({i.severity})
+                  </td>
+                  <td className="text-muted">{i.action ?? "open"}</td>
+                  <td className="text-right text-[13px] text-muted">{dateTime(i.created_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
 
       <Confirm
         open={!!ban}

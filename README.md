@@ -4,16 +4,16 @@
 
 Two sides, one platform:
 
-- **Customers** deploy open-source models (Llama, Qwen, Mistral, Gemma) and call them with the OpenAI SDK by changing only `base_url`. They pay per token from a prepaid rupee wallet.
-- **Hosts** connect GPUs, from data centres to college labs and personal laptops, with a single agent, and keep 75% of what customers pay for their GPU time.
+- **Customers** deploy open-source models (Llama, Qwen, Mistral, Gemma) and call them with the OpenAI SDK by changing only `base_url`.
+- **Hosts** connect GPUs, from data centres to college labs and personal laptops, with a single agent.
 
-Every machine sits in a trust tier that decides its SLA, what may run on it, and its price:
+Every machine sits in a trust tier that decides its SLA and what may run on it:
 
 | Tier | Who | Reliability |
 |---|---|---|
 | T1 | Data centres, enterprise servers | 99.5% SLA |
 | T2 | College labs, vetted workstations | 99% SLA |
-| T3 | Personal laptops and desktops | Spot: best effort, 55% of on-demand price |
+| T3 | Personal laptops and desktops | Spot: best effort, interruptible |
 
 ## Quick start
 
@@ -34,7 +34,7 @@ This does four things:
 
 Then open **http://localhost:8080**:
 
-1. Create an account. New Indian accounts get ₹500 of credit.
+1. Create an account.
 2. Connect this machine as a host:
    - Go to **Host → Add a machine → Create install command**.
    - Run the **From this repo** command in a new terminal and leave it running.
@@ -50,7 +50,7 @@ client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk_live_...")
 client.chat.completions.create(model="<deployment-name>", messages=[{"role": "user", "content": "Hi"}])
 ```
 
-To verify the whole flow automatically, run `scripts/smoke.sh`. It signs up, enrols two hosts, deploys, streams, checks billing, kills a host to test failover, and stops the deployment.
+To verify the whole flow automatically, run `scripts/smoke.sh`. It signs up, enrols two hosts, deploys, streams, checks the usage records, kills a host to test failover, and stops the deployment.
 
 ## Commands
 
@@ -74,19 +74,18 @@ Logs are written to `logs/<service>.log`.
 
 ```
 Customer ──► gateway :8080 ──► control-api    accounts, models, deployments, hosts, ops
-                  │        ──► billing-meter  wallet, usage, invoices, Razorpay top-ups
                   │        ──► trust-engine   host reputation
                   │        ──► web console    Next.js
                   └──────────► inference-gateway ──► coordinator ══gRPC══► host agent ──► Ollama / vLLM
                                (auth, routing,       (sessions,           (outbound-only,
-                                metering)             dispatch, tunnel)    runs the model)
+                                usage)                dispatch, tunnel)    runs the model)
 
-scheduler: places replicas on GPUs, backfills failures, pauses deployments on empty wallets
+scheduler: places replicas on GPUs and backfills failures
 ```
 
-1. **Deploy.** The control API records the deployment as `pending`. The scheduler scores online GPUs by reputation, price, locality and cache warmth, then reserves one. The coordinator sends the host a signed manifest. The agent pulls, loads and warms the model, and the deployment moves through *Scheduling → Pulling → Loading → Warming → Serving*.
+1. **Deploy.** The control API records the deployment as `pending`. The scheduler scores online GPUs by reputation, tier fit, locality and cache warmth, then reserves one. The coordinator sends the host a signed manifest. The agent pulls, loads and warms the model, and the deployment moves through *Scheduling → Pulling → Loading → Warming → Serving*.
 2. **Inference.** Hosts only ever connect *out*, so requests travel back to them over the agent's existing gRPC stream. That means no open ports, and it works behind home and campus NAT. Tokens stream straight through to the customer.
-3. **Billing.** Each request writes one usage event, charges the customer's wallet, and credits the host 75%, all in a single database transaction.
+3. **Usage.** Each request writes one usage event (tokens, duration, outcome). Dashboards, host activity and reputation are all derived from those events.
 4. **Failure.** A host that misses three heartbeats (15 s) goes offline, its replicas are failed, and the scheduler places new ones elsewhere. Requests retry on another replica before the first byte is sent.
 
 See [ADR-011](docs/adrs/011-inference-tunnel-and-control-loops.md) for why the design differs from the original M0 architecture.
@@ -96,8 +95,8 @@ See [ADR-011](docs/adrs/011-inference-tunnel-and-control-loops.md) for why the d
 ```
 agent/            Rust host agent: GPU detection, benchmark, runtime supervision, inference tunnel
 services/         Go services: gateway, control-api, scheduler, coordinator,
-                  inference-gateway, billing-meter, trust-engine
-internal/         Shared Go packages: auth, billing, placement, lifecycle, money, db, httpx
+                  inference-gateway, trust-engine
+internal/         Shared Go packages: auth, usage, placement, lifecycle, db, httpx
 proto/            Agent ↔ coordinator gRPC contract (generated code in gen/go)
 schema/           SQL migrations and seed data (catalogue, GPU rate card)
 web/console/      Next.js console: landing page, customer console, host console, ops
@@ -111,18 +110,18 @@ _archive/         Superseded code kept for reference (old frontends, standalone 
 ## Status
 
 **Working end to end:**
-- Sign-up and wallets
+- Sign-up and sign-in
 - Deploy wizard, placement and serving
 - Streaming inference through the OpenAI SDK
-- Per-token billing with host earnings
+- Per-request usage records (requests, tokens, latency) for customers and hosts
 - Failover
 - Host onboarding
 - Reputation scoring
 - Ops console
 
 **Not built yet:**
+- Billing: wallets, prices, invoices and host payouts. It was removed so the platform can be finished first; the database tables are still in the schema and the previous implementation is in git history (last present in commit `8f65a73`).
 - Firecracker job isolation
-- KYC and weekly host payouts
 - Google/GitHub sign-in
 - CLI and Python SDK
 - Autoscaling, scale-to-zero and burst-to-spot
@@ -130,7 +129,7 @@ _archive/         Superseded code kept for reference (old frontends, standalone 
 
 ## Configuration
 
-Every service has working development defaults. In production the services refuse to start without real secrets and TLS. See [`.env.example`](.env.example) for every setting, including Razorpay keys, platform admin emails and public URLs.
+Every service has working development defaults. In production the services refuse to start without real secrets and TLS. See [`.env.example`](.env.example) for every setting, including platform admin emails and public URLs.
 
 ## Production
 

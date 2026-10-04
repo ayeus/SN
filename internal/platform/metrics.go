@@ -16,7 +16,7 @@ import (
 
 // Application metrics exposed on /metrics by every service.
 // Previously /metrics served only the default Go collectors, so there was no
-// way to see request rates, latency, inference outcomes, or billing failures.
+// way to see request rates, latency, inference outcomes, or usage-record failures.
 var (
 	HTTPRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ayeusann_http_requests_total",
@@ -55,14 +55,9 @@ var (
 		Help: "Replicas currently passing health checks, by deployment.",
 	}, []string{"deployment_id"})
 
-	BillingEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "ayeusann_billing_events_total",
-		Help: "Usage events ingested by outcome (recorded|duplicate|rejected|error).",
-	}, []string{"outcome"})
-
-	BillingDebitFailures = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "ayeusann_billing_debit_failures_total",
-		Help: "Wallet debits that failed after a usage event was recorded. Alert on any increase.",
+	UsageRecordFailures = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ayeusann_usage_record_failures_total",
+		Help: "Served requests whose usage event could not be written. Alert on any increase.",
 	})
 
 	HostsConnected = promauto.NewGauge(prometheus.GaugeOpts{

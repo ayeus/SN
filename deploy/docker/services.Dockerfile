@@ -12,7 +12,7 @@ COPY internal ./internal
 COPY services ./services
 ARG TARGETOS TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    for svc in gateway control-api scheduler coordinator inference-gateway billing-meter trust-engine; do \
+    for svc in gateway control-api scheduler coordinator inference-gateway trust-engine; do \
       CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/$svc ./services/$svc || exit 1; \
     done
 

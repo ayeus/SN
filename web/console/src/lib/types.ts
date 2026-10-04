@@ -1,7 +1,5 @@
 // Shapes returned by the platform API.
 
-export type Money = { amount: string; currency?: string; micros: number };
-
 export type Tier = "t1" | "t2" | "t3";
 
 export type User = { id: string; email: string; name: string; email_verified: boolean };
@@ -10,9 +8,7 @@ export type Organization = {
   id: string;
   name: string;
   default_region: string;
-  billing_country?: string;
-  currency: string;
-  is_business: boolean;
+  country?: string;
 };
 
 export type Me = { user: User; organization: Organization; role: string; is_platform_admin: boolean };
@@ -25,9 +21,6 @@ export type Model = {
   license: string;
   min_vram_gb: number;
   tiers_allowed: Tier[];
-  price_in_per_1m: Money;
-  price_out_per_1m: Money;
-  price_per_hour_inr?: Money;
   is_byo: boolean;
   quantization_presets: { name: string; quantization: string; min_vram_gb: number; description: string }[];
   runtime_refs: Record<string, { model: string; quantization?: string; min_vram_gb?: number }>;
@@ -40,7 +33,6 @@ export type UsageSummary = {
   errors: number;
   input_tokens: number;
   output_tokens: number;
-  cost: Money;
 };
 
 export type DeploymentState =
@@ -136,30 +128,15 @@ export type HostSummary = Host & {
   online: boolean;
   gpus: GPU[];
   active_jobs: number;
-  earnings_total: Money;
-  earnings_today: Money;
+  requests_total: number;
+  requests_today: number;
 };
 
-export type GpuSku = {
-  id: string;
-  gpu_model: string;
-  vram_gb: number;
-  tdp_watts: number;
-  tier: Tier;
-  is_spot: boolean;
-  price_per_hour_inr: Money;
-  price_per_hour_usd: Money;
-  online_gpus: number;
-  free_gpus: number;
-  availability: number;
-};
+export type WorkCount = { requests: number; tokens: number };
 
-export type Pricing = {
-  price_currency: string;
-  fx_from_usd: Record<string, string>;
-  host_share_percent: number;
-  spot_price_percent: number;
-  gpu_skus: GpuSku[];
+export type HostActivity = {
+  summary: { today: WorkCount; month_to_date: WorkCount; lifetime: WorkCount };
+  daily: { date: string; requests: number; tokens: number }[];
 };
 
 export type NetworkStats = {
@@ -167,6 +144,7 @@ export type NetworkStats = {
   gpus_online: number;
   vram_gb_online: number;
   gpus_by_tier: Record<Tier, number>;
+  gpus_free_by_tier: Record<Tier, number>;
   gpus_by_region: { region: string; gpus: number }[];
   deployments_serving: number;
   requests_24h: number;
@@ -174,24 +152,3 @@ export type NetworkStats = {
 };
 
 export type Region = { code: string; name: string; country: string };
-
-export type Wallet = {
-  balance: Money;
-  currency: string;
-  credit_limit: Money;
-  low_balance_threshold: Money;
-  low_balance: boolean;
-  spend_24h: Money;
-  spend_30d: Money;
-  fx_from_usd: string;
-  topup: { razorpay: boolean; test_credit: boolean; key_id: string };
-};
-
-export type LedgerEntry = {
-  entry_id: string;
-  delta: Money;
-  balance_after: Money;
-  kind: string;
-  description?: string;
-  created_at: string;
-};

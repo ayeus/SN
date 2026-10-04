@@ -11,7 +11,6 @@ import (
 	"github.com/ayeus/ayeusann/internal/auth"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/httpx"
-	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -20,7 +19,6 @@ type API struct {
 	db          *db.Client
 	tm          *auth.TokenManager
 	revocations auth.RevocationStore
-	ledger      *db.LedgerService
 	log         *slog.Logger
 
 	publicURL            string // gateway base URL shown to customers
@@ -28,7 +26,6 @@ type API struct {
 	inferenceHost        string // optional {dep-id}.<host> endpoints (SRS FR-22)
 	heartbeatTimeout     time.Duration
 	platformAdmins       map[string]bool
-	signupCredit         money.Amount // in its own currency; converted per org
 
 	mailer       Mailer          // nil when email cannot be sent
 	loginLimiter *attemptLimiter // failed sign-ins per address+email
@@ -42,7 +39,6 @@ type Config struct {
 	InferenceHost        string
 	HeartbeatTimeout     time.Duration
 	PlatformAdminEmails  []string
-	SignupCredit         money.Amount
 }
 
 // NewAPI wires the control plane.
@@ -58,14 +54,12 @@ func NewAPI(database *db.Client, tm *auth.TokenManager, rev auth.RevocationStore
 		db:                   database,
 		tm:                   tm,
 		revocations:          rev,
-		ledger:               db.NewLedgerService(database),
 		log:                  log,
 		publicURL:            strings.TrimRight(cfg.PublicURL, "/"),
 		coordinatorPublicURL: cfg.CoordinatorPublicURL,
 		inferenceHost:        cfg.InferenceHost,
 		heartbeatTimeout:     cfg.HeartbeatTimeout,
 		platformAdmins:       admins,
-		signupCredit:         cfg.SignupCredit,
 		loginLimiter:         newAttemptLimiter(10, 10*time.Minute),
 		resetLimiter:         newAttemptLimiter(5, time.Hour),
 	}

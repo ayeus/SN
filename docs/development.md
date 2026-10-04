@@ -31,8 +31,7 @@ No `.env` is needed: every service has development defaults. Copy
 | control-api | 8081 | Accounts, models, deployments, hosts, ops |
 | scheduler | 8082 | Places replicas on GPUs |
 | coordinator | 8083, gRPC 50051 | Agent sessions, manifests, inference tunnel |
-| inference-gateway | 8085 | OpenAI-compatible API, key auth, metering |
-| billing-meter | 8086 | Wallet, usage, invoices, top-ups |
+| inference-gateway | 8085 | OpenAI-compatible API, key auth, usage records |
 | trust-engine | 8087 | Host reputation |
 | web console | 3000 | Next.js dev server, reached through the gateway |
 
@@ -79,7 +78,7 @@ scripts/smoke.sh    # end to end against a running `make dev` and Ollama
 ```
 
 `scripts/smoke.sh` signs up, enrols two hosts, deploys, streams a chat, checks
-billing, kills a host to test failover, and stops the deployment.
+the usage records, kills a host to test failover, and stops the deployment.
 
 Go integration tests skip when the test database is unreachable. Set
 `SN_REQUIRE_DB=1` to make them fail instead, as CI does.

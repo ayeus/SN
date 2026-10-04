@@ -48,9 +48,8 @@ function SignupForm() {
           setError("");
           setFields({});
           try {
-            const credit = await signup(form);
-            const dest = host ? "/app/hosts/new" : "/app/models";
-            router.replace(`${dest}?welcome=${encodeURIComponent(credit ?? "none")}`);
+            await signup(form);
+            router.replace(host ? "/app/hosts/new" : "/app/models");
           } catch (err) {
             if (err instanceof ApiError) {
               setFields(err.fields);
@@ -85,7 +84,7 @@ function SignupForm() {
             aria-invalid={!!fields.password}
           />
         </Field>
-        <Field label="Billing country" htmlFor="country" hint="Sets your wallet currency and nearest region. India bills in rupees with GST.">
+        <Field label="Country" htmlFor="country" hint="Sets the region your deployments start in. You can change it per deployment.">
           <Select id="country" value={form.country} onChange={set("country")}>
             {COUNTRIES.map(([code, name]) => (
               <option key={code} value={code}>
@@ -97,7 +96,6 @@ function SignupForm() {
         <Button type="submit" loading={busy} className="mt-2">
           Create account
         </Button>
-        <p className="text-[13px] text-muted">New accounts in India get ₹500 of credit. No card needed.</p>
       </form>
     </AuthCard>
   );

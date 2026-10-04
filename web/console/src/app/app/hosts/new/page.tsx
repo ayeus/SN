@@ -6,9 +6,8 @@ import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useData } from "@/lib/hooks";
 import { TIERS } from "@/lib/format";
-import type { HostSummary, Pricing, Region, Tier } from "@/lib/types";
+import type { HostSummary, Region, Tier } from "@/lib/types";
 import { Button, ButtonLink, CodeBlock, Field, Notice, PageHeader, Panel, Select, StateBadge, TierBadge, cx } from "@/components/ui";
-import { EarningsCalculator } from "@/components/EarningsCalculator";
 
 type Issued = {
   registration_token: string;
@@ -20,7 +19,7 @@ type Issued = {
 };
 
 const TIER_HELP: Record<Tier, string> = {
-  t3: "A personal laptop or desktop. Serves interruptible spot work on public models. You can pause it whenever you need the machine.",
+  t3: "A personal laptop or desktop. Serves interruptible work on public models. You can pause it whenever you need the machine.",
   t2: "A college lab machine or dedicated workstation with at least a 16 GB GPU. Starts with a 7-day probation, then takes production work.",
   t1: "A data-centre node. Onboarded with our team: site audit, contract and network setup.",
 };
@@ -28,7 +27,6 @@ const TIER_HELP: Record<Tier, string> = {
 export default function AddMachinePage() {
   const { me } = useAuth();
   const regions = useData(() => api.get<{ regions: Region[] }>("/v1/regions", false), []);
-  const pricing = useData(() => api.get<Pricing>("/v1/pricing", false), []);
   const [tier, setTier] = useState<Tier>("t3");
   const [region, setRegion] = useState("IN-SOUTH");
   const [issued, setIssued] = useState<Issued | null>(null);
@@ -190,10 +188,7 @@ export default function AddMachinePage() {
         </div>
       )}
 
-      <Panel title="What will it earn?" description="Based on the published rate card. You keep your share of every hour customers use your GPU.">
-        {pricing.data ? <EarningsCalculator pricing={pricing.data} /> : <p className="text-muted">Loading rate card…</p>}
-      </Panel>
-      <p className="mt-6 text-[13px] text-muted">
+      <p className="text-[13px] text-muted">
         Running several machines? <Link href="/app/hosts" className="underline">See all your machines</Link>.
       </p>
     </>

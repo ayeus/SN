@@ -63,9 +63,6 @@ export default function SettingsPage() {
               ))}
             </Select>
           </Field>
-          <Field label="Billing currency" htmlFor="org-currency" hint="Set from your billing country when the account was created.">
-            <Input id="org-currency" value={me.organization.currency} disabled />
-          </Field>
           {isAdmin && (
             <Button type="submit" loading={busy} className="justify-self-start">
               Save changes

@@ -131,3 +131,11 @@ func (c *Client) execTxOnce(ctx context.Context, fn func(tx pgx.Tx) error) error
 
 	return nil
 }
+
+// Querier is the subset of pgx shared by a pool and a transaction, so helpers
+// can run either standalone or inside a caller's transaction.
+type Querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}

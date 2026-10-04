@@ -38,7 +38,7 @@ func setup(t *testing.T) http.Handler {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "install.sh"), []byte("#!/bin/sh\necho install\n"), 0o644)
 	h := NewHandler(Upstreams{
-		ControlAPI: mk("control"), Inference: mk("inference"), Billing: mk("billing"),
+		ControlAPI: mk("control"), Inference: mk("inference"),
 		Trust: mk("trust"), Web: mk("web"), InstallDir: dir, DownloadsDir: dir,
 		CORSOrigins: []string{"http://localhost:3000"},
 	})
@@ -74,14 +74,9 @@ func TestRouting(t *testing.T) {
 		{"GET", "/v1/models", []string{"X-API-Key", "sk_live_abcd1234"}, "inference"},
 		{"GET", "/v1/models", []string{"Authorization", "Bearer eyJhbGciOi"}, "control"},
 		{"GET", "/v1/models", nil, "control"},
-		{"GET", "/v1/billing/wallet", nil, "billing"},
-		{"POST", "/v1/billing/topup", nil, "billing"},
-		{"GET", "/v1/usage", nil, "billing"},
-		{"GET", "/v1/invoices", nil, "billing"},
-		{"GET", "/v1/invoices/abc", nil, "billing"},
 		{"GET", "/v1/reputation/abc", nil, "trust"},
 		{"POST", "/v1/deployments", nil, "control"},
-		{"GET", "/v1/hosts/abc/earnings", nil, "control"},
+		{"GET", "/v1/hosts/abc/activity", nil, "control"},
 		{"GET", "/", nil, "web"},
 		{"GET", "/app/deployments", nil, "web"},
 	}
@@ -169,7 +164,7 @@ func TestForwardedForIsKeptOnlyBehindATrustedProxy(t *testing.T) {
 		{true, "203.0.113.7, 192.0.2.1"},
 		{false, "192.0.2.1"},
 	} {
-		h := NewHandler(Upstreams{ControlAPI: u, Inference: u, Billing: u, Trust: u, TrustProxy: tc.trust})
+		h := NewHandler(Upstreams{ControlAPI: u, Inference: u, Trust: u, TrustProxy: tc.trust})
 		route(h, "GET", "/v1/deployments", "X-Forwarded-For", "203.0.113.7")
 		if got := <-seen; got != tc.want {
 			t.Fatalf("trust=%v: upstream saw X-Forwarded-For %q, want %q", tc.trust, got, tc.want)
@@ -204,7 +199,7 @@ func TestWebSocketUpgradeThroughGateway(t *testing.T) {
 	api, _ := url.Parse("http://127.0.0.1:1")
 
 	h := platform.MetricsMiddleware("gateway", NewHandler(Upstreams{
-		ControlAPI: api, Inference: api, Billing: api, Trust: api, Web: web,
+		ControlAPI: api, Inference: api, Trust: api, Web: web,
 	}))
 	gw := httptest.NewServer(h)
 	defer gw.Close()

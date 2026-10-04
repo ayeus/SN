@@ -41,7 +41,6 @@ x-env: &env
   SCHEDULER_URL: http://scheduler:8082
   COORDINATOR_URL: http://coordinator:8083
   INFERENCE_GATEWAY_URL: http://inference-gateway:8085
-  BILLING_METER_URL: http://billing-meter:8086
   TRUST_ENGINE_URL: http://trust-engine:8087
   WEB_URL: http://console:3000
 
@@ -140,7 +139,6 @@ services:
     environment:
       <<: *env
       PLATFORM_ADMIN_EMAILS: ${PLATFORM_ADMIN_EMAILS:-}
-      SIGNUP_CREDIT: ${SIGNUP_CREDIT:-500 INR}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
@@ -176,18 +174,6 @@ services:
     healthcheck:
       <<: *health
       test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8085/readyz"]
-
-  billing-meter:
-    <<: *service
-    command: billing-meter
-    environment:
-      <<: *env
-      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
-      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
-      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
-    healthcheck:
-      <<: *health
-      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8086/readyz"]
 
   trust-engine:
     <<: *service

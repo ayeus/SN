@@ -18,15 +18,14 @@ import (
 var ErrInvalidServiceToken = errors.New("auth: invalid service token")
 
 // Internal service identities. These name the caller in a signed header so that
-// the billing meter can distinguish "the inference gateway reported usage" from
-// "someone on the network posted a usage event".
+// the coordinator can distinguish "the inference gateway sent this request"
+// from "someone on the network posted to the tunnel".
 const (
 	ServiceInferenceGateway = "inference-gateway"
 	ServiceRouter           = "router"
 	ServiceControlAPI       = "control-api"
 	ServiceScheduler        = "scheduler"
 	ServiceCoordinator      = "coordinator"
-	ServiceBillingMeter     = "billing-meter"
 	ServiceTrustEngine      = "trust-engine"
 )
 

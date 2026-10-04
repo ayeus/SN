@@ -9,12 +9,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/auth"
 	"github.com/ayeus/ayeusann/internal/httpx"
-	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/ayeus/ayeusann/internal/platform"
 )
 
@@ -25,10 +23,6 @@ func main() {
 	jwtSecret, err := platform.JWTSecret()
 	if err != nil {
 		log.Fatalf("configuration error: %v", err)
-	}
-	signupCredit, err := parseCredit(platform.Env("SIGNUP_CREDIT", "500 INR"))
-	if err != nil {
-		log.Fatalf("configuration error: SIGNUP_CREDIT: %v", err)
 	}
 
 	ctx := context.Background()
@@ -49,7 +43,6 @@ func main() {
 		InferenceHost:        platform.Env("INFERENCE_HOST", ""),
 		HeartbeatTimeout:     platform.HeartbeatTimeout(),
 		PlatformAdminEmails:  httpx.SplitList(platform.Env("PLATFORM_ADMIN_EMAILS", "")),
-		SignupCredit:         signupCredit,
 	})
 
 	srv, err := platform.NewServer(platform.ServiceConfig{Name: "control-api", Version: "0.3.0", Port: port})
@@ -61,19 +54,6 @@ func main() {
 	srv.SetReady()
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server error: %v", err)
-	}
-}
-
-// parseCredit reads "500 INR" or "6 USD". "0" disables the grant.
-func parseCredit(s string) (money.Amount, error) {
-	parts := strings.Fields(s)
-	switch len(parts) {
-	case 1:
-		return money.Parse(parts[0], "INR")
-	case 2:
-		return money.Parse(parts[0], strings.ToUpper(parts[1]))
-	default:
-		return money.Amount{}, errBadAction(`expected "<amount> <currency>", e.g. "500 INR"`)
 	}
 }
 

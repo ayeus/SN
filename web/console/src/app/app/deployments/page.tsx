@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api } from "@/lib/api";
 import { useData } from "@/lib/hooks";
-import { ago, money, number } from "@/lib/format";
+import { ago, compact, number } from "@/lib/format";
 import type { Deployment } from "@/lib/types";
 import { ButtonLink, Empty, Notice, PageHeader, Panel, Skeleton, StateBadge, TierBadge } from "@/components/ui";
 
@@ -56,7 +56,7 @@ export default function DeploymentsPage() {
                   <th>Where</th>
                   <th className="text-right">Replicas</th>
                   <th className="text-right">Requests today</th>
-                  <th className="text-right">Cost today</th>
+                  <th className="text-right">Tokens today</th>
                   <th className="text-right">Created</th>
                 </tr>
               </thead>
@@ -81,7 +81,7 @@ export default function DeploymentsPage() {
                       {d.replicas_serving}/{Math.max(d.min_replicas, 1)}
                     </td>
                     <td className="text-right">{number(d.usage_24h?.requests ?? 0)}</td>
-                    <td className="text-right">{money(d.usage_24h?.cost)}</td>
+                    <td className="text-right">{compact((d.usage_24h?.input_tokens ?? 0) + (d.usage_24h?.output_tokens ?? 0))}</td>
                     <td className="text-right text-muted">{ago(d.created_at)}</td>
                   </tr>
                 ))}

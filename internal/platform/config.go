@@ -10,8 +10,8 @@ import (
 
 // Development defaults. Every service reads them through the helpers below, so
 // services started without a .env agree with each other. Before this, the
-// control-api and scheduler defaulted to one internal secret while the router,
-// inference-gateway and billing-meter defaulted to another, so every signed
+// control-api and scheduler defaulted to one internal secret while the router
+// and inference-gateway defaulted to another, so every signed
 // service-to-service call failed under `make dev`. RequireSecret refuses both
 // values outside dev/test.
 const (
@@ -65,7 +65,6 @@ func ControlAPIURL() string       { return Env("CONTROL_API_URL", "http://localh
 func SchedulerURL() string        { return Env("SCHEDULER_URL", "http://localhost:8082") }
 func CoordinatorURL() string      { return Env("COORDINATOR_URL", "http://localhost:8083") }
 func InferenceGatewayURL() string { return Env("INFERENCE_GATEWAY_URL", "http://localhost:8085") }
-func BillingMeterURL() string     { return Env("BILLING_METER_URL", "http://localhost:8086") }
 func TrustEngineURL() string      { return Env("TRUST_ENGINE_URL", "http://localhost:8087") }
 func WebURL() string              { return Env("WEB_URL", "http://localhost:3000") }
 

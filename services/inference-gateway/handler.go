@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/auth"
-	"github.com/ayeus/ayeusann/internal/billing"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/platform"
+	"github.com/ayeus/ayeusann/internal/usage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -52,7 +52,6 @@ type target struct {
 // Gateway serves the OpenAI-compatible inference API (SRS FR-30, IR-2).
 type Gateway struct {
 	db             *db.Client
-	ledger         *db.LedgerService
 	tm             *auth.TokenManager
 	revocations    auth.RevocationStore
 	limiter        *RateLimiter
@@ -238,19 +237,6 @@ func (g *Gateway) HandleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Admission control: a request starts only if the wallet can pay for it.
-	ok, _, err := g.ledger.HasSpendableBalance(r.Context(), p.OrgID)
-	if err != nil {
-		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "internal_error", "failed to check wallet balance")
-		return
-	}
-	if !ok {
-		platform.InferenceRequestsTotal.WithLabelValues(tgt.ModelName, tgt.Tier, "rejected").Inc()
-		writeOpenAIError(w, http.StatusPaymentRequired, "insufficient_quota", "insufficient_quota",
-			"Your wallet balance is exhausted. Top up in the console to continue.")
-		return
-	}
-
 	cands, err := g.router.candidates(r.Context(), tgt.ID)
 	if err != nil {
 		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "internal_error", "failed to discover replicas")
@@ -326,7 +312,7 @@ func (g *Gateway) tunnel(ctx context.Context, requestID, replicaID, path string,
 //
 // It also counts the content deltas of a stream as they pass. Runtimes emit one
 // delta per token, so if the client disconnects before the final usage report
-// arrives the request can still be billed for what was generated.
+// arrives the request is still recorded with what was generated.
 func (g *Gateway) relay(w http.ResponseWriter, resp *http.Response) (int, int) {
 	defer resp.Body.Close()
 	for _, h := range []string{"Content-Type", "Cache-Control"} {
@@ -410,22 +396,22 @@ func estimatePromptTokens(body []byte) int {
 }
 
 // meter records the request. It runs detached from the client's context so a
-// client hanging up after the last token does not skip billing.
+// client hanging up after the last token does not skip the record.
 func (g *Gateway) meter(r *http.Request, requestID string, p *principal, tgt *target, rep replica, resp *http.Response, status int, start time.Time, streamed, promptEstimate int) {
 	prompt, _ := strconv.Atoi(resp.Trailer.Get(trailerPromptTokens))
 	completion, _ := strconv.Atoi(resp.Trailer.Get(trailerCompletionTokens))
 	upstreamErr := resp.Trailer.Get(trailerError)
 
-	outcome := billing.StatusSuccess
+	outcome := usage.StatusSuccess
 	switch {
 	case status == 499:
-		outcome = billing.StatusCancelled
+		outcome = usage.StatusCancelled
 	case status >= 400 || upstreamErr != "":
-		outcome = billing.StatusError
+		outcome = usage.StatusError
 	}
-	// A cancelled stream never delivers its usage trailer. Bill the tokens that
-	// were actually streamed rather than nothing.
-	if outcome == billing.StatusCancelled && completion == 0 && streamed > 0 {
+	// A cancelled stream never delivers its usage trailer. Record the tokens
+	// that were actually streamed rather than nothing.
+	if outcome == usage.StatusCancelled && completion == 0 && streamed > 0 {
 		completion = streamed
 		if prompt == 0 {
 			prompt = promptEstimate
@@ -435,7 +421,7 @@ func (g *Gateway) meter(r *http.Request, requestID string, p *principal, tgt *ta
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 	defer cancel()
-	res, err := billing.RecordUsage(ctx, g.db, billing.UsageInput{
+	if _, err := usage.Record(ctx, g.db, usage.Event{
 		RequestID:    requestID,
 		OrgID:        p.OrgID,
 		DeploymentID: tgt.ID,
@@ -443,26 +429,23 @@ func (g *Gateway) meter(r *http.Request, requestID string, p *principal, tgt *ta
 		HostID:       rep.HostID,
 		ModelID:      tgt.ModelID,
 		Tier:         rep.HostTier,
-		GPUModel:     rep.GPUModel,
 		InputTokens:  prompt,
 		OutputTokens: completion,
 		GPUSeconds:   elapsed.Seconds(),
 		DurationMs:   int(elapsed.Milliseconds()),
 		Status:       outcome,
-	})
-	if err != nil {
-		platform.BillingDebitFailures.Inc()
+	}); err != nil {
+		platform.UsageRecordFailures.Inc()
 		g.log.Error("failed to record usage", "request_id", requestID, "err", err)
 		return
 	}
 
-	platform.InferenceRequestsTotal.WithLabelValues(tgt.ModelName, rep.HostTier, map[bool]string{true: "success", false: "error"}[outcome == billing.StatusSuccess]).Inc()
+	platform.InferenceRequestsTotal.WithLabelValues(tgt.ModelName, rep.HostTier, map[bool]string{true: "success", false: "error"}[outcome == usage.StatusSuccess]).Inc()
 	platform.InferenceTokensTotal.WithLabelValues(tgt.ModelName, "input").Add(float64(prompt))
 	platform.InferenceTokensTotal.WithLabelValues(tgt.ModelName, "output").Add(float64(completion))
 	platform.InferenceLatency.WithLabelValues(tgt.ModelName, rep.HostTier).Observe(elapsed.Seconds())
 	g.log.Info("inference served", "request_id", requestID, "deployment_id", tgt.ID, "replica_id", rep.ID,
-		"status", outcome, "prompt_tokens", prompt, "completion_tokens", completion,
-		"charge", res.Charge.String(), "currency", res.Charge.Currency(), "ms", elapsed.Milliseconds())
+		"status", outcome, "prompt_tokens", prompt, "completion_tokens", completion, "ms", elapsed.Milliseconds())
 }
 
 // ─── /v1/models ───────────────────────────────────────────────

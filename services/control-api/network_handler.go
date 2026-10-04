@@ -3,9 +3,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-
-	"github.com/ayeus/ayeusann/internal/billing"
-	"github.com/ayeus/ayeusann/internal/money"
 )
 
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
@@ -38,73 +35,6 @@ func (a *API) HandleRegions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"regions": out})
 }
 
-// HandlePricing publishes everything the UI needs to show prices, so no price
-// or policy is duplicated in frontend code: the GPU rate card with live
-// availability (PRD §9, F-3), FX rates, the host revenue share and the spot
-// discount.
-func (a *API) HandlePricing(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	rows, err := a.db.Pool.Query(ctx, `
-		SELECT s.id, s.gpu_model, s.vram_gb, s.tdp_watts, s.tier, s.price_per_hour_inr, s.price_per_hour_usd, s.is_spot,
-		       COUNT(g.id) FILTER (WHERE g.id IS NOT NULL),
-		       COUNT(g.id) FILTER (WHERE g.status = 'available' AND g.replica_id IS NULL)
-		FROM gpu_skus s
-		LEFT JOIN hosts h ON h.tier = s.tier AND h.deleted_at IS NULL AND h.status IN ('active', 'probation')
-		     AND NOT h.paused AND h.last_heartbeat_at >= NOW() - ($1 * INTERVAL '1 second')
-		LEFT JOIN gpus g ON g.host_id = h.id AND g.model ILIKE s.match_pattern
-		WHERE s.active
-		GROUP BY s.id ORDER BY s.display_order;
-	`, int(a.heartbeatTimeout.Seconds()))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to read rate card")
-		return
-	}
-	defer rows.Close()
-	skus := []map[string]any{}
-	for rows.Next() {
-		var id, model, tier string
-		var vram, tdp int
-		var inr, usd money.Amount
-		var spot bool
-		var online, free int
-		if err := rows.Scan(&id, &model, &vram, &tdp, &tier, &inr, &usd, &spot, &online, &free); err != nil {
-			continue
-		}
-		availability := 0.0
-		if online > 0 {
-			availability = float64(free) / float64(online)
-		}
-		skus = append(skus, map[string]any{
-			"id": id, "gpu_model": model, "vram_gb": vram, "tdp_watts": tdp, "tier": tier, "is_spot": spot,
-			"price_per_hour_inr": money.FromMicros(inr.Micros(), "INR"),
-			"price_per_hour_usd": money.FromMicros(usd.Micros(), "USD"),
-			"online_gpus":        online, "free_gpus": free, "availability": availability,
-		})
-	}
-	rows.Close()
-
-	fx := map[string]string{}
-	frows, err := a.db.Pool.Query(ctx, `SELECT quote, rate::TEXT, updated_at FROM fx_rates WHERE base = 'USD';`)
-	if err == nil {
-		for frows.Next() {
-			var q, rate string
-			var at any
-			if err := frows.Scan(&q, &rate, &at); err == nil {
-				fx[q] = rate
-			}
-		}
-		frows.Close()
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"price_currency":     billing.PriceCurrency,
-		"fx_from_usd":        fx,
-		"host_share_percent": billing.HostSharePercent,
-		"spot_price_percent": billing.SpotPricePercent,
-		"gpu_skus":           skus,
-	})
-}
-
 // HandleNetworkStats reports aggregate supply for the public site. It exposes
 // counts only: no host ids, addresses, fingerprints or owners (the old public
 // hosts endpoint leaked all of those).
@@ -126,9 +56,14 @@ func (a *API) HandleNetworkStats(w http.ResponseWriter, r *http.Request) {
 		FROM usage_events WHERE ts >= NOW() - INTERVAL '24 hours' AND status = 'success';
 	`).Scan(&requests24h, &tokens24h)
 
+	// Free GPUs are the ones a new deployment could be placed on right now
+	// (the deploy wizard shows "N of M free" per tier).
 	byTier := map[string]int{"t1": 0, "t2": 0, "t3": 0}
+	freeByTier := map[string]int{"t1": 0, "t2": 0, "t3": 0}
 	rows, err := a.db.Pool.Query(ctx, `
-		SELECT h.tier, COUNT(g.id) FROM hosts h JOIN gpus g ON g.host_id = h.id
+		SELECT h.tier, COUNT(g.id),
+		       COUNT(g.id) FILTER (WHERE g.status = 'available' AND g.replica_id IS NULL AND NOT h.paused AND h.status <> 'draining')
+		FROM hosts h JOIN gpus g ON g.host_id = h.id
 		WHERE h.deleted_at IS NULL AND h.status IN ('active', 'probation', 'draining')
 		  AND h.last_heartbeat_at >= NOW() - ($1 * INTERVAL '1 second')
 		GROUP BY h.tier;
@@ -136,9 +71,9 @@ func (a *API) HandleNetworkStats(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		for rows.Next() {
 			var t string
-			var n int
-			if err := rows.Scan(&t, &n); err == nil {
-				byTier[t] = n
+			var n, free int
+			if err := rows.Scan(&t, &n, &free); err == nil {
+				byTier[t], freeByTier[t] = n, free
 			}
 		}
 		rows.Close()
@@ -167,6 +102,7 @@ func (a *API) HandleNetworkStats(w http.ResponseWriter, r *http.Request) {
 		"gpus_online":         gpusOnline,
 		"vram_gb_online":      vramOnline,
 		"gpus_by_tier":        byTier,
+		"gpus_free_by_tier":   freeByTier,
 		"gpus_by_region":      byRegion,
 		"deployments_serving": deploymentsServing,
 		"requests_24h":        requests24h,

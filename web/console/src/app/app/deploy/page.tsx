@@ -5,8 +5,8 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useData } from "@/lib/hooks";
-import { convert, money, TIERS } from "@/lib/format";
-import type { Deployment, Model, Pricing, Region, Tier, Wallet } from "@/lib/types";
+import { TIERS } from "@/lib/format";
+import type { Deployment, Model, NetworkStats, Region, Tier } from "@/lib/types";
 import { Button, Field, Input, Notice, PageHeader, Panel, Select, TierBadge, cx } from "@/components/ui";
 
 type Capacity = { region: string; online_gpus: number; tiers: { tier: Tier; allowed: boolean; eligible_hosts: number; message?: string }[] };
@@ -19,12 +19,10 @@ function Wizard() {
   const router = useRouter();
   const params = useSearchParams();
   const { me } = useAuth();
-  const currency = me?.organization.currency ?? "USD";
 
   const models = useData(() => api.get<{ models: Model[] }>("/v1/models"), []);
   const regions = useData(() => api.get<{ regions: Region[] }>("/v1/regions", false), []);
-  const pricing = useData(() => api.get<Pricing>("/v1/pricing", false), []);
-  const wallet = useData(() => api.get<Wallet>("/v1/billing/wallet"), []);
+  const network = useData(() => api.get<NetworkStats>("/v1/network/stats", false), [], 10_000);
 
   const [step, setStep] = useState(0);
   const [modelId, setModelId] = useState(params.get("model") ?? "");
@@ -50,29 +48,15 @@ function Wizard() {
   );
   const cap = capacity.data?.tiers.find((t) => t.tier === tier);
 
-  const rate = pricing.data?.fx_from_usd?.[currency];
-  const spotShare = (pricing.data?.spot_price_percent ?? 55) / 100;
-  const priceFor = (m: Model, t: Tier) => {
-    const f = t === "t3" ? spotShare : 1;
-    const conv = (p: Model["price_in_per_1m"]) => {
-      const c = rate ? convert(p, currency, rate) : p;
-      return { ...c, amount: String(Number(c.amount) * f) };
-    };
-    return { in: conv(m.price_in_per_1m), out: conv(m.price_out_per_1m) };
-  };
-
-  const tierStats = useMemo(() => {
-    const skus = pricing.data?.gpu_skus ?? [];
-    return (["t1", "t2", "t3"] as Tier[]).map((t) => {
-      const s = skus.filter((x) => x.tier === t);
-      return {
+  const tierStats = useMemo(
+    () =>
+      (["t1", "t2", "t3"] as Tier[]).map((t) => ({
         tier: t,
-        online: s.reduce((n, x) => n + x.online_gpus, 0),
-        free: s.reduce((n, x) => n + x.free_gpus, 0),
-        from: s.length ? Math.min(...s.map((x) => Number(x.price_per_hour_inr.amount))) : null,
-      };
-    });
-  }, [pricing.data]);
+        online: network.data?.gpus_by_tier?.[t] ?? 0,
+        free: network.data?.gpus_free_by_tier?.[t] ?? 0,
+      })),
+    [network.data],
+  );
 
   const canNext =
     (step === 0 && !!tier && !!region) ||
@@ -136,7 +120,7 @@ function Wizard() {
       )}
 
       {step === 0 && (
-        <Panel title="Choose where it runs" description="Higher tiers are more reliable; spot is cheapest and can be interrupted.">
+        <Panel title="Choose where it runs" description="Higher tiers are more reliable; spot runs on personal machines and can be interrupted.">
           <fieldset className="grid gap-3 md:grid-cols-3">
             <legend className="sr-only">Tier</legend>
             {tierStats.map((t) => {
@@ -156,7 +140,6 @@ function Wizard() {
                     <span className="font-semibold">
                       {TIERS[t.tier].short} {TIERS[t.tier].name}
                     </span>
-                    {t.from != null && <span className="text-[13px] text-muted">from ₹{t.from}/h</span>}
                   </div>
                   <span className="text-[13px] text-muted">{TIERS[t.tier].who}</span>
                   <span className="text-[13px]">{TIERS[t.tier].sla}</span>
@@ -205,7 +188,6 @@ function Wizard() {
           <ul className="divide-y divide-line">
             {(models.data?.models ?? []).map((m) => {
               const allowed = m.tiers_allowed.includes(tier);
-              const p = priceFor(m, tier);
               return (
                 <li key={m.id}>
                   <label className={cx("flex cursor-pointer items-center gap-4 px-5 py-4", !allowed && "cursor-not-allowed opacity-50", modelId === m.id && "bg-nil-soft")}>
@@ -216,10 +198,7 @@ function Wizard() {
                         {allowed ? `${m.params_b}B parameters, ${m.license}` : `Not available on ${TIERS[tier].short}; needs ${m.tiers_allowed.map((t) => TIERS[t].short).join(" or ")}`}
                       </div>
                     </div>
-                    <div className="text-right text-[13px]">
-                      <div>{money(p.out)} out</div>
-                      <div className="text-muted">{money(p.in)} in, per 1M</div>
-                    </div>
+                    <div className="text-right text-[13px] text-muted">{m.min_vram_gb} GB GPU</div>
                   </label>
                 </li>
               );
@@ -258,41 +237,11 @@ function Wizard() {
               <TierBadge tier={tier} long /> in {region}, {replicas} {replicas === 1 ? "replica" : "replicas"}
               {residentIN ? ", India-resident" : ""}
             </dd>
-            <dt className="text-muted">Wallet</dt>
-            <dd>{wallet.data ? money(wallet.data.balance, { balance: true }) : "-"}</dd>
+            <dt className="text-muted">Needs</dt>
+            <dd>A GPU with at least {model.min_vram_gb} GB of memory</dd>
           </dl>
-
-          <h3 className="mt-8 text-[14px] font-semibold">Price per 1M tokens</h3>
-          <div className="mt-3 overflow-x-auto">
-            <table className="table max-w-[560px]">
-              <thead>
-                <tr>
-                  <th />
-                  <th className="text-right">Input</th>
-                  <th className="text-right">Output</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[tier, ...(tier === "t3" ? (["t1"] as Tier[]) : (["t3"] as Tier[]))]
-                  .filter((t) => model.tiers_allowed.includes(t))
-                  .map((t) => {
-                    const p = priceFor(model, t);
-                    return (
-                      <tr key={t} className={t === tier ? "font-medium" : "text-muted"}>
-                        <td>
-                          {TIERS[t].short} {t === "t3" ? "spot" : "on-demand"}
-                          {t === tier ? " (your choice)" : ""}
-                        </td>
-                        <td className="text-right">{money(p.in)}</td>
-                        <td className="text-right">{money(p.out)}</td>
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-          </div>
-          <p className="mt-4 max-w-[64ch] text-[13px] text-muted">
-            You pay only for tokens processed. Deployments pause automatically if your wallet runs out.
+          <p className="mt-6 max-w-[64ch] text-[13px] text-muted">
+            You get an OpenAI-compatible endpoint and a one-time API key as soon as the deployment is created.
           </p>
         </Panel>
       )}

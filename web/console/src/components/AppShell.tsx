@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
+  Activity,
   Boxes,
-  CreditCard,
   Gauge,
   KeyRound,
   LayoutGrid,
@@ -16,42 +16,11 @@ import {
   Server,
   Settings,
   ShieldCheck,
-  Wallet as WalletIcon,
   X,
 } from "lucide-react";
 import { Logo } from "./Logo";
 import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
-import { money } from "@/lib/format";
-import { useData } from "@/lib/hooks";
-import type { Wallet } from "@/lib/types";
-import { Notice, cx } from "./ui";
-
-// Shown once after sign-up, on whichever page sign-up sent the user to.
-function WelcomeNotice() {
-  const welcome = useSearchParams().get("welcome");
-  const [dismissed, setDismissed] = useState(false);
-  if (!welcome || dismissed) return null;
-  return (
-    <Notice tone={welcome === "none" ? "warn" : "success"} className="mb-6 flex items-start justify-between gap-4">
-      {welcome === "none" ? (
-        <span>
-          Your account is ready. No welcome credit was added because too many accounts were created from this network
-          today.{" "}
-          <Link href="/app/billing" className="font-medium underline">
-            Add funds
-          </Link>{" "}
-          to deploy a model.
-        </span>
-      ) : (
-        <span>Your account is ready and {welcome} of credit is in your wallet.</span>
-      )}
-      <button onClick={() => setDismissed(true)} className="text-[13px] text-muted hover:text-ink" aria-label="Dismiss">
-        Dismiss
-      </button>
-    </Notice>
-  );
-}
+import { cx } from "./ui";
 
 type Item = { href: string; label: string; icon: React.ComponentType<{ size?: number }>; exact?: boolean };
 
@@ -61,13 +30,12 @@ const DEPLOY: Item[] = [
   { href: "/app/deployments", label: "Deployments", icon: Boxes },
   { href: "/app/playground", label: "Playground", icon: MessageSquare },
   { href: "/app/keys", label: "API keys", icon: KeyRound },
-  { href: "/app/billing", label: "Billing", icon: CreditCard },
 ];
 
 const HOST: Item[] = [
   { href: "/app/hosts", label: "Machines", icon: Server, exact: true },
   { href: "/app/hosts/new", label: "Add a machine", icon: PlusCircle },
-  { href: "/app/hosts/earnings", label: "Earnings", icon: WalletIcon },
+  { href: "/app/hosts/activity", label: "Activity", icon: Activity },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -76,7 +44,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const hostMode = pathname.startsWith("/app/hosts");
-  const wallet = useData(me ? () => api.get<Wallet>("/v1/billing/wallet") : null, [me?.organization.id], 30_000);
 
   useEffect(() => {
     if (!loading && !me) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
@@ -136,14 +103,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </ul>
 
       <div className="mt-auto flex flex-col gap-3">
-        {!hostMode && wallet.data && (
-          <Link href="/app/billing" className="rounded-lg border border-line px-3 py-2.5 hover:bg-surface-2">
-            <div className="text-[12px] text-muted">Wallet balance</div>
-            <div className={cx("text-[15px] font-semibold", wallet.data.low_balance && "text-danger")}>
-              {money(wallet.data.balance, { balance: true })}
-            </div>
-          </Link>
-        )}
         <ul className="flex flex-col gap-0.5">
           {me.is_platform_admin && (
             <li>
@@ -213,9 +172,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <main className="min-w-0 px-4 py-8 sm:px-8 lg:px-10">
         <div className="mx-auto max-w-[1180px]">
-          <Suspense>
-            <WelcomeNotice />
-          </Suspense>
           {children}
         </div>
       </main>

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"net"
 	"time"
-
-	"github.com/ayeus/ayeusann/internal/money"
 )
 
 // Role constants
@@ -90,35 +88,6 @@ const (
 	HostStatusBanned       = "banned"
 )
 
-// Ledger entry kinds
-const (
-	LedgerKindTopup        = "topup"
-	LedgerKindDebit        = "debit"
-	LedgerKindCredit       = "credit"
-	LedgerKindRefund       = "refund"
-	LedgerKindSignupCredit = "signup_credit"
-)
-
-// ─── 1. PriceBook ─────────────────────────────────────────────
-
-type PriceBook struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description *string   `json:"description,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-}
-
-type PriceBookEntry struct {
-	ID            string        `json:"id"`
-	PriceBookID   string        `json:"price_book_id"`
-	GpuModel      string        `json:"gpu_model"`
-	Tier          string        `json:"tier"`
-	PricePerHour  money.Amount  `json:"price_per_hour"`
-	PriceInPer1M  *money.Amount `json:"price_in_per_1m,omitempty"`
-	PriceOutPer1M *money.Amount `json:"price_out_per_1m,omitempty"`
-	CreatedAt     time.Time     `json:"created_at"`
-}
-
 // ─── 2. User ──────────────────────────────────────────────────
 
 type User struct {
@@ -137,22 +106,17 @@ type User struct {
 // ─── 3. Organization ──────────────────────────────────────────
 
 type Organization struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	GstinEnc      []byte  `json:"-"` // Column-encrypted
-	TaxIDEnc      []byte  `json:"-"` // Column-encrypted VAT/GST number
-	DefaultRegion string  `json:"default_region"`
-	PriceBookID   *string `json:"price_book_id,omitempty"`
-	// BillingCountry is ISO 3166-1 alpha-2 and drives tax treatment.
-	BillingCountry *string    `json:"billing_country,omitempty"`
-	Currency       string     `json:"currency"`
-	IsBusiness     bool       `json:"is_business"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	DefaultRegion string `json:"default_region"`
+	// Country is ISO 3166-1 alpha-2; it picks the default region at signup.
+	Country   *string    `json:"country,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
-// ─── 3b. Region & TaxJurisdiction ─────────────────────────────
+// ─── 3b. Region ───────────────────────────────────────────────
 
 type Region struct {
 	Code        string    `json:"code"`
@@ -161,22 +125,6 @@ type Region struct {
 	Continent   string    `json:"continent"`
 	Active      bool      `json:"active"`
 	CreatedAt   time.Time `json:"created_at"`
-}
-
-// TaxJurisdiction describes the indirect tax applied to a customer's invoices.
-// v1 hardcoded an 18% Indian GST on every invoice regardless of where the
-// customer was, which is wrong everywhere except India.
-type TaxJurisdiction struct {
-	CountryCode string `json:"country_code"`
-	TaxName     string `json:"tax_name"`
-	// Rate is a decimal string, e.g. "0.18". It is not a float because it is
-	// multiplied into invoice totals.
-	Rate money.Amount `json:"rate"`
-	// ReverseChargeEligible marks jurisdictions where a VAT-registered business
-	// customer accounts for the tax itself and is not charged.
-	ReverseChargeEligible bool      `json:"reverse_charge_eligible"`
-	Notes                 *string   `json:"notes,omitempty"`
-	EffectiveFrom         time.Time `json:"effective_from"`
 }
 
 // ─── 4. Membership ────────────────────────────────────────────
@@ -208,18 +156,13 @@ type ApiKey struct {
 // ─── 6. Model & ModelArtifact ─────────────────────────────────
 
 type Model struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Family       string   `json:"family"`
-	ParamsB      float32  `json:"params_b"`
-	License      string   `json:"license"`
-	MinVramGB    int      `json:"min_vram_gb"`
-	TiersAllowed []string `json:"tiers_allowed"`
-	// Prices are per 1M tokens in USD, held as exact decimals because they are
-	// multiplied by token counts to produce charges.
-	PriceInPer1M        money.Amount    `json:"price_in_per_1m"`
-	PriceOutPer1M       money.Amount    `json:"price_out_per_1m"`
-	PricePerHourINR     *money.Amount   `json:"price_per_hour_inr,omitempty"`
+	ID                  string          `json:"id"`
+	Name                string          `json:"name"`
+	Family              string          `json:"family"`
+	ParamsB             float32         `json:"params_b"`
+	License             string          `json:"license"`
+	MinVramGB           int             `json:"min_vram_gb"`
+	TiersAllowed        []string        `json:"tiers_allowed"`
 	IsBYO               bool            `json:"is_byo"`
 	QuantizationPresets json.RawMessage `json:"quantization_presets"`
 	// RuntimeRefs maps a serving runtime to the model id inside it.
@@ -365,98 +308,10 @@ type UsageEvent struct {
 	InputTokens  int    `json:"input_tokens"`
 	OutputTokens int    `json:"output_tokens"`
 	// GpuSeconds is a measurement, not currency, so a float is fine here.
-	GpuSeconds float64 `json:"gpu_seconds"`
-	Tier       string  `json:"tier"`
-	// AmountCustomer and AmountHost are exact decimals. They were float64, which
-	// drifts under accumulation and cannot be reconciled against the ledger.
-	AmountCustomer money.Amount `json:"amount_customer"`
-	AmountHost     money.Amount `json:"amount_host"`
-	Timestamp      time.Time    `json:"ts"`
-	Status         string       `json:"status"`
-}
-
-// ─── 11. Billing: WalletLedger, Invoice, PayoutBatch ──────────
-
-type WalletLedger struct {
-	EntryID      string       `json:"entry_id"`
-	OrgID        string       `json:"org_id"`
-	Delta        money.Amount `json:"delta"`         // Positive = credit, negative = debit
-	BalanceAfter money.Amount `json:"balance_after"` // Running balance
-	Kind         string       `json:"kind"`          // topup|debit|credit|refund|signup_credit
-	RefID        *string      `json:"ref_id,omitempty"`
-	Description  *string      `json:"description,omitempty"`
-	Currency     string       `json:"currency"`
-	CreatedAt    time.Time    `json:"created_at"`
-}
-
-type Invoice struct {
-	ID          string       `json:"id"`
-	OrgID       string       `json:"org_id"`
-	Number      string       `json:"number"`
-	PeriodStart time.Time    `json:"period_start"`
-	PeriodEnd   time.Time    `json:"period_end"`
-	Subtotal    money.Amount `json:"subtotal"`
-	// TaxAmount replaces GstAmount: the tax applied depends on the customer's
-	// jurisdiction, and is not always Indian GST.
-	TaxAmount money.Amount `json:"tax_amount"`
-	TaxName   string       `json:"tax_name"` // GST | VAT | Sales Tax | ...
-	TaxRate   string       `json:"tax_rate"` // decimal string, e.g. "0.18"
-	Total     money.Amount `json:"total"`
-	Currency  string       `json:"currency"`
-	// FxRate is the USD -> Currency rate recorded at invoice time, so a
-	// historical invoice always reproduces the same numbers.
-	FxRate        string        `json:"fx_rate"`
-	TaxCountry    *string       `json:"tax_country,omitempty"`
-	ReverseCharge bool          `json:"reverse_charge"`
-	Status        string        `json:"status"`
-	PdfURL        *string       `json:"pdf_url,omitempty"`
-	Lines         []InvoiceLine `json:"lines,omitempty"`
-	CreatedAt     time.Time     `json:"created_at"`
-}
-
-type InvoiceLine struct {
-	ID          string       `json:"id"`
-	InvoiceID   string       `json:"invoice_id"`
-	Description string       `json:"description"`
-	Quantity    float64      `json:"quantity"`
-	UnitPrice   money.Amount `json:"unit_price"`
-	Amount      money.Amount `json:"amount"`
-	CreatedAt   time.Time    `json:"created_at"`
-}
-
-type PayoutBatch struct {
-	ID        string       `json:"id"`
-	WeekStart time.Time    `json:"week_start"`
-	WeekEnd   time.Time    `json:"week_end"`
-	Gross     money.Amount `json:"gross"`
-	Tds       money.Amount `json:"tds"` // TDS 1% under Section 194-O (India only)
-	Net       money.Amount `json:"net"`
-	RzpxRef   *string      `json:"rzpx_ref,omitempty"`
-	Status    string       `json:"status"`
-	Lines     []PayoutLine `json:"lines,omitempty"`
-	CreatedAt time.Time    `json:"created_at"`
-}
-
-type PayoutLine struct {
-	ID             string       `json:"id"`
-	BatchID        string       `json:"batch_id"`
-	HostID         string       `json:"host_id"`
-	Gross          money.Amount `json:"gross"`
-	TdsAmount      money.Amount `json:"tds_amount"`
-	Net            money.Amount `json:"net"`
-	Status         string       `json:"status"`
-	RzpxTransferID *string      `json:"rzpx_transfer_id,omitempty"`
-	CreatedAt      time.Time    `json:"created_at"`
-}
-
-type TaxDoc struct {
-	ID          string    `json:"id"`
-	HostID      string    `json:"host_id"`
-	DocType     string    `json:"doc_type"` // form_16a | tds_certificate
-	PeriodStart time.Time `json:"period_start"`
-	PeriodEnd   time.Time `json:"period_end"`
-	PdfURL      *string   `json:"pdf_url,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	GpuSeconds float64   `json:"gpu_seconds"`
+	Tier       string    `json:"tier"`
+	Timestamp  time.Time `json:"ts"`
+	Status     string    `json:"status"`
 }
 
 // ─── 12. Trust & Operations ───────────────────────────────────

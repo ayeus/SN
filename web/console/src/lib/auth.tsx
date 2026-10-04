@@ -4,13 +4,13 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import { api, getSession, setSession } from "./api";
 import type { Me } from "./types";
 
-type AuthResponse = { access_token: string; refresh_token: string; promotional_credit?: string };
+type AuthResponse = { access_token: string; refresh_token: string };
 
 type AuthState = {
   me: Me | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  signup: (input: { name: string; email: string; password: string; country: string }) => Promise<string | undefined>;
+  signup: (input: { name: string; email: string; password: string; country: string }) => Promise<void>;
   logout: () => Promise<void>;
   reload: () => Promise<void>;
 };
@@ -57,7 +57,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const r = await api.post<AuthResponse>("/v1/auth/signup", input, { auth: false });
         setSession({ access: r.access_token, refresh: r.refresh_token });
         await reload();
-        return r.promotional_credit;
       },
       async logout() {
         const s = getSession();

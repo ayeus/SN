@@ -2,8 +2,8 @@
 //
 // Architecture §4: TLS termination, key auth, per-key rate limits — plus the
 // request router (replica selection, health, retries) embedded per ADR-011.
-// Requests reach hosts through the coordinator's tunnel; usage is metered in
-// the same transaction as the wallet debit (Architecture §9).
+// Requests reach hosts through the coordinator's tunnel; every request is
+// recorded as a usage event.
 package main
 
 import (
@@ -17,7 +17,6 @@ import (
 
 	"github.com/ayeus/ayeusann/internal/auth"
 	"github.com/ayeus/ayeusann/internal/config"
-	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/platform"
 )
 
@@ -65,7 +64,6 @@ func main() {
 
 	g := &Gateway{
 		db:             dbClient,
-		ledger:         db.NewLedgerService(dbClient),
 		tm:             tm,
 		revocations:    auth.NewPGRevocationStore(dbClient.Pool),
 		limiter:        limiter,

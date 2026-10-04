@@ -39,7 +39,6 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("GET /v1/models", optional(a.HandleListModels))
 	mux.Handle("GET /v1/models/{id}", optional(a.HandleGetModel))
 	mux.HandleFunc("GET /v1/regions", a.HandleRegions)
-	mux.HandleFunc("GET /v1/pricing", a.HandlePricing)
 	mux.HandleFunc("GET /v1/network/stats", a.HandleNetworkStats)
 
 	// ── Session and organisation ─────────────────────────────
@@ -65,17 +64,16 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("GET /v1/deployments/{id}/replicas", anyRole(a.HandleDeploymentReplicas))
 	mux.Handle("GET /v1/deployments/{id}/metrics", anyRole(a.HandleDeploymentMetrics))
 	mux.Handle("GET /v1/deployments/{id}/logs", anyRole(a.HandleDeploymentLogs))
+	mux.Handle("GET /v1/usage/daily", anyRole(a.HandleUsageDaily))
 
 	// ── Hosts (supply side) ──────────────────────────────────
 	mux.Handle("POST /v1/hosts/register-token", member(a.HandleIssueRegistrationToken))
 	mux.Handle("GET /v1/host-tokens/{id}", anyRole(a.HandleRegistrationTokenStatus))
 	mux.Handle("GET /v1/hosts", anyRole(a.HandleListHosts))
-	mux.Handle("GET /v1/hosts/earnings", anyRole(a.HandleAllHostEarnings))
+	mux.Handle("GET /v1/hosts/activity", anyRole(a.HandleAllHostActivity))
 	mux.Handle("GET /v1/hosts/{id}", anyRole(a.HandleGetHost))
-	mux.Handle("GET /v1/hosts/{id}/earnings", anyRole(a.HandleHostEarnings))
+	mux.Handle("GET /v1/hosts/{id}/activity", anyRole(a.HandleHostActivity))
 	mux.Handle("GET /v1/hosts/{id}/telemetry", anyRole(a.HandleHostTelemetry))
-	mux.Handle("GET /v1/hosts/{id}/payouts", anyRole(a.HandleHostPayouts))
-	mux.Handle("GET /v1/hosts/{id}/tax-docs", anyRole(a.HandleHostTaxDocs))
 	mux.Handle("PATCH /v1/hosts/{id}/controls", anyRole(a.HandleHostControls))
 	mux.Handle("DELETE /v1/hosts/{id}", anyRole(a.HandleDecommissionHost))
 
@@ -87,7 +85,6 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("POST /v1/admin/hosts/{id}/ban", admin(a.HandleAdminBanHost))
 	mux.Handle("POST /v1/admin/hosts/{id}/tier", admin(a.HandleAdminSetHostTier))
 	mux.Handle("POST /v1/admin/deployments/{id}/kill", admin(a.HandleAdminKillDeployment))
-	mux.Handle("POST /v1/admin/orgs/{id}/credit", admin(a.HandleAdminCredit))
 
 	return platformMetrics(mux)
 }

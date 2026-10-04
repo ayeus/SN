@@ -22,7 +22,7 @@ COMPOSE="deploy/compose/docker-compose.yml"
 PG_URL_BASE="postgres://ayeusann:ayeusann_dev@localhost:5433"
 DEV_DB="ayeusann_dev"
 TEST_DB="ayeusann_test"
-SERVICES=(control-api scheduler coordinator inference-gateway billing-meter trust-engine gateway)
+SERVICES=(control-api scheduler coordinator inference-gateway trust-engine gateway)
 
 # Shared development configuration. Every service reads the same values, which
 # is what makes signed service-to-service calls work.
@@ -34,7 +34,6 @@ export COORDINATOR_PUBLIC_URL="${COORDINATOR_PUBLIC_URL:-http://localhost:50051}
 export WEB_URL="${WEB_URL:-http://localhost:3000}"
 export CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS:-http://localhost:3000}"
 export HOST_PROBATION_DAYS="${HOST_PROBATION_DAYS:-0}"     # dev hosts take work immediately
-export SIGNUP_GRANTS_PER_IP_PER_DAY="${SIGNUP_GRANTS_PER_IP_PER_DAY:-1000}"   # every local signup is 127.0.0.1
 export REPUTATION_INTERVAL_SEC="${REPUTATION_INTERVAL_SEC:-300}"
 export PLATFORM_ADMIN_EMAILS="${PLATFORM_ADMIN_EMAILS:-}"
 export INSTALL_DIR="$ROOT/web/install"
@@ -109,7 +108,7 @@ web() {
 }
 
 status() {
-  local ports=(8081 8082 8083 8085 8086 8087 8080)
+  local ports=(8081 8082 8083 8085 8087 8080)
   for i in "${!SERVICES[@]}"; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${ports[$i]}/readyz" || true)
     if [ "$code" = "200" ]; then mark="ok"; else mark="DOWN ($code) — see logs/${SERVICES[$i]}.log"; fi

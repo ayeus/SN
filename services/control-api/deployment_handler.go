@@ -11,11 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ayeus/ayeusann/internal/billing"
 	"github.com/ayeus/ayeusann/internal/domain"
 	"github.com/ayeus/ayeusann/internal/httpx"
 	"github.com/ayeus/ayeusann/internal/lifecycle"
-	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/ayeus/ayeusann/internal/placement"
 	"github.com/jackc/pgx/v5"
 )
@@ -51,11 +49,10 @@ type DeploymentView struct {
 
 // UsageSummary aggregates usage events.
 type UsageSummary struct {
-	Requests     int64        `json:"requests"`
-	Errors       int64        `json:"errors"`
-	InputTokens  int64        `json:"input_tokens"`
-	OutputTokens int64        `json:"output_tokens"`
-	Cost         money.Amount `json:"cost"`
+	Requests     int64 `json:"requests"`
+	Errors       int64 `json:"errors"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
 }
 
 const deploymentColumns = `
@@ -142,15 +139,6 @@ func (a *API) HandleCreateDeployment(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(fields) > 0 {
 		httpx.WriteProblemFields(w, http.StatusBadRequest, "Please correct the highlighted fields", fields)
-		return
-	}
-
-	// Quota + wallet check (Architecture §8 step 2).
-	if ok, _, err := a.ledger.HasSpendableBalance(ctx, claims.OrgID); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to check wallet balance")
-		return
-	} else if !ok {
-		writeError(w, http.StatusPaymentRequired, "Your wallet balance is exhausted. Top up before deploying.")
 		return
 	}
 
@@ -262,9 +250,8 @@ func (a *API) HandleListDeployments(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 
-	currency := a.orgCurrency(r.Context(), claims.OrgID)
 	for i := range list {
-		u, err := a.usageSummary(r.Context(), claims.OrgID, list[i].ID, 24*time.Hour, currency)
+		u, err := a.usageSummary(r.Context(), claims.OrgID, list[i].ID, 24*time.Hour)
 		if err == nil {
 			list[i].Usage24h = u
 		}
@@ -272,23 +259,48 @@ func (a *API) HandleListDeployments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"deployments": list, "count": len(list)})
 }
 
-func (a *API) orgCurrency(ctx context.Context, orgID string) string {
-	cur := "USD"
-	_ = a.db.Pool.QueryRow(ctx, `SELECT currency FROM organizations WHERE id = $1;`, orgID).Scan(&cur)
-	return cur
-}
-
-func (a *API) usageSummary(ctx context.Context, orgID, deploymentID string, window time.Duration, currency string) (*UsageSummary, error) {
-	u := UsageSummary{Cost: money.Zero(currency)}
-	var cost money.Amount
+func (a *API) usageSummary(ctx context.Context, orgID, deploymentID string, window time.Duration) (*UsageSummary, error) {
+	var u UsageSummary
 	err := a.db.Pool.QueryRow(ctx, `
 		SELECT COUNT(*), COUNT(*) FILTER (WHERE status <> 'success'),
-		       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(amount_customer), 0)
+		       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
 		FROM usage_events
 		WHERE org_id = $1 AND ($2 = '' OR deployment_id::TEXT = $2) AND ts >= NOW() - ($3 * INTERVAL '1 second');
-	`, orgID, deploymentID, int(window.Seconds())).Scan(&u.Requests, &u.Errors, &u.InputTokens, &u.OutputTokens, &cost)
-	u.Cost = money.FromMicros(cost.Micros(), currency)
+	`, orgID, deploymentID, int(window.Seconds())).Scan(&u.Requests, &u.Errors, &u.InputTokens, &u.OutputTokens)
 	return &u, err
+}
+
+// HandleUsageDaily returns the organisation's requests and tokens per day for
+// the last 30 days, oldest first, for the dashboard chart (SRS FR-80).
+func (a *API) HandleUsageDaily(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.db.Pool.Query(r.Context(), `
+		SELECT DATE_TRUNC('day', ts) AS d, COUNT(*), COUNT(*) FILTER (WHERE status <> 'success'),
+		       COALESCE(SUM(input_tokens + output_tokens), 0)
+		FROM usage_events
+		WHERE org_id = $1 AND ts >= NOW() - INTERVAL '30 days'
+		GROUP BY d ORDER BY d;
+	`, claimsOf(r).OrgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to read usage")
+		return
+	}
+	defer rows.Close()
+	type day struct {
+		Date     string `json:"date"`
+		Requests int64  `json:"requests"`
+		Errors   int64  `json:"errors"`
+		Tokens   int64  `json:"tokens"`
+	}
+	days := []day{}
+	for rows.Next() {
+		var d day
+		var t time.Time
+		if err := rows.Scan(&t, &d.Requests, &d.Errors, &d.Tokens); err == nil {
+			d.Date = t.Format("2006-01-02")
+			days = append(days, d)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"days": days})
 }
 
 // loadDeployment fetches a deployment owned by the caller's org.
@@ -340,7 +352,7 @@ func (a *API) replicas(ctx context.Context, deploymentID string, includeFinished
 }
 
 // HandleGetDeployment is the deployment detail view (PRD F-7): state, replicas,
-// endpoint, usage and the live cost rate.
+// endpoint and usage.
 func (a *API) HandleGetDeployment(w http.ResponseWriter, r *http.Request) {
 	v, err := a.loadDeployment(r)
 	if err != nil {
@@ -353,22 +365,16 @@ func (a *API) HandleGetDeployment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Failed to read replicas")
 		return
 	}
-	currency := a.orgCurrency(ctx, v.OrgID)
-	day, _ := a.usageSummary(ctx, v.OrgID, v.ID, 24*time.Hour, currency)
-	hour, _ := a.usageSummary(ctx, v.OrgID, v.ID, time.Hour, currency)
-
-	var prices billing.Prices
-	prices, _ = billing.ResolvePrices(ctx, a.db.Pool, v.OrgID, v.ModelID, v.Tier, "")
+	day, _ := a.usageSummary(ctx, v.OrgID, v.ID, 24*time.Hour)
+	hour, _ := a.usageSummary(ctx, v.OrgID, v.ID, time.Hour)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"deployment": v,
-		"replicas":   reps,
-		"usage_24h":  day,
-		// The live cost ticker (PRD F-7): spend over the last 60 minutes.
-		"cost_last_hour": hour.Cost,
-		"prices":         prices,
-		"base_url":       a.endpointFor(v.ID),
-		"model":          v.Name,
+		"deployment":      v,
+		"replicas":        reps,
+		"usage_24h":       day,
+		"usage_last_hour": hour,
+		"base_url":        a.endpointFor(v.ID),
+		"model":           v.Name,
 	})
 }
 
@@ -425,7 +431,7 @@ func (a *API) HandleDeploymentLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleDeploymentMetrics returns time-bucketed usage for charts (PRD F-7:
-// throughput, P95 latency, error rate, cost over 24h/7d/30d).
+// throughput, P95 latency and error rate over 24h/7d/30d).
 func (a *API) HandleDeploymentMetrics(w http.ResponseWriter, r *http.Request) {
 	v, err := a.loadDeployment(r)
 	if err != nil {
@@ -441,10 +447,9 @@ func (a *API) HandleDeploymentMetrics(w http.ResponseWriter, r *http.Request) {
 	case "30d":
 		window, bucket = 30*24*time.Hour, "day"
 	}
-	currency := a.orgCurrency(r.Context(), v.OrgID)
 	rows, err := a.db.Pool.Query(r.Context(), `
 		SELECT DATE_TRUNC($3, ts) AS t, COUNT(*), COUNT(*) FILTER (WHERE status <> 'success'),
-		       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(amount_customer), 0),
+		       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
 		       COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_ms), 0),
 		       COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms), 0)
 		FROM usage_events
@@ -457,21 +462,18 @@ func (a *API) HandleDeploymentMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	type point struct {
-		T            time.Time    `json:"t"`
-		Requests     int64        `json:"requests"`
-		Errors       int64        `json:"errors"`
-		InputTokens  int64        `json:"input_tokens"`
-		OutputTokens int64        `json:"output_tokens"`
-		Cost         money.Amount `json:"cost"`
-		P50Ms        float64      `json:"p50_ms"`
-		P95Ms        float64      `json:"p95_ms"`
+		T            time.Time `json:"t"`
+		Requests     int64     `json:"requests"`
+		Errors       int64     `json:"errors"`
+		InputTokens  int64     `json:"input_tokens"`
+		OutputTokens int64     `json:"output_tokens"`
+		P50Ms        float64   `json:"p50_ms"`
+		P95Ms        float64   `json:"p95_ms"`
 	}
 	points := []point{}
 	for rows.Next() {
 		var p point
-		var cost money.Amount
-		if err := rows.Scan(&p.T, &p.Requests, &p.Errors, &p.InputTokens, &p.OutputTokens, &cost, &p.P50Ms, &p.P95Ms); err == nil {
-			p.Cost = money.FromMicros(cost.Micros(), currency)
+		if err := rows.Scan(&p.T, &p.Requests, &p.Errors, &p.InputTokens, &p.OutputTokens, &p.P50Ms, &p.P95Ms); err == nil {
 			points = append(points, p)
 		}
 	}
@@ -520,11 +522,6 @@ func (a *API) HandleUpdateDeployment(w http.ResponseWriter, r *http.Request) {
 			}
 			if req.Action == "retry" && v.State != lifecycle.Failed {
 				return errBadAction("Only a failed deployment can be retried")
-			}
-			if ok, _, err := a.ledger.HasSpendableBalance(ctx, v.OrgID); err != nil {
-				return err
-			} else if !ok {
-				return errBadAction("Your wallet balance is exhausted. Top up before resuming.")
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE deployments SET desired_state = 'running', state = 'pending', last_error = NULL,
@@ -578,7 +575,7 @@ type errBadAction string
 func (e errBadAction) Error() string { return string(e) }
 
 // HandleStopDeployment implements DELETE /v1/deployments/:id. Replicas drain
-// gracefully (UML §4 STOPPING → STOPPED); the row is kept for billing history.
+// gracefully (UML §4 STOPPING → STOPPED); the row is kept for usage history.
 func (a *API) HandleStopDeployment(w http.ResponseWriter, r *http.Request) {
 	v, err := a.loadDeployment(r)
 	if err != nil {

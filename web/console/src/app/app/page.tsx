@@ -2,17 +2,17 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Activity, Boxes, Check, Receipt, Wallet as WalletIcon } from "lucide-react";
+import { Activity, Boxes, CalendarDays, Check, Hash } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useData } from "@/lib/hooks";
-import { compact, money, number } from "@/lib/format";
-import type { ApiKey, Deployment, Money, Wallet } from "@/lib/types";
-import { ButtonLink, Empty, Notice, PageHeader, Panel, Skeleton, Stat, StateBadge, TierBadge, cx } from "@/components/ui";
+import { compact, number } from "@/lib/format";
+import type { ApiKey, Deployment } from "@/lib/types";
+import { ButtonLink, Empty, PageHeader, Panel, Skeleton, Stat, StateBadge, TierBadge, cx } from "@/components/ui";
 import { PowerRail } from "@/components/PowerRail";
 
-type UsageRow = { key: string; requests: number; cost: Money };
+type UsageDay = { date: string; requests: number; errors: number; tokens: number };
 
 // Every step is derived from the account's real state; nothing is ticked by
 // default.
@@ -67,52 +67,42 @@ export default function OverviewPage() {
   const { me } = useAuth();
   const router = useRouter();
   const deps = useData(() => api.get<{ deployments: Deployment[] }>("/v1/deployments"), [], 5000);
-  const wallet = useData(() => api.get<Wallet>("/v1/billing/wallet"), [], 15_000);
   const keys = useData(() => api.get<{ api_keys: ApiKey[] }>("/v1/api-keys"), []);
-  const usage = useData(() => api.get<{ rows: UsageRow[] }>("/v1/usage?group_by=day"), [], 60_000);
+  const usage = useData(() => api.get<{ days: UsageDay[] }>("/v1/usage/daily"), [], 60_000);
 
   const list = deps.data?.deployments ?? [];
   const serving = list.filter((d) => d.state === "serving" || d.state === "degraded").length;
   const requests = list.reduce((n, d) => n + (d.usage_24h?.requests ?? 0), 0);
   const tokens = list.reduce((n, d) => n + (d.usage_24h?.input_tokens ?? 0) + (d.usage_24h?.output_tokens ?? 0), 0);
-  const allTimeRequests = (usage.data?.rows ?? []).reduce((n, r) => n + r.requests, 0);
-  const currency = wallet.data?.currency ?? me?.organization.currency ?? "INR";
-  const series = (usage.data?.rows ?? []).slice(-14).map((r) => ({ day: r.key.slice(5), cost: Number(r.cost.amount), requests: r.requests }));
+  const days = usage.data?.days ?? [];
+  const monthRequests = days.reduce((n, d) => n + d.requests, 0);
+  const monthTokens = days.reduce((n, d) => n + d.tokens, 0);
+  const series = days.slice(-14).map((d) => ({ day: d.date.slice(5), requests: d.requests, tokens: d.tokens }));
 
   return (
     <>
       <PageHeader
         title={`Hello, ${me?.user.name.split(" ")[0]}`}
-        description="Your deployments, spend and wallet at a glance."
+        description="Your deployments and their traffic at a glance."
         actions={<ButtonLink href="/app/models">Deploy a model</ButtonLink>}
       />
 
-      {wallet.data?.low_balance && (
-        <Notice tone="warn" className="mb-6">
-          Your wallet is running low ({money(wallet.data.balance, { balance: true })}). Deployments pause automatically
-          when it reaches zero.{" "}
-          <Link href="/app/billing" className="font-medium underline">
-            Add funds
-          </Link>
-        </Notice>
-      )}
-
       <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Panel>
-          <Stat icon={WalletIcon} label="Wallet balance" value={wallet.data ? money(wallet.data.balance, { balance: true }) : <Skeleton className="h-7 w-24" />} />
-        </Panel>
-        <Panel>
-          <Stat icon={Receipt} tone="marigold" label="Spent today" value={wallet.data ? money(wallet.data.spend_24h) : <Skeleton className="h-7 w-20" />} sub={wallet.data ? `${money(wallet.data.spend_30d)} in 30 days` : undefined} />
-        </Panel>
         <Panel>
           <Stat icon={Boxes} tone="serving" label="Serving" value={deps.data ? `${serving} of ${list.length}` : <Skeleton className="h-7 w-16" />} sub="deployments" />
         </Panel>
         <Panel>
-          <Stat icon={Activity} tone="tier2" label="Requests today" value={deps.data ? number(requests) : <Skeleton className="h-7 w-16" />} sub={deps.data ? `${compact(tokens)} tokens` : undefined} />
+          <Stat icon={Activity} tone="tier2" label="Requests today" value={deps.data ? number(requests) : <Skeleton className="h-7 w-16" />} />
+        </Panel>
+        <Panel>
+          <Stat icon={Hash} tone="marigold" label="Tokens today" value={deps.data ? compact(tokens) : <Skeleton className="h-7 w-16" />} />
+        </Panel>
+        <Panel>
+          <Stat icon={CalendarDays} label="Requests, 30 days" value={usage.data ? number(monthRequests) : <Skeleton className="h-7 w-20" />} sub={usage.data ? `${compact(monthTokens)} tokens` : undefined} />
         </Panel>
       </div>
 
-      {deps.data && <GettingStarted deployments={list} keys={keys.data?.api_keys ?? null} requests={allTimeRequests} />}
+      {deps.data && <GettingStarted deployments={list} keys={keys.data?.api_keys ?? null} requests={monthRequests} />}
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
         <Panel
@@ -145,7 +135,7 @@ export default function OverviewPage() {
                     <th>Status</th>
                     <th className="w-[150px]">Progress</th>
                     <th>Tier</th>
-                    <th className="text-right">Cost today</th>
+                    <th className="text-right">Requests today</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -166,7 +156,7 @@ export default function OverviewPage() {
                       <td>
                         <TierBadge tier={d.tier} />
                       </td>
-                      <td className="text-right">{money(d.usage_24h?.cost)}</td>
+                      <td className="text-right">{number(d.usage_24h?.requests ?? 0)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -175,31 +165,31 @@ export default function OverviewPage() {
           )}
         </Panel>
 
-        <Panel title="Spend, last 14 days" description={`In ${currency}`}>
+        <Panel title="Requests, last 14 days">
           {usage.error ? (
             <p className="text-danger">Could not load usage: {usage.error.message}</p>
           ) : !usage.data ? (
             <Skeleton className="h-[200px]" />
           ) : series.length === 0 ? (
-            <p className="py-10 text-muted">No usage yet. Spend appears here once your deployments serve requests.</p>
+            <p className="py-10 text-muted">No usage yet. Traffic appears here once your deployments serve requests.</p>
           ) : (
-            <div className="h-[200px]" role="img" aria-label={`Daily spend for the last ${series.length} days`}>
+            <div className="h-[200px]" role="img" aria-label={`Daily requests for the last ${series.length} days`}>
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={series} margin={{ left: -18, right: 6, top: 6 }}>
                   <defs>
-                    <linearGradient id="spend" x1="0" y1="0" x2="0" y2="1">
+                    <linearGradient id="traffic" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="var(--nil)" stopOpacity={0.35} />
                       <stop offset="100%" stopColor="var(--nil)" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid stroke="var(--line)" vertical={false} />
                   <XAxis dataKey="day" tick={{ fill: "var(--muted)", fontSize: 12 }} tickLine={false} axisLine={false} />
-                  <YAxis tick={{ fill: "var(--muted)", fontSize: 12 }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fill: "var(--muted)", fontSize: 12 }} tickLine={false} axisLine={false} allowDecimals={false} />
                   <Tooltip
                     contentStyle={{ background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 10, fontSize: 13 }}
-                    formatter={(v) => [money({ amount: String(v), currency, micros: NaN }, { precise: true }), "Spend"]}
+                    formatter={(v) => [number(Number(v)), "Requests"]}
                   />
-                  <Area type="monotone" dataKey="cost" stroke="var(--nil)" strokeWidth={2} fill="url(#spend)" />
+                  <Area type="monotone" dataKey="requests" stroke="var(--nil)" strokeWidth={2} fill="url(#traffic)" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>

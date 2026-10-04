@@ -51,7 +51,7 @@ func setup(t *testing.T) *fixture {
 		db: testDB, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		heartbeatTimeout: 15 * time.Second, scheduleTimeout: 5 * time.Minute,
 	}}
-	f.exec(`TRUNCATE deployment_events, replicas, gpus, deployments, hosts, wallet_ledger, wallet_settings CASCADE`)
+	f.exec(`TRUNCATE deployment_events, replicas, gpus, deployments, hosts CASCADE`)
 	f.scan(&f.org, `INSERT INTO organizations (name) VALUES ('SchedulerTestOrg') RETURNING id`)
 	return f
 }
@@ -332,52 +332,5 @@ func TestStoppingADeploymentDrainsItsReplicas(t *testing.T) {
 	f.tick()
 	if n := f.activeReplicas(dep); n != 0 {
 		t.Fatalf("a stopped deployment has %d active replicas", n)
-	}
-}
-
-func TestExhaustedWalletPausesRunningDeployments(t *testing.T) {
-	f := setup(t)
-	f.host("t3", 8)
-	f.host("t3", 8)
-	broke := f.deployment("t3", 1)
-
-	var fundedOrg, funded string
-	f.scan(&fundedOrg, `INSERT INTO organizations (name) VALUES ('SchedulerFundedOrg') RETURNING id`)
-	f.scan(&funded, `
-		INSERT INTO deployments (org_id, model_id, name, tier, region, min_replicas, max_replicas)
-		VALUES ($1, $2, 'funded', 't3', 'IN-SOUTH', 1, 1) RETURNING id`, fundedOrg, smallModel)
-	f.exec(`INSERT INTO wallet_ledger (org_id, delta, balance_after, kind) VALUES ($1, 100, 100, 'topup')`, fundedOrg)
-	f.exec(`INSERT INTO wallet_ledger (org_id, delta, balance_after, kind) VALUES ($1, 100, 100, 'topup')`, f.org)
-	f.tick()
-	if f.activeReplicas(broke) != 1 || f.activeReplicas(funded) != 1 {
-		t.Fatal("both deployments should be placed while both wallets have money")
-	}
-
-	f.exec(`INSERT INTO wallet_ledger (org_id, delta, balance_after, kind) VALUES ($1, -100, 0, 'debit')`, f.org)
-	f.tick()
-
-	var desired string
-	f.scan(&desired, `SELECT desired_state FROM deployments WHERE id = $1`, broke)
-	if desired != "paused" {
-		t.Fatalf("desired_state = %s, want paused once the wallet is empty", desired)
-	}
-	if n := f.activeReplicas(broke); n != 0 {
-		t.Fatalf("an out-of-money deployment still has %d active replicas", n)
-	}
-	if s := f.state(broke); s != "paused" {
-		t.Fatalf("state = %s, want paused", s)
-	}
-	f.scan(&desired, `SELECT desired_state FROM deployments WHERE id = $1`, funded)
-	if desired != "running" || f.activeReplicas(funded) != 1 {
-		t.Fatal("a funded organisation's deployment must be untouched")
-	}
-
-	// A credit limit keeps the deployment running past zero.
-	f.exec(`UPDATE deployments SET desired_state = 'running' WHERE id = $1`, broke)
-	f.exec(`INSERT INTO wallet_settings (org_id, credit_limit) VALUES ($1, 500)`, f.org)
-	f.tick()
-	f.scan(&desired, `SELECT desired_state FROM deployments WHERE id = $1`, broke)
-	if desired != "running" {
-		t.Fatalf("desired_state = %s, want running: the organisation has a credit limit", desired)
 	}
 }

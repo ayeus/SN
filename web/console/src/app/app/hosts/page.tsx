@@ -4,16 +4,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useData } from "@/lib/hooks";
-import { ago, money } from "@/lib/format";
-import type { HostSummary, Money } from "@/lib/types";
+import { ago, compact, number } from "@/lib/format";
+import type { HostActivity, HostSummary } from "@/lib/types";
 import { ButtonLink, Empty, Notice, PageHeader, Panel, Skeleton, Stat, StateBadge, TierBadge } from "@/components/ui";
-
-type Earnings = { summary: { currency: string; today: Money; month_to_date: Money; lifetime: Money; requests: number } };
 
 export default function MachinesPage() {
   const router = useRouter();
   const hosts = useData(() => api.get<{ hosts: HostSummary[] }>("/v1/hosts"), [], 5000);
-  const earnings = useData(() => api.get<Earnings>("/v1/hosts/earnings"), [], 30_000);
+  const activity = useData(() => api.get<HostActivity>("/v1/hosts/activity"), [], 30_000);
   const list = hosts.data?.hosts ?? [];
   const online = list.filter((h) => h.online).length;
 
@@ -21,7 +19,7 @@ export default function MachinesPage() {
     <>
       <PageHeader
         title="Machines"
-        description="The GPUs you've connected, what they're running, and what they've earned."
+        description="The GPUs you've connected, what they're running, and the work they've served."
         actions={<ButtonLink href="/app/hosts/new">Add a machine</ButtonLink>}
       />
       {hosts.error && <Notice tone="error" className="mb-4">{hosts.error.message}</Notice>}
@@ -30,9 +28,9 @@ export default function MachinesPage() {
         <Panel className="mb-6">
           <div className="grid grid-cols-2 gap-6 md:grid-cols-4">
             <Stat label="Online now" value={`${online} of ${list.length}`} />
-            <Stat label="Earned today" value={earnings.data ? money(earnings.data.summary.today) : <Skeleton className="h-7 w-20" />} />
-            <Stat label="This month" value={earnings.data ? money(earnings.data.summary.month_to_date) : <Skeleton className="h-7 w-20" />} />
-            <Stat label="All time" value={earnings.data ? money(earnings.data.summary.lifetime) : <Skeleton className="h-7 w-20" />} />
+            <Stat label="Requests today" value={activity.data ? number(activity.data.summary.today.requests) : <Skeleton className="h-7 w-20" />} sub={activity.data ? `${compact(activity.data.summary.today.tokens)} tokens` : undefined} />
+            <Stat label="This month" value={activity.data ? number(activity.data.summary.month_to_date.requests) : <Skeleton className="h-7 w-20" />} sub={activity.data ? `${compact(activity.data.summary.month_to_date.tokens)} tokens` : undefined} />
+            <Stat label="All time" value={activity.data ? number(activity.data.summary.lifetime.requests) : <Skeleton className="h-7 w-20" />} sub={activity.data ? `${compact(activity.data.summary.lifetime.tokens)} tokens` : undefined} />
           </div>
         </Panel>
       )}
@@ -57,7 +55,7 @@ export default function MachinesPage() {
                   <th>Tier</th>
                   <th className="text-right">Reputation</th>
                   <th className="text-right">Jobs</th>
-                  <th className="text-right">Today</th>
+                  <th className="text-right">Requests today</th>
                   <th className="text-right">All time</th>
                   <th className="text-right">Last seen</th>
                 </tr>
@@ -82,8 +80,8 @@ export default function MachinesPage() {
                     </td>
                     <td className="text-right">{h.reputation}</td>
                     <td className="text-right">{h.active_jobs}</td>
-                    <td className="text-right">{money(h.earnings_today)}</td>
-                    <td className="text-right">{money(h.earnings_total)}</td>
+                    <td className="text-right">{number(h.requests_today)}</td>
+                    <td className="text-right">{number(h.requests_total)}</td>
                     <td className="text-right text-muted">{h.online ? "now" : ago(h.last_heartbeat_at)}</td>
                   </tr>
                 ))}

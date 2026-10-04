@@ -21,7 +21,7 @@ import (
 
 // Upstreams the gateway forwards to.
 type Upstreams struct {
-	ControlAPI, Inference, Billing, Trust, Web *url.URL
+	ControlAPI, Inference, Trust, Web *url.URL
 	// InstallDir holds install.sh / install.ps1; DownloadsDir holds prebuilt
 	// agent binaries named ayeusann-agent-<os>-<arch>.
 	InstallDir, DownloadsDir string
@@ -73,7 +73,6 @@ func isInferenceRequest(r *http.Request) bool {
 func NewHandler(u Upstreams) http.Handler {
 	control := newProxy(u.ControlAPI, "control-api", u.TrustProxy)
 	inference := newProxy(u.Inference, "inference-gateway", u.TrustProxy)
-	billingP := newProxy(u.Billing, "billing-meter", u.TrustProxy)
 	trust := newProxy(u.Trust, "trust-engine", u.TrustProxy)
 	var web http.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -98,10 +97,6 @@ func NewHandler(u Upstreams) http.Handler {
 		control.ServeHTTP(w, r)
 	})
 
-	// Billing.
-	for _, p := range []string{"/v1/billing/", "/v1/usage", "/v1/invoices", "/v1/invoices/"} {
-		mux.Handle(p, billingP)
-	}
 	// Trust (owner-scoped reads only; writes are internal).
 	mux.Handle("GET /v1/reputation/", trust)
 	// Everything else under /v1 is the control API.
@@ -190,7 +185,6 @@ func main() {
 	handler := NewHandler(Upstreams{
 		ControlAPI:    mustURL(platform.ControlAPIURL()),
 		Inference:     mustURL(platform.InferenceGatewayURL()),
-		Billing:       mustURL(platform.BillingMeterURL()),
 		Trust:         mustURL(platform.TrustEngineURL()),
 		Web:           web,
 		InstallDir:    platform.Env("INSTALL_DIR", "web/install"),

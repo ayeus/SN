@@ -2,15 +2,14 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { BadgeIndianRupee, Cpu, MapPin, PlugZap, ShieldCheck, Workflow } from "lucide-react";
+import { Activity, Cpu, MapPin, PlugZap, ShieldCheck, Workflow } from "lucide-react";
 import { BRAND } from "@/lib/brand";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useData } from "@/lib/hooks";
-import { compact, convert, money, number, TIERS } from "@/lib/format";
-import type { Model, NetworkStats, Pricing, Tier } from "@/lib/types";
+import { compact, number, TIERS } from "@/lib/format";
+import type { Model, NetworkStats, Tier } from "@/lib/types";
 import { ButtonLink, TierBadge, cx } from "@/components/ui";
-import { EarningsCalculator } from "@/components/EarningsCalculator";
 import { Logo } from "@/components/Logo";
 import { PowerRail } from "@/components/PowerRail";
 
@@ -112,20 +111,9 @@ function Tile({
 export default function Landing() {
   const { me } = useAuth();
   const stats = useData(() => api.get<NetworkStats>("/v1/network/stats", false), [], 15_000);
-  const pricing = useData(() => api.get<Pricing>("/v1/pricing", false), []);
   const models = useData(() => api.get<{ models: Model[] }>("/v1/models", false), []);
-  const inrRate = pricing.data?.fx_from_usd?.INR;
-  const spot = (pricing.data?.spot_price_percent ?? 55) / 100;
-  const hostShare = pricing.data?.host_share_percent;
   const deployHref = me ? "/app/models" : "/signup";
   const hostHref = me ? "/app/hosts/new" : "/signup?intent=host";
-
-  const tierFrom = (t: Tier) => {
-    const p = (pricing.data?.gpu_skus ?? []).filter((s) => s.tier === t).map((s) => Number(s.price_per_hour_inr.amount));
-    return p.length ? Math.min(...p) : null;
-  };
-  const inr = (m: Model["price_in_per_1m"]) => money(inrRate ? convert(m, "INR", inrRate) : m);
-  const cheapest = (models.data?.models ?? []).slice().sort((a, b) => Number(a.price_in_per_1m.amount) - Number(b.price_in_per_1m.amount))[0];
 
   return (
     <div className="min-h-[100dvh]">
@@ -138,8 +126,8 @@ export default function Landing() {
             <a href="#how" className="hidden rounded-lg px-3 py-2 text-[14px] text-muted hover:text-ink md:block">
               How it works
             </a>
-            <a href="#pricing" className="hidden rounded-lg px-3 py-2 text-[14px] text-muted hover:text-ink md:block">
-              Pricing
+            <a href="#models" className="hidden rounded-lg px-3 py-2 text-[14px] text-muted hover:text-ink md:block">
+              Models
             </a>
             <a href="#hosts" className="hidden rounded-lg px-3 py-2 text-[14px] text-muted hover:text-ink md:block">
               Host a GPU
@@ -169,7 +157,7 @@ export default function Landing() {
               Open-source models on Indian GPUs, behind the API you already use.
             </h1>
             <p className="rise mt-5 max-w-[52ch] text-[17px] leading-relaxed text-muted" style={{ "--i": 1 } as React.CSSProperties}>
-              Deploy Llama, Qwen or Mistral in minutes, call it with the OpenAI SDK, and pay per token in rupees.
+              Deploy Llama, Qwen or Mistral in minutes and call it with the OpenAI SDK you already have.
             </p>
             <div className="rise mt-8 flex flex-wrap gap-3" style={{ "--i": 2 } as React.CSSProperties}>
               <ButtonLink href={deployHref} className="h-11 px-5 text-[15px]">
@@ -212,13 +200,8 @@ export default function Landing() {
                 <PowerRail state="warming" />
               </div>
             </div>
-            <Tile icon={BadgeIndianRupee} title="Billed in rupees, per token" tone="nil" className="md:col-span-2">
-              A prepaid wallet with GST invoices. New accounts in India start with ₹500 of credit.
-              {cheapest && (
-                <span className="mt-3 block text-[14px] text-on-nil">
-                  From {inr(cheapest.price_in_per_1m)} per million input tokens.
-                </span>
-              )}
+            <Tile icon={Activity} title="Every request is counted" tone="nil" className="md:col-span-2">
+              Requests, tokens, latency and errors for each deployment, live in the console and broken down by day.
             </Tile>
             <Tile icon={PlugZap} title="Nothing to rewrite" className="md:col-span-2">
               The endpoint speaks the OpenAI wire format, streaming included. Change the base URL and keep your client,
@@ -229,8 +212,7 @@ export default function Landing() {
               DPDP.
             </Tile>
             <Tile icon={ShieldCheck} title="You choose the trust level" tone="marigold" className="md:col-span-2">
-              Data-centre nodes with an SLA, vetted lab machines, or spot capacity on personal hardware at{" "}
-              {Math.round(spot * 100)}% of the price.
+              Data-centre nodes with an SLA, vetted lab machines, or interruptible spot capacity on personal hardware.
             </Tile>
           </div>
         </section>
@@ -238,8 +220,8 @@ export default function Landing() {
         <section className={cx(WRAP, "pb-24")}>
           <h2 className="text-[30px] font-semibold tracking-[-0.02em] sm:text-[36px]">Three tiers of hardware</h2>
           <p className="mt-3 max-w-[62ch] text-[16px] text-muted">
-            The tier sets the SLA, what may run there and the price. Sensitive workloads and your own weights never run
-            on personal machines.
+            The tier sets the SLA and what may run there. Sensitive workloads and your own weights never run on
+            personal machines.
           </p>
           <div className="glass mt-8 overflow-x-auto rounded-2xl">
             <table className="table min-w-[680px]">
@@ -249,7 +231,6 @@ export default function Landing() {
                   <th>Who supplies it</th>
                   <th>Reliability</th>
                   <th className="text-right">Online now</th>
-                  <th className="text-right">From</th>
                 </tr>
               </thead>
               <tbody>
@@ -261,7 +242,6 @@ export default function Landing() {
                     <td className="text-muted">{TIERS[t].who}</td>
                     <td>{TIERS[t].sla}</td>
                     <td className="text-right">{stats.data ? `${number(stats.data.gpus_by_tier[t] ?? 0)} GPUs` : "-"}</td>
-                    <td className="text-right font-medium">{tierFrom(t) != null ? `₹${tierFrom(t)} per GPU-hour` : "-"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -269,10 +249,10 @@ export default function Landing() {
           </div>
         </section>
 
-        <section id="pricing" className={cx(WRAP, "pb-24")}>
-          <h2 className="text-[30px] font-semibold tracking-[-0.02em] sm:text-[36px]">Model pricing</h2>
+        <section id="models" className={cx(WRAP, "pb-24")}>
+          <h2 className="text-[30px] font-semibold tracking-[-0.02em] sm:text-[36px]">Model catalogue</h2>
           <p className="mt-3 max-w-[62ch] text-[16px] text-muted">
-            Per million tokens, shown in rupees at today&apos;s published rate. You pay only for tokens processed.
+            Open-source models ready to deploy, with the GPU memory each one needs and the tiers it can run on.
           </p>
           <div className="glass mt-8 overflow-x-auto rounded-2xl">
             <table className="table min-w-[720px]">
@@ -280,36 +260,33 @@ export default function Landing() {
                 <tr>
                   <th>Model</th>
                   <th>Licence</th>
-                  <th className="text-right">Input</th>
-                  <th className="text-right">Output</th>
-                  <th className="text-right">Output on spot</th>
+                  <th className="text-right">Context</th>
+                  <th className="text-right">GPU memory</th>
+                  <th>Runs on</th>
                 </tr>
               </thead>
               <tbody>
-                {(models.data?.models ?? []).map((m) => {
-                  const out = inrRate ? convert(m.price_out_per_1m, "INR", inrRate) : m.price_out_per_1m;
-                  return (
-                    <tr key={m.id}>
-                      <td>
-                        <div className="flex items-center gap-2.5 font-medium">
-                          <Cpu size={15} className="text-muted" aria-hidden />
-                          {m.name}
-                        </div>
-                        <div className="ml-[25px] text-[13px] text-muted">{m.params_b}B parameters</div>
-                      </td>
-                      <td className="text-muted">{m.license}</td>
-                      <td className="text-right">{inr(m.price_in_per_1m)}</td>
-                      <td className="text-right">{money(out)}</td>
-                      <td className="text-right">
-                        {m.tiers_allowed.includes("t3") ? (
-                          money({ ...out, amount: String(Number(out.amount) * spot) })
-                        ) : (
-                          <span className="text-muted">T1 and T2 only</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {(models.data?.models ?? []).map((m) => (
+                  <tr key={m.id}>
+                    <td>
+                      <div className="flex items-center gap-2.5 font-medium">
+                        <Cpu size={15} className="text-muted" aria-hidden />
+                        {m.name}
+                      </div>
+                      <div className="ml-[25px] text-[13px] text-muted">{m.params_b}B parameters</div>
+                    </td>
+                    <td className="text-muted">{m.license}</td>
+                    <td className="text-right">{m.context_length ? `${Math.round(m.context_length / 1024)}K` : "-"}</td>
+                    <td className="text-right">{m.min_vram_gb} GB</td>
+                    <td>
+                      <span className="flex flex-wrap gap-1.5">
+                        {m.tiers_allowed.map((t) => (
+                          <TierBadge key={t} tier={t} />
+                        ))}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
                 {models.data && models.data.models.length === 0 && (
                   <tr>
                     <td colSpan={5} className="text-muted">
@@ -320,7 +297,7 @@ export default function Landing() {
                 {models.error && (
                   <tr>
                     <td colSpan={5} className="text-danger">
-                      Could not load prices: {models.error.message}
+                      Could not load the catalogue: {models.error.message}
                     </td>
                   </tr>
                 )}
@@ -331,19 +308,26 @@ export default function Landing() {
 
         <section id="hosts" className={cx(WRAP, "pb-24")}>
           <h2 className="max-w-[22ch] text-[30px] font-semibold leading-tight tracking-[-0.02em] sm:text-[36px]">
-            Your GPU earns while you are not using it
+            Put an idle GPU to work
           </h2>
           <p className="mt-3 max-w-[62ch] text-[16px] text-muted">
-            One agent, outbound connections only, no ports to open.
-            {hostShare != null && ` You keep ${hostShare}% of what customers pay for your machine's time.`}
+            One agent, outbound connections only, no ports to open. It works from behind home and campus networks.
           </p>
-          <div className="glass mt-8 rounded-2xl p-6 sm:p-8">
-            {pricing.data ? (
-              <EarningsCalculator pricing={pricing.data} />
-            ) : (
-              <p className="text-muted">{pricing.error ? `Could not load the rate card: ${pricing.error.message}` : "Loading the rate card."}</p>
-            )}
-          </div>
+          <ol className="mt-8 grid gap-4 md:grid-cols-3">
+            {[
+              ["Create an install command", "Sign in, choose the kind of machine, and the console gives you one command with a single-use token."],
+              ["Run it on the machine", "The agent detects the GPU, benchmarks it and connects out to the network. Ollama runs the models."],
+              ["Watch it take work", "The machine appears in your console within a minute. Pause it whenever you need the GPU back."],
+            ].map(([title, body], i) => (
+              <li key={title} className="glass rounded-2xl p-6">
+                <span aria-hidden className="grid h-8 w-8 place-items-center rounded-full bg-nil-soft text-[14px] font-semibold text-nil">
+                  {i + 1}
+                </span>
+                <h3 className="mt-3 text-[17px] font-semibold tracking-[-0.01em]">{title}</h3>
+                <p className="mt-2 text-[15px] leading-relaxed text-muted">{body}</p>
+              </li>
+            ))}
+          </ol>
         </section>
 
         <section className={cx(WRAP, "pb-24")}>
@@ -374,7 +358,7 @@ export default function Landing() {
         <div className={cx(WRAP, "flex flex-wrap items-center justify-between gap-4 py-8 text-[13px] text-muted")}>
           <Logo size={22} />
           <span>
-            © {new Date().getFullYear()} {BRAND.company}. Prices exclude GST.
+            © {new Date().getFullYear()} {BRAND.company}
           </span>
         </div>
       </footer>

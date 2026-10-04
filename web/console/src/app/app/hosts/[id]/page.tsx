@@ -5,8 +5,8 @@ import { useState } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from "recharts";
 import { api, ApiError } from "@/lib/api";
 import { useData } from "@/lib/hooks";
-import { ago, dateTime, money, number, time } from "@/lib/format";
-import type { GPU, Host, Money } from "@/lib/types";
+import { ago, compact, dateTime, number, time } from "@/lib/format";
+import type { GPU, Host, HostActivity } from "@/lib/types";
 import { Button, Confirm, Empty, Input, Notice, PageHeader, Panel, Skeleton, Stat, StateBadge, TierBadge } from "@/components/ui";
 
 type Detail = {
@@ -19,7 +19,6 @@ type Detail = {
   incidents: { kind: string; severity: string; action?: string; resolved: boolean; created_at: string }[];
 };
 type Telemetry = { samples: { ts: string; cpu_pct: number; mem_pct: number; gpus: { utilization_pct?: number }[] | null }[] };
-type Earnings = { summary: { today: Money; month_to_date: Money; lifetime: Money; requests: number } };
 
 function Meter({ label, value, weight, missing }: { label: string; value?: number; weight: string; missing: string }) {
   return (
@@ -40,7 +39,7 @@ export default function HostPage() {
   const router = useRouter();
   const detail = useData(() => api.get<Detail>(`/v1/hosts/${id}`), [id], 5000);
   const telemetry = useData(() => api.get<Telemetry>(`/v1/hosts/${id}/telemetry?minutes=60`), [id], 15_000);
-  const earnings = useData(() => api.get<Earnings>(`/v1/hosts/${id}/earnings`), [id], 30_000);
+  const activity = useData(() => api.get<HostActivity>(`/v1/hosts/${id}/activity`), [id], 30_000);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -136,7 +135,7 @@ export default function HostPage() {
       {error && <Notice tone="error" className="mb-4">{error}</Notice>}
       {h.status === "probation" && h.probation_until && (
         <Notice className="mb-6">
-          On probation until {dateTime(h.probation_until)}. During probation the machine takes spot work only; it moves up once
+          On probation until {dateTime(h.probation_until)}. During probation the machine takes interruptible work only; it moves up once
           its uptime and reputation hold.
         </Notice>
       )}
@@ -148,10 +147,10 @@ export default function HostPage() {
 
       <Panel className="mb-6">
         <div className="grid grid-cols-2 gap-6 md:grid-cols-4">
-          <Stat label="Earned today" value={earnings.data ? money(earnings.data.summary.today) : "-"} />
-          <Stat label="This month" value={earnings.data ? money(earnings.data.summary.month_to_date) : "-"} />
-          <Stat label="All time" value={earnings.data ? money(earnings.data.summary.lifetime) : "-"} />
-          <Stat label="Requests served" value={earnings.data ? number(earnings.data.summary.requests) : "-"} />
+          <Stat label="Requests today" value={activity.data ? number(activity.data.summary.today.requests) : "-"} />
+          <Stat label="This month" value={activity.data ? number(activity.data.summary.month_to_date.requests) : "-"} />
+          <Stat label="All time" value={activity.data ? number(activity.data.summary.lifetime.requests) : "-"} />
+          <Stat label="Tokens served" value={activity.data ? compact(activity.data.summary.lifetime.tokens) : "-"} />
         </div>
       </Panel>
 
@@ -272,7 +271,7 @@ export default function HostPage() {
       <Confirm
         open={confirm}
         title={`Remove ${h.name}?`}
-        body="Running jobs move to other machines and the agent's credential is revoked. To add the machine again, create a new install command. Earnings history is kept."
+        body="Running jobs move to other machines and the agent's credential is revoked. To add the machine again, create a new install command. Its usage history is kept."
         confirmLabel="Remove machine"
         busy={busy === "remove"}
         onCancel={() => setConfirm(false)}

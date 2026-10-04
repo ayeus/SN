@@ -3,14 +3,12 @@ package db_test
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/crypto"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/domain"
-	"github.com/ayeus/ayeusann/internal/money"
 	"github.com/ayeus/ayeusann/internal/testutil"
 	"github.com/google/uuid"
 )
@@ -159,84 +157,5 @@ func TestUsageEventAppendOnlyPartitioning(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("Expected error when inserting duplicate (request_id, ts), got nil")
-	}
-}
-
-func TestLedgerServiceTransactions(t *testing.T) {
-	client := setupTestClient(t)
-	defer client.Close()
-
-	ctx := context.Background()
-	ledger := db.NewLedgerService(client)
-
-	// Create test org
-	var orgID string
-	err := client.Pool.QueryRow(ctx, `INSERT INTO organizations (name) VALUES ('LedgerTestOrg') RETURNING id`).Scan(&orgID)
-	if err != nil {
-		t.Fatalf("Failed to create org: %v", err)
-	}
-
-	// 1. Initial balance should be 0
-	bal, err := ledger.GetBalance(ctx, orgID)
-	if err != nil {
-		t.Fatalf("GetBalance error: %v", err)
-	}
-	if !bal.IsZero() {
-		t.Fatalf("Expected initial balance 0, got %s", bal.String())
-	}
-
-	// 2. Record Topup ($50 credit)
-	ref1 := uuid.New().String()
-	desc1 := "Initial Topup"
-	entry1, err := ledger.RecordTransaction(ctx, db.TransactionRequest{
-		OrgID:       orgID,
-		Delta:       money.MustParse("50.00", "USD"),
-		Kind:        domain.LedgerKindTopup,
-		RefID:       &ref1,
-		Description: &desc1,
-	})
-	if err != nil {
-		t.Fatalf("RecordTransaction topup error: %v", err)
-	}
-
-	if entry1.BalanceAfter != money.MustParse("50.00", "USD") {
-		t.Fatalf("Expected balance_after 50.00, got %s", entry1.BalanceAfter.String())
-	}
-
-	// 3. Record Debit ($15)
-	ref2 := uuid.New().String()
-	desc2 := "Inference Usage"
-	entry2, err := ledger.RecordTransaction(ctx, db.TransactionRequest{
-		OrgID:       orgID,
-		Delta:       money.MustParse("-15.00", "USD"),
-		Kind:        domain.LedgerKindDebit,
-		RefID:       &ref2,
-		Description: &desc2,
-	})
-	if err != nil {
-		t.Fatalf("RecordTransaction debit error: %v", err)
-	}
-
-	if entry2.BalanceAfter != money.MustParse("35.00", "USD") {
-		t.Fatalf("Expected balance_after 35.00, got %s", entry2.BalanceAfter.String())
-	}
-
-	// 4. Record Excessive Debit ($40) when balance is $35 -> Should fail with ErrInsufficientBalance
-	_, err = ledger.RecordTransaction(ctx, db.TransactionRequest{
-		OrgID: orgID,
-		Delta: money.MustParse("-40.00", "USD"),
-		Kind:  domain.LedgerKindDebit,
-	})
-	if !errors.Is(err, db.ErrInsufficientBalance) {
-		t.Fatalf("Expected ErrInsufficientBalance, got %v", err)
-	}
-
-	// Balance should remain $35.00
-	balFinal, err := ledger.GetBalance(ctx, orgID)
-	if err != nil {
-		t.Fatalf("GetBalance error: %v", err)
-	}
-	if balFinal != money.MustParse("35.00", "USD") {
-		t.Fatalf("Expected balance to remain 35.00, got %s", balFinal.String())
 	}
 }

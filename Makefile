@@ -4,7 +4,7 @@
         dist-agent-linux images prod-up prod-down prod-logs prod-status \
         test test-go test-agent test-web lint lint-go lint-agent lint-proto proto fmt migrate migrate-down clean
 
-GO_SERVICES := gateway control-api scheduler coordinator inference-gateway billing-meter trust-engine
+GO_SERVICES := gateway control-api scheduler coordinator inference-gateway trust-engine
 TEST_DB_URL := postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann_test?sslmode=disable
 DEV_DB_URL  := postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann_dev?sslmode=disable
 

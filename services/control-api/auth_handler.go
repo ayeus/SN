@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/auth"
-	"github.com/ayeus/ayeusann/internal/billing"
 	"github.com/ayeus/ayeusann/internal/db"
 	"github.com/ayeus/ayeusann/internal/domain"
 	"github.com/ayeus/ayeusann/internal/httpx"
@@ -19,22 +18,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Signup-credit abuse limits, per rolling 24 hours. A shared office or campus
-// network legitimately produces several signups from one address, so both are
-// configuration; local development raises them because every account comes
-// from 127.0.0.1.
-var (
-	maxGrantsPerIPPerDay     = platform.EnvInt("SIGNUP_GRANTS_PER_IP_PER_DAY", 3)
-	maxGrantsPerDomainPerDay = platform.EnvInt("SIGNUP_GRANTS_PER_DOMAIN_PER_DAY", 25)
-)
-
 type SignupRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	Name     string `json:"name"`
 	OrgName  string `json:"org_name,omitempty"`
-	// Country is ISO 3166-1 alpha-2. It picks the default region, billing
-	// currency and tax jurisdiction. India is the launch market (PRD §1).
+	// Country is ISO 3166-1 alpha-2. It picks the default region. India is the
+	// launch market (PRD §1).
 	Country string `json:"country,omitempty"`
 	Region  string `json:"region,omitempty"`
 }
@@ -52,15 +42,13 @@ type AuthResponse struct {
 	User         domain.User         `json:"user"`
 	Organization domain.Organization `json:"organization"`
 	Role         string              `json:"role"`
-	// PromotionalCredit is set only when a signup grant was actually issued.
-	PromotionalCredit string `json:"promotional_credit,omitempty"`
 }
 
-const orgColumns = `o.id, o.name, o.default_region, o.price_book_id, o.billing_country, o.currency, o.is_business, o.created_at, o.updated_at`
+const orgColumns = `o.id, o.name, o.default_region, o.billing_country, o.created_at, o.updated_at`
 
 func scanOrg(row pgx.Row, extra ...any) (domain.Organization, error) {
 	var o domain.Organization
-	dest := append([]any{&o.ID, &o.Name, &o.DefaultRegion, &o.PriceBookID, &o.BillingCountry, &o.Currency, &o.IsBusiness, &o.CreatedAt, &o.UpdatedAt}, extra...)
+	dest := append([]any{&o.ID, &o.Name, &o.DefaultRegion, &o.Country, &o.CreatedAt, &o.UpdatedAt}, extra...)
 	err := row.Scan(dest...)
 	return o, err
 }
@@ -104,14 +92,10 @@ func (a *API) HandleSignup(w http.ResponseWriter, r *http.Request) {
 	if req.OrgName == "" {
 		req.OrgName = req.Name + "'s workspace"
 	}
-	currency := currencyForCountry(country)
-	emailDomain := emailDomainOf(req.Email)
-	signupIP := clientIP(r)
 
 	ctx := r.Context()
 	var user domain.User
 	var org domain.Organization
-	var granted string
 
 	err = a.db.ExecTx(ctx, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
@@ -129,10 +113,10 @@ func (a *API) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		}
 
 		org, err = scanOrg(tx.QueryRow(ctx, `
-			INSERT INTO organizations (name, default_region, billing_country, currency)
-			VALUES ($1, $2, $3, $4)
-			RETURNING id, name, default_region, price_book_id, billing_country, currency, is_business, created_at, updated_at;
-		`, req.OrgName, region, country, currency))
+			INSERT INTO organizations (name, default_region, billing_country)
+			VALUES ($1, $2, $3)
+			RETURNING id, name, default_region, billing_country, created_at, updated_at;
+		`, req.OrgName, region, country))
 		if err != nil {
 			return fmt.Errorf("create organization: %w", err)
 		}
@@ -140,40 +124,6 @@ func (a *API) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(ctx, `INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'admin');`, user.ID, org.ID); err != nil {
 			return fmt.Errorf("create membership: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO wallet_settings (org_id) VALUES ($1) ON CONFLICT (org_id) DO NOTHING;`, org.ID); err != nil {
-			return fmt.Errorf("create wallet settings: %w", err)
-		}
-
-		// Free credits (SRS FR-70), subject to abuse limits. Failing the limit
-		// check creates the account without the grant.
-		if !a.signupCredit.IsPositive() {
-			return nil
-		}
-		eligible, err := grantEligible(ctx, tx, emailDomain, signupIP)
-		if err != nil || !eligible {
-			return err
-		}
-		rate, _, err := billing.FXRate(ctx, tx, a.signupCredit.Currency(), currency)
-		if err != nil {
-			return err
-		}
-		credit, err := billing.Convert(a.signupCredit, rate, currency)
-		if err != nil {
-			return err
-		}
-		desc := fmt.Sprintf("Welcome credit (%s)", a.signupCredit.Display())
-		if _, err := db.RecordTransactionTx(ctx, tx, db.TransactionRequest{
-			OrgID: org.ID, Delta: credit, Kind: domain.LedgerKindSignupCredit, Description: &desc,
-		}); err != nil {
-			return fmt.Errorf("issue signup credit: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO signup_grants (org_id, user_id, amount, email_domain, signup_ip)
-			VALUES ($1, $2, $3, $4, $5);
-		`, org.ID, user.ID, credit, emailDomain, signupIP); err != nil {
-			return fmt.Errorf("record signup grant: %w", err)
-		}
-		granted = credit.Display()
 		return nil
 	})
 	if err != nil {
@@ -187,63 +137,33 @@ func (a *API) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.issueSession(w, http.StatusCreated, user, org, domain.RoleAdmin, granted)
+	a.issueSession(w, http.StatusCreated, user, org, domain.RoleAdmin)
 }
 
 var errEmailTaken = errors.New("email already registered")
 
-func (a *API) issueSession(w http.ResponseWriter, status int, user domain.User, org domain.Organization, role, granted string) {
+func (a *API) issueSession(w http.ResponseWriter, status int, user domain.User, org domain.Organization, role string) {
 	pair, err := a.tm.GenerateTokenPair(user.ID, org.ID, role)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to generate authentication tokens")
 		return
 	}
 	writeJSON(w, status, AuthResponse{
-		AccessToken:       pair.AccessToken,
-		RefreshToken:      pair.RefreshToken,
-		TokenType:         "Bearer",
-		ExpiresIn:         int(a.tm.AccessExpiry().Seconds()),
-		User:              user,
-		Organization:      org,
-		Role:              role,
-		PromotionalCredit: granted,
+		AccessToken:  pair.AccessToken,
+		RefreshToken: pair.RefreshToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    int(a.tm.AccessExpiry().Seconds()),
+		User:         user,
+		Organization: org,
+		Role:         role,
 	})
-}
-
-func grantEligible(ctx context.Context, tx pgx.Tx, emailDomain string, signupIP *string) (bool, error) {
-	if signupIP != nil {
-		var ipCount int
-		if err := tx.QueryRow(ctx, `
-			SELECT COUNT(*) FROM signup_grants WHERE signup_ip = $1 AND created_at > NOW() - INTERVAL '24 hours';
-		`, *signupIP).Scan(&ipCount); err != nil {
-			return false, fmt.Errorf("check signup grant limits: %w", err)
-		}
-		if ipCount >= maxGrantsPerIPPerDay {
-			return false, nil
-		}
-	}
-	var domainCount int
-	if err := tx.QueryRow(ctx, `
-		SELECT COUNT(*) FROM signup_grants WHERE email_domain = $1 AND created_at > NOW() - INTERVAL '24 hours';
-	`, emailDomain).Scan(&domainCount); err != nil {
-		return false, fmt.Errorf("check signup grant limits: %w", err)
-	}
-	return domainCount < maxGrantsPerDomainPerDay, nil
 }
 
 var emailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$`)
 
 func validEmail(s string) bool { return len(s) <= 254 && emailPattern.MatchString(s) }
 
-func emailDomainOf(email string) string {
-	at := strings.LastIndex(email, "@")
-	if at < 0 || at == len(email)-1 {
-		return "unknown"
-	}
-	return strings.ToLower(email[at+1:])
-}
-
-// clientIP returns the caller's address for abuse accounting. X-Forwarded-For
+// clientIP returns the caller's address for rate limiting. X-Forwarded-For
 // is trusted only behind a known proxy, since a client can forge it.
 func clientIP(r *http.Request) *string {
 	if platform.EnvBool("TRUST_PROXY_HEADERS", false) {
@@ -302,21 +222,6 @@ func defaultRegionForCountry(country string) string {
 	}
 }
 
-// currencyForCountry chooses the wallet currency. Only currencies with an FX
-// rate configured are offered; everyone else is billed in USD.
-func currencyForCountry(country string) string {
-	switch country {
-	case "IN":
-		return "INR"
-	case "GB":
-		return "GBP"
-	case "DE", "FR", "NL", "ES", "IT", "IE", "BE", "AT", "FI", "PT", "GR":
-		return "EUR"
-	default:
-		return "USD"
-	}
-}
-
 func (a *API) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	var req LoginRequest
 	if httpx.DecodeJSON(w, r, &req) != nil {
@@ -369,7 +274,7 @@ func (a *API) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Failed to resolve your organisation")
 		return
 	}
-	a.issueSession(w, http.StatusOK, user, org, role, "")
+	a.issueSession(w, http.StatusOK, user, org, role)
 }
 
 type RefreshRequest struct {
