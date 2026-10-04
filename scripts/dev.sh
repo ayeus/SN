@@ -16,7 +16,8 @@ cd "$(dirname "$0")/.."
 
 ROOT="$(pwd)"
 LOGS="$ROOT/logs"
-PIDS="$ROOT/.dev-pids"
+PIDS="$ROOT/.dev-pids"          # Go services
+WEB_PID="$ROOT/.dev-web-pid"    # web console
 COMPOSE="deploy/compose/docker-compose.yml"
 PG_URL_BASE="postgres://ayeusann:ayeusann_dev@localhost:5433"
 DEV_DB="ayeusann_dev"
@@ -33,6 +34,7 @@ export COORDINATOR_PUBLIC_URL="${COORDINATOR_PUBLIC_URL:-http://localhost:50051}
 export WEB_URL="${WEB_URL:-http://localhost:3000}"
 export CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS:-http://localhost:3000}"
 export HOST_PROBATION_DAYS="${HOST_PROBATION_DAYS:-0}"     # dev hosts take work immediately
+export SIGNUP_GRANTS_PER_IP_PER_DAY="${SIGNUP_GRANTS_PER_IP_PER_DAY:-1000}"   # every local signup is 127.0.0.1
 export REPUTATION_INTERVAL_SEC="${REPUTATION_INTERVAL_SEC:-300}"
 export PLATFORM_ADMIN_EMAILS="${PLATFORM_ADMIN_EMAILS:-}"
 export INSTALL_DIR="$ROOT/web/install"
@@ -88,12 +90,21 @@ services() {
   status
 }
 
+stop_web() {
+  [ -f "$WEB_PID" ] && kill "$(cat "$WEB_PID")" 2>/dev/null || true
+  rm -f "$WEB_PID"
+  # next spawns a child server; make sure nothing is left on the port.
+  lsof -ti tcp:3000 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
+}
+
 web() {
   need npm "https://nodejs.org"
   mkdir -p "$LOGS"
-  (cd web/console && [ -d node_modules ] || npm install --no-audit --no-fund)
-  (cd web/console && API_ORIGIN="http://localhost:8080" NEXT_TELEMETRY_DISABLED=1 npx next dev --port 3000 > "$LOGS/web.log" 2>&1 &
-   echo $! >> "$PIDS")
+  stop_web
+  [ -d web/console/node_modules ] || (cd web/console && npm install --no-audit --no-fund)
+  # Detached, with its own log, so the script returns and pipes are not held.
+  ( cd web/console && API_ORIGIN="http://localhost:8080" NEXT_TELEMETRY_DISABLED=1 \
+      nohup npx next dev --port 3000 > "$LOGS/web.log" 2>&1 < /dev/null & echo $! > "$WEB_PID" )
   echo "web console starting on http://localhost:3000 (logs: logs/web.log)"
 }
 
@@ -117,7 +128,7 @@ case "${1:-up}" in
   db) db ;;
   services) services ;;
   web) web ;;
-  down) stop_pids; pkill -f "next dev --port 3000" 2>/dev/null || true; echo "stopped" ;;
+  down) stop_pids; stop_web; echo "stopped" ;;
   status) status ;;
   *) sed -n '2,12p' "$0"; exit 2 ;;
 esac

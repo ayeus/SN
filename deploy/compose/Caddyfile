@@ -1,0 +1,34 @@
+# TLS edge for the production stack. Caddy obtains and renews certificates for
+# both names, so each must resolve to this machine before the first start.
+
+{
+	email {$ACME_EMAIL}
+}
+
+# Console and API.
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		-Server
+	}
+
+	reverse_proxy gateway:8080 {
+		# Streamed completions (SSE) must reach the client token by token.
+		flush_interval -1
+	}
+}
+
+# Host agents hold one long-lived gRPC stream each. The coordinator speaks
+# cleartext HTTP/2 (h2c) behind this proxy.
+{$COORDINATOR_DOMAIN} {
+	reverse_proxy h2c://coordinator:50051 {
+		flush_interval -1
+	}
+}

@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 import {
   Boxes,
   CreditCard,
@@ -19,13 +19,39 @@ import {
   Wallet as WalletIcon,
   X,
 } from "lucide-react";
-import { BRAND } from "@/lib/brand";
+import { Logo } from "./Logo";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { money } from "@/lib/format";
 import { useData } from "@/lib/hooks";
 import type { Wallet } from "@/lib/types";
-import { cx } from "./ui";
+import { Notice, cx } from "./ui";
+
+// Shown once after sign-up, on whichever page sign-up sent the user to.
+function WelcomeNotice() {
+  const welcome = useSearchParams().get("welcome");
+  const [dismissed, setDismissed] = useState(false);
+  if (!welcome || dismissed) return null;
+  return (
+    <Notice tone={welcome === "none" ? "warn" : "success"} className="mb-6 flex items-start justify-between gap-4">
+      {welcome === "none" ? (
+        <span>
+          Your account is ready. No welcome credit was added because too many accounts were created from this network
+          today.{" "}
+          <Link href="/app/billing" className="font-medium underline">
+            Add funds
+          </Link>{" "}
+          to deploy a model.
+        </span>
+      ) : (
+        <span>Your account is ready and {welcome} of credit is in your wallet.</span>
+      )}
+      <button onClick={() => setDismissed(true)} className="text-[13px] text-muted hover:text-ink" aria-label="Dismiss">
+        Dismiss
+      </button>
+    </Notice>
+  );
+}
 
 type Item = { href: string; label: string; icon: React.ComponentType<{ size?: number }>; exact?: boolean };
 
@@ -55,10 +81,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!loading && !me) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
   }, [loading, me, pathname, router]);
-  useEffect(() => setOpen(false), [pathname]);
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
 
   if (loading || !me) {
-    return <div className="grid min-h-screen place-items-center text-muted">Loading your workspace…</div>;
+    return <div className="grid min-h-[100dvh] place-items-center text-muted">Loading your workspace…</div>;
   }
 
   const items = hostMode ? HOST : DEPLOY;
@@ -67,7 +95,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const nav = (
     <nav className="flex h-full flex-col gap-6 px-3 py-5">
       <Link href="/app" className="px-2 text-[17px] font-semibold tracking-[-0.01em]">
-        {BRAND.name}
+        <Logo />
       </Link>
 
       <div className="grid grid-cols-2 rounded-lg bg-surface-2 p-1 text-[13px] font-medium" role="tablist" aria-label="Workspace">
@@ -97,7 +125,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               aria-current={isActive(i) ? "page" : undefined}
               className={cx(
                 "flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[14px]",
-                isActive(i) ? "bg-nil-soft font-medium text-nil" : "text-muted hover:bg-surface-2 hover:text-ink",
+                isActive(i) ? "bg-nil-soft font-medium text-nil shadow-[inset_2px_0_0_var(--nil)]" : "text-muted hover:bg-surface-2 hover:text-ink",
               )}
             >
               <i.icon size={16} />
@@ -112,7 +140,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Link href="/app/billing" className="rounded-lg border border-line px-3 py-2.5 hover:bg-surface-2">
             <div className="text-[12px] text-muted">Wallet balance</div>
             <div className={cx("text-[15px] font-semibold", wallet.data.low_balance && "text-danger")}>
-              {money(wallet.data.balance)}
+              {money(wallet.data.balance, { balance: true })}
             </div>
           </Link>
         )}
@@ -141,21 +169,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           </li>
         </ul>
-        <div className="border-t border-line px-2.5 pt-3 text-[12px] text-muted">
-          <div className="truncate font-medium text-ink">{me.user.name}</div>
-          <div className="truncate">{me.organization.name}</div>
+        <div className="flex items-center gap-2.5 border-t border-line px-2.5 pt-3 text-[12px] text-muted">
+          <span aria-hidden className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-nil text-[12px] font-semibold text-on-nil">
+            {me.user.name
+              .split(/\s+/)
+              .map((w) => w[0])
+              .slice(0, 2)
+              .join("")
+              .toUpperCase()}
+          </span>
+          <div className="min-w-0">
+            <div className="truncate font-medium text-ink">{me.user.name}</div>
+            <div className="truncate">{me.organization.name}</div>
+          </div>
         </div>
       </div>
     </nav>
   );
 
   return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[240px_1fr]">
-      <aside className="sticky top-0 hidden h-screen border-r border-line bg-surface lg:block">{nav}</aside>
+    <div className="min-h-[100dvh] lg:grid lg:grid-cols-[248px_1fr]">
+      <aside className="sticky top-0 hidden h-[100dvh] border-r border-line bg-[var(--glass)] backdrop-blur-xl lg:block">{nav}</aside>
 
       <div className="flex items-center justify-between border-b border-line bg-surface px-4 py-3 lg:hidden">
         <Link href="/app" className="font-semibold">
-          {BRAND.name}
+          <Logo />
         </Link>
         <button onClick={() => setOpen(true)} aria-label="Open navigation" className="rounded-md p-1.5 hover:bg-surface-2">
           <Menu size={20} />
@@ -174,7 +212,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
 
       <main className="min-w-0 px-4 py-8 sm:px-8 lg:px-10">
-        <div className="mx-auto max-w-[1180px]">{children}</div>
+        <div className="mx-auto max-w-[1180px]">
+          <Suspense>
+            <WelcomeNotice />
+          </Suspense>
+          {children}
+        </div>
       </main>
     </div>
   );

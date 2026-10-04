@@ -1,97 +1,106 @@
-# AyeusANN — Local Development Guide
+# Local development
 
 ## Prerequisites
 
-| Tool | Version | Install |
-|------|---------|---------|
-| Go | 1.23+ | `brew install go` |
-| Rust | stable | `brew install rust` |
+| Tool | Version | Install (macOS) |
+|---|---|---|
+| Docker | recent | [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
+| Go | 1.25+ | `brew install go` |
+| Rust | stable | [rustup.rs](https://rustup.rs) |
 | Node.js | 22+ | `nvm install 22` |
-| Docker | Latest | [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
-| protoc | 3.x | `brew install protobuf` |
-| buf | Latest | `brew install buf` |
-| migrate | Latest | `brew install golang-migrate` |
-| Python | 3.11+ | System or `brew install python` |
+| golang-migrate | 4.x | `brew install golang-migrate` |
+| Ollama | recent | [ollama.com/download](https://ollama.com/download) |
+| buf, protoc | recent | `brew install buf protobuf` (only to regenerate protobuf code) |
 
-## Quick Start
+## Start
 
 ```bash
-# Clone the repository
-git clone <repo-url> && cd AyeusANN
-
-# Copy environment variables
-cp .env.example .env
-
-# Start everything
 make dev
 ```
 
-This starts:
-- **Postgres** on `:5432` (user: `AyeusANN`, pass: `AyeusANN_dev`)
-- **Redis** on `:6379`
-- **NATS** on `:4222` (monitoring: `:8222`)
-- **MinIO** on `:9000` (console: `:9001`, user: `AyeusANN`, pass: `AyeusANN_dev`)
-- **8 Go services** on ports `8080–8087`
+This starts Postgres (`:5433`) and Redis (`:6379`) in Docker, creates, migrates
+and seeds `ayeusann_dev` and `ayeusann_test`, builds and starts the Go services,
+and starts the web console. Open http://localhost:8080.
 
-## Service Ports
+No `.env` is needed: every service has development defaults. Copy
+`.env.example` to `.env` to override them.
 
-| Service | Port | Description |
-|---------|------|-------------|
-| gateway | 8080 | API Gateway (authn, rate limit) |
-| control-api | 8081 | CRUD for orgs, users, deployments |
-| scheduler | 8082 | GPU placement and scheduling |
-| coordinator | 8083 | Agent session management |
-| router | 8084 | Inference request routing |
-| inference-gateway | 8085 | TLS, key auth, per-key limits |
-| billing-meter | 8086 | Usage → ledger → invoices |
-| trust-engine | 8087 | Reputation and verification |
+| Service | Port | Role |
+|---|---|---|
+| gateway | 8080 | Public entry point; proxies the API and the console |
+| control-api | 8081 | Accounts, models, deployments, hosts, ops |
+| scheduler | 8082 | Places replicas on GPUs |
+| coordinator | 8083, gRPC 50051 | Agent sessions, manifests, inference tunnel |
+| inference-gateway | 8085 | OpenAI-compatible API, key auth, metering |
+| billing-meter | 8086 | Wallet, usage, invoices, top-ups |
+| trust-engine | 8087 | Host reputation |
+| web console | 3000 | Next.js dev server, reached through the gateway |
 
-## Common Commands
+## Commands
+
+| Command | What it does |
+|---|---|
+| `make dev` | Start everything |
+| `make down` | Stop the services and the console (Postgres and Redis keep running) |
+| `make status` | Health of every service |
+| `make services` | Rebuild and restart the Go services |
+| `make web` | Restart the console dev server |
+| `make db` | Create, migrate and seed both databases |
+| `make migrate` / `make migrate-down` | Apply or roll back one dev migration |
+| `make test` | Go, Rust and web tests |
+| `make lint` | `go vet`, `clippy`, `buf lint` |
+| `make fmt` | `gofmt` and `cargo fmt` |
+| `make proto` | Regenerate `gen/go` from `proto/` |
+
+Logs are in `logs/<service>.log` and `logs/web.log`.
+
+## Adding a host
+
+Sign in, open **Host → Add a machine → Create install command**, and run the
+**From this repo** command in another terminal. It builds the agent and connects
+this machine through Ollama.
+
+For a second local host without a second GPU:
 
 ```bash
-make dev            # Start full dev environment
-make dev-stop       # Stop everything
-make check          # Health check all services
-make build          # Build all binaries
-make test           # Run all tests
-make lint           # Lint all code
-make fmt            # Format all code
-make migrate        # Run database migrations
-make migrate-down   # Rollback last migration
-make seed           # Seed database with catalog model
-make proto          # Generate protobuf code
-make clean          # Clean build artifacts
+./run-node.sh --fake-gpu --instance b --token <token>
 ```
+
+A fake-GPU host reports invented hardware and is labelled as such; it exercises
+enrolment, scheduling and failover, not real inference performance.
+
+## Tests
+
+```bash
+make test-go        # needs `make db`; integration tests use ayeusann_test
+make test-agent
+make test-web       # type-check
+scripts/smoke.sh    # end to end against a running `make dev` and Ollama
+```
+
+`scripts/smoke.sh` signs up, enrols two hosts, deploys, streams a chat, checks
+billing, kills a host to test failover, and stops the deployment.
+
+Go integration tests skip when the test database is unreachable. Set
+`SN_REQUIRE_DB=1` to make them fail instead, as CI does.
 
 ## Database
 
-Connect directly:
 ```bash
-psql postgres://AyeusANN:AyeusANN_dev@localhost:5432/AyeusANN
+psql postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann_dev
 ```
 
-Reset:
-```bash
-make migrate-down
-make migrate
-make seed
-```
+Migrations are in `schema/migrations`, seed data (model catalogue, GPU rate
+card) in `schema/seeds`. Seeds are idempotent and re-applied by `make db`.
 
-## Fake GPU Mode
+## Password reset in development
 
-The development environment runs in **fake GPU mode** by default (`SN_FAKE_GPU=true`).
-This allows the complete control plane workflow without NVIDIA hardware.
+With no SMTP relay configured, the reset email is written to
+`logs/control-api.log` instead of being sent.
 
-> ⚠️ Fake GPU mode does NOT validate real GPU execution. Use staging with real GPUs for that.
+## Production
 
-## Architecture
-
-See [03_System_Architecture.md](../docs/) for the full system design.
-
-```
-Customer → Gateway → Control API → Scheduler → Coordinator → Agent
-                                                                ↓
-                              Inference GW → Router → Replica (vLLM)
-                                                        ↓
-                                              Usage Event → Billing Meter
-```
+See [deployment.md](deployment.md). To try the production images locally, set
+`APP_DOMAIN=localhost` and `COORDINATOR_DOMAIN=coordinator.localhost` in
+`deploy/compose/.env.prod`; Caddy then issues certificates from its own local
+authority, which browsers and agents do not trust by default.

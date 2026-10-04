@@ -329,3 +329,91 @@ func TestBYORules(t *testing.T) {
 		}
 	}
 }
+
+type captureMailer struct{ body string }
+
+func (m *captureMailer) Send(_, _, body string) error { m.body = body; return nil }
+
+func TestPasswordResetFlow(t *testing.T) {
+	h := newHarness(t)
+	mail := &captureMailer{}
+	h.api.mailer = mail
+
+	email := "reset@" + uuid.NewString()[:8] + ".example.com"
+	if code := h.do("POST", "/v1/auth/signup", "", map[string]string{"email": email, "password": "Correct-Horse-9", "name": "R"}, nil); code != http.StatusCreated {
+		t.Fatalf("signup %d", code)
+	}
+	var old AuthResponse
+	h.do("POST", "/v1/auth/login", "", map[string]string{"email": email, "password": "Correct-Horse-9"}, &old)
+
+	// An unknown address gets the same answer and no email.
+	if code := h.do("POST", "/v1/auth/password/forgot", "", map[string]string{"email": "nobody@" + uuid.NewString()[:8] + ".example.com"}, nil); code != http.StatusOK || mail.body != "" {
+		t.Fatalf("unknown email must look identical and send nothing: %d %q", code, mail.body)
+	}
+	if code := h.do("POST", "/v1/auth/password/forgot", "", map[string]string{"email": email}, nil); code != http.StatusOK {
+		t.Fatalf("forgot %d", code)
+	}
+	i := strings.Index(mail.body, "/reset?token=")
+	if i < 0 {
+		t.Fatalf("no reset link in mail: %q", mail.body)
+	}
+	token := strings.Fields(mail.body[i+len("/reset?token="):])[0]
+
+	if code := h.do("POST", "/v1/auth/password/reset", "", map[string]string{"token": token, "password": "weak"}, nil); code != http.StatusBadRequest {
+		t.Fatalf("weak password should be rejected, got %d", code)
+	}
+	if code := h.do("POST", "/v1/auth/password/reset", "", map[string]string{"token": token, "password": "Brand-New-Pass-7"}, nil); code != http.StatusOK {
+		t.Fatalf("reset %d", code)
+	}
+	if code := h.do("POST", "/v1/auth/password/reset", "", map[string]string{"token": token, "password": "Another-Pass-77"}, nil); code != http.StatusBadRequest {
+		t.Fatalf("a reset link must work once, got %d", code)
+	}
+	if code := h.do("POST", "/v1/auth/login", "", map[string]string{"email": email, "password": "Correct-Horse-9"}, nil); code != http.StatusUnauthorized {
+		t.Fatalf("old password still works: %d", code)
+	}
+	if code := h.do("POST", "/v1/auth/login", "", map[string]string{"email": email, "password": "Brand-New-Pass-7"}, nil); code != http.StatusOK {
+		t.Fatalf("new password rejected: %d", code)
+	}
+	// Sessions issued before the reset are dead.
+	time.Sleep(1100 * time.Millisecond)
+	if code := h.do("GET", "/v1/auth/me", old.AccessToken, nil, nil); code != http.StatusUnauthorized {
+		t.Fatalf("pre-reset session should be invalid, got %d", code)
+	}
+}
+
+func TestLoginRateLimit(t *testing.T) {
+	l := newAttemptLimiter(3, time.Minute)
+	for i := 0; i < 3; i++ {
+		if !l.allow("k") {
+			t.Fatalf("attempt %d should be allowed", i+1)
+		}
+	}
+	if l.allow("k") {
+		t.Fatal("4th attempt within the window must be blocked")
+	}
+	if !l.allow("other") {
+		t.Fatal("limits are per key")
+	}
+}
+
+func TestInstallTokenStatus(t *testing.T) {
+	h := newHarness(t)
+	s := h.signup("tok")
+	var tok struct {
+		ID string `json:"token_id"`
+	}
+	if code := h.do("POST", "/v1/hosts/register-token", s.Token, map[string]string{"tier": "t3"}, &tok); code != http.StatusCreated || tok.ID == "" {
+		t.Fatalf("register-token: %d %+v", code, tok)
+	}
+	var st struct {
+		Used   bool    `json:"used"`
+		HostID *string `json:"host_id"`
+	}
+	if code := h.do("GET", "/v1/host-tokens/"+tok.ID, s.Token, nil, &st); code != http.StatusOK || st.Used || st.HostID != nil {
+		t.Fatalf("fresh token should be unused: %d %+v", code, st)
+	}
+	other := h.signup("tok-other")
+	if code := h.do("GET", "/v1/host-tokens/"+tok.ID, other.Token, nil, nil); code != http.StatusNotFound {
+		t.Fatalf("another user must not see the token, got %d", code)
+	}
+}

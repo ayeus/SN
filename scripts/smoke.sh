@@ -16,7 +16,20 @@ COORD="${COORD:-http://localhost:50051}"
 MODEL="${MODEL:-gemma-2-2b-it}"
 WORK="$(mktemp -d)"
 AGENTS=()
-trap 'for p in "${AGENTS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORK"' EXIT
+RUN="$(uuidgen | tr A-Z a-z | cut -c1-8)"   # fresh host identities each run
+cleanup() {
+  # Runs on success and on failure: a leftover running deployment would claim
+  # every GPU that connects afterwards.
+  if [ -n "${TOKEN:-}" ]; then
+    [ -n "${DEP:-}" ] && api DELETE "/v1/deployments/$DEP" >/dev/null 2>&1 || true
+    for H in $(api GET /v1/hosts 2>/dev/null | python3 -c "import json,sys; print(' '.join(h['id'] for h in json.load(sys.stdin).get('hosts', [])))" 2>/dev/null); do
+      api DELETE "/v1/hosts/$H" >/dev/null 2>&1 || true
+    done
+  fi
+  for p in "${AGENTS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 pass() { printf '  \033[32mpass\033[0m  %s\n' "$*"; }
 fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; exit 1; }
@@ -27,12 +40,29 @@ echo "Smoke test against $BASE with $MODEL"
 curl -sf "$BASE/v1/network/stats" >/dev/null || fail "gateway not reachable at $BASE (run make dev)"
 curl -sf http://127.0.0.1:11434/api/version >/dev/null || fail "Ollama is not running"
 
+# Hosts serve whichever deployment is waiting, so a deployment already short of
+# replicas would take the two hosts enrolled below before the smoke deployment.
+if docker exec ann-postgres true 2>/dev/null; then
+  WAITING=$(docker exec ann-postgres psql -U ayeusann -d "${DEV_DB:-ayeusann_dev}" -Atc "
+    SELECT string_agg(d.name || ' (' || o.name || ')', ', ')
+    FROM deployments d JOIN organizations o ON o.id = d.org_id
+    WHERE d.deleted_at IS NULL AND d.desired_state = 'running' AND d.state <> 'failed'
+      AND (SELECT COUNT(*) FROM replicas r WHERE r.deployment_id = d.id
+           AND r.state NOT IN ('stopped', 'failed', 'stopping')) < GREATEST(d.min_replicas, 1)")
+  [ -z "$WAITING" ] || fail "other deployments are waiting for a host and would take the smoke hosts: $WAITING. Stop or pause them first."
+fi
+
 # 1. Sign up (India → INR wallet with ₹500).
 EMAIL="smoke@$(uuidgen | tr A-Z a-z | cut -c1-8).example.com"
 R=$(curl -sS -X POST "$BASE/v1/auth/signup" -H 'Content-Type: application/json' \
     -d "{\"email\":\"$EMAIL\",\"password\":\"Smoke-Test-2026\",\"name\":\"Smoke Test\",\"country\":\"IN\"}")
 TOKEN=$(echo "$R" | json "['access_token']") || fail "signup: $R"
 BAL0=$(api GET /v1/billing/wallet | json "['balance']['amount']")
+if python3 -c "import sys; sys.exit(0 if float('$BAL0') <= 0 else 1)"; then
+  # Welcome credit is rate-limited per network; fall back to dev test credit.
+  api POST /v1/billing/topup -d '{"amount":"100","method":"test"}' >/dev/null
+  BAL0=$(api GET /v1/billing/wallet | json "['balance']['amount']")
+fi
 pass "signed up $EMAIL, wallet $BAL0 INR"
 
 # 2. Enrol two hosts on this machine (distinct dev instances).
@@ -40,7 +70,7 @@ cargo build --release --quiet --manifest-path agent/Cargo.toml
 for i in a b; do
   REG=$(api POST /v1/hosts/register-token -d '{"tier":"t3","region":"IN-SOUTH"}' | json "['registration_token']")
   agent/target/release/ayeusann-agent --token "$REG" --coordinator "$COORD" --region IN-SOUTH \
-      --data-dir "$WORK/$i" --instance "smoke-$i" > "$WORK/agent-$i.log" 2>&1 &
+      --data-dir "$WORK/$i" --instance "smoke-$RUN-$i" > "$WORK/agent-$i.log" 2>&1 &
   AGENTS+=($!)
 done
 for _ in $(seq 1 60); do
@@ -120,4 +150,5 @@ for _ in $(seq 1 60); do
 done
 [ "$S" = "stopped" ] || fail "deployment did not stop (state $S)"
 pass "deployment stopped"
+
 echo "All checks passed."

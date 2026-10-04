@@ -288,9 +288,9 @@ func (g *Gateway) HandleInference(w http.ResponseWriter, r *http.Request) {
 		}
 
 		g.router.markHealthy(rep.ID)
-		status := g.relay(w, resp)
+		status, streamed := g.relay(w, resp)
 		g.router.release(rep.ID)
-		g.meter(r, requestID, p, tgt, rep, resp, status, start)
+		g.meter(r, requestID, p, tgt, rep, resp, status, start, streamed, estimatePromptTokens(body))
 		return
 	}
 
@@ -323,7 +323,11 @@ func (g *Gateway) tunnel(ctx context.Context, requestID, replicaID, path string,
 
 // relay copies the replica's response to the client, flushing as bytes arrive
 // so server-sent events reach the client token by token.
-func (g *Gateway) relay(w http.ResponseWriter, resp *http.Response) int {
+//
+// It also counts the content deltas of a stream as they pass. Runtimes emit one
+// delta per token, so if the client disconnects before the final usage report
+// arrives the request can still be billed for what was generated.
+func (g *Gateway) relay(w http.ResponseWriter, resp *http.Response) (int, int) {
 	defer resp.Body.Close()
 	for _, h := range []string{"Content-Type", "Cache-Control"} {
 		if v := resp.Header.Get(h); v != "" {
@@ -332,12 +336,14 @@ func (g *Gateway) relay(w http.ResponseWriter, resp *http.Response) int {
 	}
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
+	var counter deltaCounter
 	buf := make([]byte, 16<<10)
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
+			counter.write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return 499 // client went away
+				return 499, counter.n // client went away
 			}
 			if flusher != nil {
 				flusher.Flush()
@@ -345,16 +351,67 @@ func (g *Gateway) relay(w http.ResponseWriter, resp *http.Response) int {
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return resp.StatusCode
+				return resp.StatusCode, counter.n
 			}
-			return 499
+			return 499, counter.n
 		}
 	}
 }
 
+// deltaCounter counts non-empty content deltas in an SSE byte stream.
+type deltaCounter struct {
+	line []byte
+	n    int
+}
+
+func (c *deltaCounter) write(p []byte) {
+	for _, b := range p {
+		if b != '\n' {
+			if len(c.line) < 1<<16 {
+				c.line = append(c.line, b)
+			}
+			continue
+		}
+		if data, ok := bytes.CutPrefix(c.line, []byte("data:")); ok {
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+					Text string `json:"text"`
+				} `json:"choices"`
+			}
+			if json.Unmarshal(bytes.TrimSpace(data), &chunk) == nil && len(chunk.Choices) > 0 &&
+				(chunk.Choices[0].Delta.Content != "" || chunk.Choices[0].Text != "") {
+				c.n++
+			}
+		}
+		c.line = c.line[:0]
+	}
+}
+
+// estimatePromptTokens approximates prompt size (~4 characters per token) for
+// the one case with no exact count: a stream the client abandoned.
+func estimatePromptTokens(body []byte) int {
+	var req struct {
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+		Prompt json.RawMessage `json:"prompt"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return 0
+	}
+	chars := len(req.Prompt)
+	for _, m := range req.Messages {
+		chars += len(m.Content)
+	}
+	return (chars + 3) / 4
+}
+
 // meter records the request. It runs detached from the client's context so a
 // client hanging up after the last token does not skip billing.
-func (g *Gateway) meter(r *http.Request, requestID string, p *principal, tgt *target, rep replica, resp *http.Response, status int, start time.Time) {
+func (g *Gateway) meter(r *http.Request, requestID string, p *principal, tgt *target, rep replica, resp *http.Response, status int, start time.Time, streamed, promptEstimate int) {
 	prompt, _ := strconv.Atoi(resp.Trailer.Get(trailerPromptTokens))
 	completion, _ := strconv.Atoi(resp.Trailer.Get(trailerCompletionTokens))
 	upstreamErr := resp.Trailer.Get(trailerError)
@@ -365,6 +422,14 @@ func (g *Gateway) meter(r *http.Request, requestID string, p *principal, tgt *ta
 		outcome = billing.StatusCancelled
 	case status >= 400 || upstreamErr != "":
 		outcome = billing.StatusError
+	}
+	// A cancelled stream never delivers its usage trailer. Bill the tokens that
+	// were actually streamed rather than nothing.
+	if outcome == billing.StatusCancelled && completion == 0 && streamed > 0 {
+		completion = streamed
+		if prompt == 0 {
+			prompt = promptEstimate
+		}
 	}
 	elapsed := time.Since(start)
 

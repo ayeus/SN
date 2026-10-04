@@ -52,6 +52,33 @@ func main() {
 		}
 	}()
 
+	// Housekeeping. usage_events is partitioned by month and inserts fail once
+	// the pre-created partitions run out, so the window is extended here; the
+	// remaining statements bound tables that otherwise grow without limit.
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			for name, q := range map[string]string{
+				"usage partitions":    `SELECT maintain_usage_events_partitions(3);`,
+				"revoked tokens":      `DELETE FROM revoked_tokens WHERE expires_at < NOW();`,
+				"auth tokens":         `DELETE FROM auth_tokens WHERE expires_at < NOW() - INTERVAL '7 days';`,
+				"idempotency keys":    `DELETE FROM idempotency_keys WHERE created_at < NOW() - INTERVAL '24 hours';`,
+				"host telemetry":      `DELETE FROM host_telemetry WHERE ts < NOW() - INTERVAL '30 days';`,
+				"registration tokens": `DELETE FROM host_registration_tokens WHERE expires_at < NOW() - INTERVAL '30 days';`,
+			} {
+				if _, err := dbClient.Pool.Exec(ctx, q); err != nil && ctx.Err() == nil {
+					logger.Error("housekeeping failed", "task", name, "err", err)
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+
 	srv, err := platform.NewServer(platform.ServiceConfig{Name: "scheduler", Version: "0.3.0", Port: port})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)

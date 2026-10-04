@@ -86,3 +86,33 @@ func TestNextStatusFollowsUML(t *testing.T) {
 		}
 	}
 }
+
+func TestUptimeByTier(t *testing.T) {
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	start := now.Add(-24 * time.Hour)
+	// Online for two clean one-hour sessions, off the rest of the day.
+	var mins []time.Time
+	for _, h := range []int{2, 20} {
+		for m := 0; m < 60; m++ {
+			mins = append(mins, start.Add(time.Duration(h)*time.Hour+time.Duration(m)*time.Minute))
+		}
+	}
+	if got := Uptime(mins, start, now, "t3"); got < 99.9 {
+		t.Fatalf("a T3 laptop that was stable while online must score ~100, got %.1f", got)
+	}
+	if got := Uptime(mins, start, now, "t2"); got > 9 || got < 8 {
+		t.Fatalf("a T2 host online 2h of 24 must score ~8.3, got %.1f", got)
+	}
+
+	// A T3 host that flaps inside a session is penalised: 30 of 59 minutes.
+	var flappy []time.Time
+	for m := 0; m < 60; m += 2 {
+		flappy = append(flappy, start.Add(time.Duration(m)*time.Minute))
+	}
+	if got := Uptime(flappy, start, now, "t3"); got > 55 || got < 45 {
+		t.Fatalf("flapping T3 host should score ~50, got %.1f", got)
+	}
+	if Uptime(nil, start, now, "t3") != 0 {
+		t.Fatal("no telemetry means no uptime")
+	}
+}

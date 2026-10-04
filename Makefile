@@ -1,6 +1,7 @@
 # AyeusANN — common tasks. `make help` lists them.
 
 .PHONY: help dev db services web down status build build-go build-agent build-web dist-agent \
+        dist-agent-linux images prod-up prod-down prod-logs prod-status \
         test test-go test-agent test-web lint lint-go lint-agent lint-proto proto fmt migrate migrate-down clean
 
 GO_SERVICES := gateway control-api scheduler coordinator inference-gateway billing-meter trust-engine
@@ -55,6 +56,29 @@ dist-agent: build-agent ## Publish this machine's agent build for /downloads
 	@os=$$(uname -s | tr A-Z a-z); arch=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
 	 cp agent/target/release/ayeusann-agent dist/agent/ayeusann-agent-$$os-$$arch && \
 	 echo "published dist/agent/ayeusann-agent-$$os-$$arch"
+
+dist-agent-linux: ## Build the Linux agent in Docker for /downloads (ARCH=amd64|arm64)
+	docker build -f agent/Dockerfile --platform linux/$(or $(ARCH),amd64) --output type=local,dest=dist/agent .
+
+# ─── Production (single machine, Docker Compose) ─────────────
+
+PROD_COMPOSE := docker compose -f deploy/compose/docker-compose.prod.yml --env-file deploy/compose/.env.prod
+
+images: ## Build the production images
+	$(PROD_COMPOSE) build
+
+prod-up: ## Build, migrate and start the production stack
+	@mkdir -p dist/agent
+	$(PROD_COMPOSE) up -d --build --wait
+
+prod-down: ## Stop the production stack (data volumes are kept)
+	$(PROD_COMPOSE) down
+
+prod-logs: ## Follow production logs
+	$(PROD_COMPOSE) logs -f --tail=100
+
+prod-status: ## State and health of every production container
+	$(PROD_COMPOSE) ps
 
 # ─── Test and lint ───────────────────────────────────────────
 

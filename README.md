@@ -65,6 +65,8 @@ To verify the whole flow automatically, run `scripts/smoke.sh`. It signs up, enr
 | `make lint` | `go vet`, `clippy`, `buf lint` |
 | `make proto` | Regenerate protobuf code |
 | `make dist-agent` | Publish this machine's agent build so the installer can download it |
+| `make dist-agent-linux` | Build the Linux agent in Docker for the installer |
+| `make prod-up` | Build, migrate and start the production stack ([guide](docs/deployment.md)) |
 
 Logs are written to `logs/<service>.log`.
 
@@ -101,8 +103,8 @@ schema/           SQL migrations and seed data (catalogue, GPU rate card)
 web/console/      Next.js console: landing page, customer console, host console, ops
 web/install/      Host installers served at /install.sh
 scripts/          dev.sh (local environment), smoke.sh (end-to-end test)
-deploy/           docker-compose, k8s, terraform
-docs/             Development guide and architecture decision records
+deploy/           Dockerfiles and docker-compose (dev infrastructure, production stack)
+docs/             Development and deployment guides, architecture decision records
 _archive/         Superseded code kept for reference (old frontends, standalone router)
 ```
 
@@ -129,6 +131,10 @@ _archive/         Superseded code kept for reference (old frontends, standalone 
 ## Configuration
 
 Every service has working development defaults. In production the services refuse to start without real secrets and TLS. See [`.env.example`](.env.example) for every setting, including Razorpay keys, platform admin emails and public URLs.
+
+## Production
+
+`make prod-up` runs the whole platform on one machine with Docker Compose: Caddy for TLS, the services, the console, Postgres and Redis. See [docs/deployment.md](docs/deployment.md).
 
 ## License
 

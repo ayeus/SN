@@ -15,15 +15,13 @@ pub struct BenchmarkReport {
 }
 
 pub struct BenchmarkSuite {
-    fake_gpu: bool,
     coordinator_url: String,
     hw_fingerprint: String,
 }
 
 impl BenchmarkSuite {
-    pub fn new(fake_gpu: bool, coordinator_url: &str, hw_fingerprint: &str) -> Self {
+    pub fn new(_fake_gpu: bool, coordinator_url: &str, hw_fingerprint: &str) -> Self {
         Self {
-            fake_gpu,
             coordinator_url: coordinator_url.to_string(),
             hw_fingerprint: hw_fingerprint.to_string(),
         }
@@ -33,14 +31,12 @@ impl BenchmarkSuite {
         info!("starting AyeusANN hardware benchmark suite");
         let start = Instant::now();
 
-        let (score_compute, mem_bw) = if self.fake_gpu {
-            (85.5, 950.0)
-        } else {
-            // In physical hardware mode: measure host memory bandwidth.
-            // GPU compute is marked 0.0 (unmeasured) unless native GPU compute runner is executed.
-            let bw = self.benchmark_memory_bandwidth();
-            (0.0, bw)
-        };
+        // Measurements are always real, including in --fake-gpu mode: that mode
+        // simulates a GPU *identity* for development, never benchmark results.
+        // GPU compute is 0.0 ("not measured") until a native compute kernel
+        // exists; the control plane stores that as NULL.
+        let score_compute = 0.0;
+        let mem_bw = self.benchmark_memory_bandwidth();
 
         let (disk_read, disk_write) = self.benchmark_disk_io();
         let latency_ms = self.benchmark_network_latency();
@@ -95,8 +91,14 @@ impl BenchmarkSuite {
     /// Real disk I/O benchmark measuring write and read speeds (MB/s)
     fn benchmark_disk_io(&self) -> (f32, f32) {
         use std::io::{Read, Write};
-        let temp_path =
-            std::env::temp_dir().join(format!("ayeusann_disk_bench_{}.tmp", std::process::id()));
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let temp_path = std::env::temp_dir().join(format!(
+            "ayeusann_disk_bench_{}_{unique}.tmp",
+            std::process::id()
+        ));
         let data = vec![0xABu8; 10 * 1024 * 1024]; // 10MB test payload
 
         // Write benchmark
@@ -135,24 +137,50 @@ impl BenchmarkSuite {
     }
 
     /// Real network latency test to coordinator TCP port
+    /// Median TCP connect time to the coordinator, in milliseconds. The name
+    /// is resolved first so DNS time is not counted. Returns 0.0 (stored as
+    /// "not measured") when the coordinator cannot be reached.
     fn benchmark_network_latency(&self) -> f32 {
-        let clean_url = self
+        use std::net::ToSocketAddrs;
+        let is_tls = self.coordinator_url.starts_with("https://");
+        let clean = self
             .coordinator_url
             .trim_start_matches("http://")
             .trim_start_matches("https://");
-        let host_port = clean_url.split('/').next().unwrap_or("127.0.0.1:50051");
+        let authority = clean.split('/').next().unwrap_or_default();
+        let target = if authority
+            .rsplit(':')
+            .next()
+            .map(|p| p.parse::<u16>().is_ok())
+            .unwrap_or(false)
+            && authority.contains(':')
+        {
+            authority.to_string()
+        } else {
+            format!("{authority}:{}", if is_tls { 443 } else { 80 })
+        };
+        // A name can resolve to several addresses (localhost → ::1 and
+        // 127.0.0.1); use the first one that accepts a connection.
+        let timeout = std::time::Duration::from_secs(2);
+        let Some(addr) = target.to_socket_addrs().ok().and_then(|mut addrs| {
+            addrs.find(|a| std::net::TcpStream::connect_timeout(a, timeout).is_ok())
+        }) else {
+            return 0.0;
+        };
 
-        let start = Instant::now();
-        if let Ok(addr) = host_port.parse() {
-            if let Ok(stream) =
-                std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
-            {
-                let _ = stream.set_nodelay(true);
-                return start.elapsed().as_secs_f32() * 1000.0;
-            }
+        let mut samples: Vec<f32> = (0..5)
+            .filter_map(|_| {
+                let start = Instant::now();
+                std::net::TcpStream::connect_timeout(&addr, timeout)
+                    .ok()
+                    .map(|_| start.elapsed().as_secs_f32() * 1000.0)
+            })
+            .collect();
+        if samples.is_empty() {
+            return 0.0;
         }
-
-        0.0 // Return 0.0 indicating coordinator connection could not be established
+        samples.sort_by(|a, b| a.total_cmp(b));
+        samples[samples.len() / 2]
     }
 }
 
@@ -165,8 +193,9 @@ mod tests {
         let suite =
             BenchmarkSuite::new(true, "http://127.0.0.1:50051", "sha256:test_hw_fingerprint");
         let report = suite.run_all();
-        assert_eq!(report.score_compute, 85.5);
-        assert_eq!(report.vram_bw_gbps, 950.0);
+        // Fake-GPU mode must not invent results.
+        assert_eq!(report.score_compute, 0.0);
+        assert!(report.vram_bw_gbps > 0.0 && report.vram_bw_gbps < 900.0);
         assert_eq!(report.hw_fingerprint, "sha256:test_hw_fingerprint");
     }
 
@@ -184,5 +213,18 @@ mod tests {
         assert!(report.vram_bw_gbps > 0.0);
         assert!(report.disk_read_mbps > 0.0);
         assert!(report.disk_write_mbps > 0.0);
+    }
+
+    #[test]
+    fn latency_resolves_hostnames() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let suite = BenchmarkSuite::new(false, &format!("http://localhost:{port}"), "fp");
+        assert!(
+            suite.benchmark_network_latency() > 0.0,
+            "localhost must resolve"
+        );
+        let dead = BenchmarkSuite::new(false, "http://127.0.0.1:1", "fp");
+        assert_eq!(dead.benchmark_network_latency(), 0.0);
     }
 }

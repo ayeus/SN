@@ -101,7 +101,7 @@ export default function BillingPage() {
             <Skeleton className="h-16" />
           ) : (
             <div className="grid grid-cols-2 gap-6 sm:grid-cols-3">
-              <Stat label="Balance" value={<span className={cx(w.low_balance && "text-danger")}>{money(w.balance)}</span>} sub={w.low_balance ? "Running low" : undefined} />
+              <Stat label="Balance" value={<span className={cx(w.low_balance && "text-danger")}>{money(w.balance, { balance: true })}</span>} sub={w.low_balance ? "Running low" : undefined} />
               <Stat label="Spent today" value={money(w.spend_24h)} />
               <Stat label="Last 30 days" value={money(w.spend_30d)} />
             </div>
@@ -215,7 +215,7 @@ export default function BillingPage() {
                         {Number(e.delta.amount) > 0 ? "+" : ""}
                         {money(e.delta, { precise: true })}
                       </td>
-                      <td className="text-right text-muted">{money(e.balance_after)}</td>
+                      <td className="text-right text-muted">{money(e.balance_after, { balance: true })}</td>
                     </tr>
                   ))}
                 </tbody>

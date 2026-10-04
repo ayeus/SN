@@ -148,10 +148,10 @@ export default function HostPage() {
 
       <Panel className="mb-6">
         <div className="grid grid-cols-2 gap-6 md:grid-cols-4">
-          <Stat label="Earned today" value={earnings.data ? money(earnings.data.summary.today) : "—"} />
-          <Stat label="This month" value={earnings.data ? money(earnings.data.summary.month_to_date) : "—"} />
-          <Stat label="All time" value={earnings.data ? money(earnings.data.summary.lifetime) : "—"} />
-          <Stat label="Requests served" value={earnings.data ? number(earnings.data.summary.requests) : "—"} />
+          <Stat label="Earned today" value={earnings.data ? money(earnings.data.summary.today) : "-"} />
+          <Stat label="This month" value={earnings.data ? money(earnings.data.summary.month_to_date) : "-"} />
+          <Stat label="All time" value={earnings.data ? money(earnings.data.summary.lifetime) : "-"} />
+          <Stat label="Requests served" value={earnings.data ? number(earnings.data.summary.requests) : "-"} />
         </div>
       </Panel>
 
@@ -179,10 +179,10 @@ export default function HostPage() {
         <Panel title={`Reputation: ${h.reputation}`} description="Recomputed hourly. Below 40 the machine stops receiving new work.">
           {reputation ? (
             <div className="grid gap-4">
-              <Meter label="Uptime" weight="40%" value={reputation.uptime_pct} missing="—" />
+              <Meter label="Uptime" weight="40%" value={reputation.uptime_pct} missing="-" />
               <Meter label="Request success" weight="25%" value={reputation.correctness_pct} missing="no traffic yet" />
               <Meter label="Benchmark stability" weight="15%" value={reputation.benchmark_stability} missing="needs 2 runs" />
-              <Meter label="Age" weight="10%" value={Math.min(100, (reputation.age_days / 30) * 100)} missing="—" />
+              <Meter label="Age" weight="10%" value={Math.min(100, (reputation.age_days / 30) * 100)} missing="-" />
               <p className="text-[12px] text-muted">
                 Incidents in the last 30 days: {reputation.incident_rate ?? 0}. Computed {ago(reputation.computed_at)}.
               </p>

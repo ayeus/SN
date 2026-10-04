@@ -19,10 +19,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Signup-credit abuse limits, per rolling 24 hours.
-const (
-	maxGrantsPerIPPerDay     = 3
-	maxGrantsPerDomainPerDay = 25
+// Signup-credit abuse limits, per rolling 24 hours. A shared office or campus
+// network legitimately produces several signups from one address, so both are
+// configuration; local development raises them because every account comes
+// from 127.0.0.1.
+var (
+	maxGrantsPerIPPerDay     = platform.EnvInt("SIGNUP_GRANTS_PER_IP_PER_DAY", 3)
+	maxGrantsPerDomainPerDay = platform.EnvInt("SIGNUP_GRANTS_PER_DOMAIN_PER_DAY", 25)
 )
 
 type SignupRequest struct {
@@ -320,6 +323,10 @@ func (a *API) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	limitKey := strings.ToLower(strings.TrimSpace(req.Email))
+	if ip := clientIP(r); ip != nil {
+		limitKey = *ip + "|" + limitKey
+	}
 
 	var user domain.User
 	var passwordHash *string
@@ -340,6 +347,12 @@ func (a *API) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if passwordHash == nil || !auth.CheckPasswordHash(req.Password, *passwordHash) {
+		// Only failures count toward the limit, so a correct password always
+		// works until the limit is hit by guesses.
+		if !a.loginLimiter.allow(limitKey) {
+			writeError(w, http.StatusTooManyRequests, "Too many failed sign-in attempts. Wait 10 minutes or reset your password.")
+			return
+		}
 		platform.AuthFailuresTotal.WithLabelValues("control-api", "bad_password").Inc()
 		writeError(w, http.StatusUnauthorized, "Invalid email or password")
 		return

@@ -88,3 +88,19 @@ jobs:
       - run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+
+  images:
+    name: Production images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/docker/services.Dockerfile -t ayeusann/services .
+      - run: docker build -t ayeusann/console web/console
+      - name: Compose file is valid
+        run: docker compose -f deploy/compose/docker-compose.prod.yml --env-file deploy/compose/.env.prod.example config -q
+        env:
+          JWT_SECRET: ci
+          INTERNAL_SERVICE_SECRET: ci
+          POSTGRES_PASSWORD: ci
+          MANIFEST_SIGNING_KEY: ci
+

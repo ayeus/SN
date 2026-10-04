@@ -6,6 +6,8 @@ const apiOrigin = process.env.API_ORIGIN;
 
 const config: NextConfig = {
   reactStrictMode: true,
+  // A self-contained server in .next/standalone, which the production image runs.
+  output: "standalone",
   poweredByHeader: false,
   // Don't generate AGENTS.md / CLAUDE.md into the repo on `next dev`.
   agentRules: false,

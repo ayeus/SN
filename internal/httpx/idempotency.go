@@ -141,3 +141,6 @@ func (r *recorder) Write(b []byte) (int, error) {
 	r.buf.Write(b)
 	return r.ResponseWriter.Write(b)
 }
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }

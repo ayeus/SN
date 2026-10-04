@@ -29,6 +29,10 @@ type API struct {
 	heartbeatTimeout     time.Duration
 	platformAdmins       map[string]bool
 	signupCredit         money.Amount // in its own currency; converted per org
+
+	mailer       Mailer          // nil when email cannot be sent
+	loginLimiter *attemptLimiter // failed sign-ins per address+email
+	resetLimiter *attemptLimiter // reset emails per address / per email
 }
 
 // Config is the environment-derived part of API.
@@ -50,7 +54,7 @@ func NewAPI(database *db.Client, tm *auth.TokenManager, rev auth.RevocationStore
 	if cfg.HeartbeatTimeout <= 0 {
 		cfg.HeartbeatTimeout = 15 * time.Second
 	}
-	return &API{
+	api := &API{
 		db:                   database,
 		tm:                   tm,
 		revocations:          rev,
@@ -62,7 +66,11 @@ func NewAPI(database *db.Client, tm *auth.TokenManager, rev auth.RevocationStore
 		heartbeatTimeout:     cfg.HeartbeatTimeout,
 		platformAdmins:       admins,
 		signupCredit:         cfg.SignupCredit,
+		loginLimiter:         newAttemptLimiter(10, 10*time.Minute),
+		resetLimiter:         newAttemptLimiter(5, time.Hour),
 	}
+	api.mailer = NewMailer(api)
+	return api
 }
 
 // writeJSON and writeError keep handler code short.

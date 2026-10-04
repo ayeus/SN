@@ -29,13 +29,24 @@ type Upstreams struct {
 	// {deployment}.subdomains) to the inference plane (SRS FR-22).
 	InferenceHost string
 	CORSOrigins   []string
+	// TrustProxy keeps the X-Forwarded-For chain of a TLS-terminating proxy in
+	// front of the gateway, so services see the real client address. Leave it
+	// off when the gateway is the edge: a client could forge the header.
+	TrustProxy bool
 }
 
-func newProxy(target *url.URL, name string) *httputil.ReverseProxy {
+func newProxy(target *url.URL, name string, trustProxy bool) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
+			if trustProxy {
+				// SetXForwarded appends to the outbound chain, which Rewrite starts empty.
+				pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
+			}
 			pr.SetXForwarded()
+			if proto := pr.In.Header.Get("X-Forwarded-Proto"); trustProxy && proto != "" {
+				pr.Out.Header.Set("X-Forwarded-Proto", proto)
+			}
 			pr.Out.Host = pr.In.Host // services build absolute URLs from it
 		},
 		// Flush every write: SSE tokens must reach the client as they arrive.
@@ -60,17 +71,17 @@ func isInferenceRequest(r *http.Request) bool {
 
 // NewHandler builds the gateway's router.
 func NewHandler(u Upstreams) http.Handler {
-	control := newProxy(u.ControlAPI, "control-api")
-	inference := newProxy(u.Inference, "inference-gateway")
-	billingP := newProxy(u.Billing, "billing-meter")
-	trust := newProxy(u.Trust, "trust-engine")
+	control := newProxy(u.ControlAPI, "control-api", u.TrustProxy)
+	inference := newProxy(u.Inference, "inference-gateway", u.TrustProxy)
+	billingP := newProxy(u.Billing, "billing-meter", u.TrustProxy)
+	trust := newProxy(u.Trust, "trust-engine", u.TrustProxy)
 	var web http.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("The web console is not running. Start it with `make web` (or set WEB_URL).\n"))
 	})
 	if u.Web != nil {
-		web = newProxy(u.Web, "web console")
+		web = newProxy(u.Web, "web console", u.TrustProxy)
 	}
 
 	mux := http.NewServeMux()
@@ -186,6 +197,7 @@ func main() {
 		DownloadsDir:  platform.Env("DOWNLOADS_DIR", "dist/agent"),
 		InferenceHost: platform.Env("INFERENCE_HOST", ""),
 		CORSOrigins:   httpx.SplitList(platform.Env("CORS_ALLOWED_ORIGINS", "")),
+		TrustProxy:    platform.EnvBool("TRUST_PROXY_HEADERS", false),
 	})
 
 	srv.Mux.Handle("/", platform.MetricsMiddleware("gateway", handler))

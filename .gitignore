@@ -42,6 +42,7 @@ venv/
 .env.local
 .env.*.local
 !.env.example
+deploy/compose/.env.prod
 
 # Docker
 deploy/compose/data/
@@ -78,3 +79,4 @@ SpazeNode Dev Docs Pack/
 /gateway
 /billing-meter
 /trust-engine
+.dev-web-pid

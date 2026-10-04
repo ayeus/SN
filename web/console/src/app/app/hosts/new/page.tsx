@@ -12,6 +12,7 @@ import { EarningsCalculator } from "@/components/EarningsCalculator";
 
 type Issued = {
   registration_token: string;
+  token_id: string;
   expires_at: string;
   tier: Tier;
   region: string;
@@ -31,14 +32,20 @@ export default function AddMachinePage() {
   const [tier, setTier] = useState<Tier>("t3");
   const [region, setRegion] = useState("IN-SOUTH");
   const [issued, setIssued] = useState<Issued | null>(null);
-  const [issuedAt, setIssuedAt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [os, setOs] = useState<keyof Issued["commands"]>("linux_macos");
 
-  // Poll for the machine once a command exists.
-  const hosts = useData<{ hosts: HostSummary[] }>(issued ? () => api.get("/v1/hosts") : null, [!!issued], 3000);
-  const joined = hosts.data?.hosts.find((h) => new Date(h.created_at).getTime() >= issuedAt - 5000 || new Date(h.last_heartbeat_at ?? 0).getTime() >= issuedAt);
+  // The server knows exactly which machine redeemed this install command, so
+  // the page asks it rather than guessing from timestamps.
+  const tokenStatus = useData<{ used: boolean; host_id: string | null; expired: boolean }>(
+    issued ? () => api.get(`/v1/host-tokens/${issued.token_id}`) : null,
+    [issued?.token_id],
+    2500,
+  );
+  const hostId = tokenStatus.data?.host_id ?? null;
+  const hosts = useData<{ hosts: HostSummary[] }>(hostId ? () => api.get("/v1/hosts") : null, [hostId], 3000);
+  const joined = hosts.data?.hosts.find((h) => h.id === hostId);
 
   useEffect(() => {
     if (navigator.userAgent.includes("Windows")) setOs("windows_wsl");
@@ -50,7 +57,6 @@ export default function AddMachinePage() {
     try {
       const r = await api.post<Issued>("/v1/hosts/register-token", { tier, region }, { idempotent: true });
       setIssued(r);
-      setIssuedAt(Date.now());
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not create an install command");
     } finally {

@@ -242,7 +242,10 @@ func (r *Reconciler) ensureReplicas(ctx context.Context, d deployment, candidate
 		}
 		ok := false
 		for _, c := range ranked {
-			won, err := r.reserve(ctx, d, c)
+			won, err := r.reserve(ctx, d, c, target)
+			if errors.Is(err, errSatisfied) {
+				return placed, nil
+			}
 			if err != nil {
 				return placed, err
 			}
@@ -263,10 +266,32 @@ func (r *Reconciler) ensureReplicas(ctx context.Context, d deployment, candidate
 }
 
 // reserve inserts a replica and claims the GPU in one transaction. The GPU
-// claim is conditional, so two reconcilers cannot reserve the same device.
-func (r *Reconciler) reserve(ctx context.Context, d deployment, c placement.Scored) (bool, error) {
+// claim is conditional, so two reconcilers cannot reserve the same device, and
+// the replica count is re-read under the deployment's row lock, so they cannot
+// both fill the same slot either.
+func (r *Reconciler) reserve(ctx context.Context, d deployment, c placement.Scored, target int) (bool, error) {
 	won := false
 	err := r.db.ExecTx(ctx, func(tx pgx.Tx) error {
+		won = false
+		var desired string
+		if err := tx.QueryRow(ctx, `SELECT desired_state FROM deployments WHERE id = $1 FOR UPDATE;`, d.id).Scan(&desired); err != nil {
+			return err
+		}
+		var active int
+		var onHost bool
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*), COALESCE(BOOL_OR(host_id = $2), FALSE) FROM replicas
+			WHERE deployment_id = $1 AND state IN ('pending', 'pulling', 'loading', 'warming', 'serving', 'degraded');
+		`, d.id, c.HostID).Scan(&active, &onHost); err != nil {
+			return err
+		}
+		if desired != lifecycle.DesiredRunning || active >= target {
+			return errSatisfied
+		}
+		if onHost {
+			return errLostRace
+		}
+
 		var replicaID string
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO replicas (deployment_id, host_id, gpu_id, state, overlay_ip, healthy, detail)
@@ -309,7 +334,12 @@ func (r *Reconciler) reserve(ctx context.Context, d deployment, c placement.Scor
 	return won, err
 }
 
-var errLostRace = errors.New("gpu already reserved")
+var (
+	errLostRace = errors.New("gpu already reserved")
+	// errSatisfied means another reconciler filled the deployment, or it was
+	// stopped, between the count and the reservation.
+	errSatisfied = errors.New("deployment needs no more replicas")
+)
 
 func cacheNote(c placement.Scored) string {
 	for _, m := range c.CachedModels {
