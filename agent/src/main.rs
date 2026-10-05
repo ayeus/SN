@@ -387,6 +387,16 @@ async fn main() -> Result<()> {
     };
 
     let shared = Arc::new(Shared::default());
+    // How long models stay loaded for a platform that cannot be reached. A
+    // blip or a restart is over in seconds; past this the GPU's memory goes
+    // back to its owner, and jobs are sent again when the platform returns.
+    let orphan_after = Duration::from_secs(
+        std::env::var("SN_ORPHAN_UNLOAD_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600),
+    );
+    let mut last_connected = std::time::Instant::now();
     let mut backoff = Duration::from_secs(1);
     // Which of the known addresses to dial. An address that never answers is
     // skipped for the next one; an address that worked is kept.
@@ -437,8 +447,16 @@ async fn main() -> Result<()> {
                     if registered {
                         // It worked, so it is first in the list next time round.
                         attempt = 0;
+                        last_connected = std::time::Instant::now();
                     } else {
                         attempt += 1;
+                    }
+                    if shared.has_replicas() && last_connected.elapsed() >= orphan_after {
+                        warn!(
+                            minutes = last_connected.elapsed().as_secs() / 60,
+                            "the platform has been unreachable for too long; unloading its models"
+                        );
+                        shared.unload_all(&rt).await;
                     }
                     warn!(error = %format!("{e:#}"), address = %url, retry_in_s = backoff.as_secs(), "disconnected from coordinator; reconnecting");
                     tokio::time::sleep(backoff).await;

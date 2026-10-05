@@ -258,8 +258,11 @@ To remove the installation entirely, including its database:
   TLS: [deployment.md](deployment.md).
 - The owner of a machine that serves a model can, with enough effort, see the
   requests it serves. Share a network with people you would share that with.
-- Sleeping this computer takes the platform offline. Machines reconnect by
-  themselves when it is back.
+- Sleeping this computer takes the platform offline. Machines keep their
+  models loaded and reconnect by themselves when it is back, so nothing is
+  reloaded after a nap. A machine that cannot reach the platform for ten
+  minutes unloads its models and gives the GPU's memory back to its owner;
+  they are loaded again when the platform returns.
 
 ## Checking the whole thing
 

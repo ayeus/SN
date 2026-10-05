@@ -36,6 +36,18 @@ A deployment created while the scheduler is down is placed when it comes back. A
 
 Deviation from UML §8: reservations live in Postgres (`gpus.replica_id`, claimed with a conditional update) instead of Redis with a TTL. Postgres is already the system of record, and one store for one fact avoids a class of divergence bugs. The 60 s "agent confirms within TTL" rule is kept, enforced by the coordinator.
 
+#### Losing the connection is not losing the host
+
+The stream between an agent and the coordinator drops for ordinary reasons: Wi-Fi, a coordinator restart, a laptop lid, the platform's own computer going to sleep. The models stay loaded through all of them, so a dropped connection must not be treated as a dead host.
+
+- **Reconnect is a handshake, not a reset.** An agent with the `replica-report` capability lists, in `RegisterRequest.replicas`, the replicas it is still serving, each checked against its runtime just before. The coordinator (`reconcileOnRegister`) leaves a replica both sides agree on exactly as it is, re-sends what the agent does not have, and tells the agent to stop anything the platform has given up on. An agent without the capability is sent everything again, as before.
+- **A closed session ends its stream.** When the coordinator closes a session (a newer one replaced it, or the host was declared offline) the stream's handler returns, the agent sees the stream end and reconnects. A session never lingers in the registry looking connected.
+- **Silence is judged only when it means something.** For 90 s after the coordinator starts, and after any stall of its control loop longer than 10 s (measured on the wall clock, so that a sleeping computer counts), no host is declared offline and no unconfirmed job is expired. Agents back off at most 30 s between attempts, so they are back well inside that.
+- **Offline is two steps for a serving replica.** When a host misses its heartbeats it is marked offline at once and its connection is dropped, but a replica it was serving only becomes `degraded` and keeps its GPU. If the host returns within 60 s the replica carries on untouched; otherwise it is failed and the scheduler replaces it. A replica that was still starting is failed immediately.
+- **The agent keeps its side.** When a connection ends the agent aborts whatever was tied to it (a replica still starting, a request in flight) and keeps what is serving. Asked to start a replica it already serves, it answers at once. After ten minutes with no platform at all (`SN_ORPHAN_UNLOAD_SECS`) it unloads everything and gives the GPU's memory back to its owner.
+
+The cost is that a host that really died is replaced about a minute later than before. A deployment with two replicas keeps answering from the other throughout.
+
 ### 3. The request router is a package inside the inference gateway
 
 The router's responsibilities (least-outstanding selection, 5 s unhealthy cool-down, retry before first byte, tier ordering) are unchanged and live in `services/inference-gateway/routing.go`. Architecture §9 already places both in the same PoP VM. A separate process added a network hop and had to buffer the response to decide on retries.

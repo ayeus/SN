@@ -4,7 +4,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/auth"
@@ -94,6 +97,17 @@ func newAgentProxy(target *url.URL) http.Handler {
 		// that into "headers, then an empty end": a response with no status at
 		// all. Sending the status as trailers instead keeps it valid.
 		ModifyResponse: func(res *http.Response) error {
+			// The coordinator can end a session while the agent is silent. The
+			// proxy then has the whole response, but will not finish the
+			// agent's stream until it has stopped forwarding the agent's side,
+			// which is waiting for a message the agent has no reason to send.
+			// Closing the agent's side when the coordinator's ends breaks that
+			// wait, so the agent hears at once and reconnects. It has to be the
+			// body the agent's request arrived with: the proxy's own copy
+			// ignores Close.
+			if inbound, ok := res.Request.Context().Value(inboundBodyKey{}).(io.Closer); ok {
+				res.Body = &endsRequest{ReadCloser: res.Body, request: inbound}
+			}
 			if res.Header.Get("Grpc-Status") == "" {
 				return nil
 			}
@@ -125,8 +139,27 @@ func newAgentProxy(target *url.URL) http.Handler {
 		rc := http.NewResponseController(w)
 		_ = rc.SetReadDeadline(time.Time{})
 		_ = rc.SetWriteDeadline(time.Time{})
-		proxy.ServeHTTP(w, r)
+		proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), inboundBodyKey{}, r.Body)))
 	})
+}
+
+// inboundBodyKey carries the agent's request body to ModifyResponse.
+type inboundBodyKey struct{}
+
+// endsRequest is a response body that closes the request's body once the
+// response has been read to its end.
+type endsRequest struct {
+	io.ReadCloser
+	request io.Closer
+	once    sync.Once
+}
+
+func (e *endsRequest) Read(p []byte) (int, error) {
+	n, err := e.ReadCloser.Read(p)
+	if err != nil {
+		e.once.Do(func() { _ = e.request.Close() })
+	}
+	return n, err
 }
 
 // isInferenceRequest decides whether GET /v1/models belongs to the OpenAI

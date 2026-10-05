@@ -55,6 +55,21 @@ message RegisterRequest {
   string runtime = 12;
   // Model identifiers already present in the runtime's local cache.
   repeated string cached_models = 13;
+
+  // Replicas this agent is still serving from before the connection dropped,
+  // each checked against the runtime just before it was listed. With the
+  // "replica-report" capability the coordinator keeps the ones both sides
+  // agree on, re-sends what is missing and stops what it has given up on,
+  // instead of sending every job again.
+  repeated HeldReplica replicas = 14;
+  // Optional protocol features this agent understands. An agent that lists
+  // none gets the original behaviour, so old agents keep working.
+  repeated string capabilities = 15;
+}
+
+message HeldReplica {
+  string replica_id = 1;
+  string runtime_model = 2;
 }
 
 message GpuInfo {

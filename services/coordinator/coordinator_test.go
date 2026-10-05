@@ -49,6 +49,8 @@ type fakeStream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	in     chan *agentv1.AgentMessage
+	// failSends makes every Send fail, as on a stream whose peer has gone.
+	failSends bool
 
 	mu   sync.Mutex
 	sent []*agentv1.CoordinatorMessage
@@ -63,6 +65,9 @@ func newStream() *fakeStream {
 func (f *fakeStream) Context() context.Context { return f.ctx }
 
 func (f *fakeStream) Send(m *agentv1.CoordinatorMessage) error {
+	if f.failSends {
+		return status.Error(codes.Unavailable, "transport is closing")
+	}
 	f.mu.Lock()
 	f.sent = append(f.sent, m)
 	f.mu.Unlock()
@@ -542,6 +547,11 @@ func TestStopIsSentOnceThenForcedAfterTheGracePeriod(t *testing.T) {
 	if s := f.replicaState(gone); s != "stopped" {
 		t.Fatalf("replica on a disconnected host is %s, want stopped", s)
 	}
+	// If that host was only away and still holds the model, it is told to
+	// stop the moment it reconnects.
+	if orphans, err := f.s.reconcileOnRegister(f.ctx, offlineHost, reporting(gone)); err != nil || len(orphans) != 1 || orphans[0] != gone {
+		t.Fatalf("a returning host still holding a stopped replica: orphans = %v, %v; want it told to stop", orphans, err)
+	}
 
 	f.exec(`UPDATE replicas SET stop_sent_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, rep)
 	if err := f.s.sendStops(f.ctx); err != nil {
@@ -555,7 +565,10 @@ func TestStopIsSentOnceThenForcedAfterTheGracePeriod(t *testing.T) {
 	}
 }
 
-func TestSilentHostGoesOfflineAndItsReplicasFail(t *testing.T) {
+// A host that falls silent is marked offline at once, but a replica it was
+// serving gets a minute for the host to come back before it is replaced: the
+// model is almost certainly still loaded on a machine whose Wi-Fi blinked.
+func TestSilentHostGoesOfflineAndItsServingReplicasWait(t *testing.T) {
 	f := setup(t)
 	silent, silentGPU := f.host()
 	alive, aliveGPU := f.host()
@@ -564,8 +577,14 @@ func TestSilentHostGoesOfflineAndItsReplicasFail(t *testing.T) {
 	kept := f.replica(dep, alive, aliveGPU)
 	f.exec(`UPDATE replicas SET state = 'serving' WHERE deployment_id = $1`, dep)
 	f.exec(`UPDATE deployments SET state = 'serving', min_replicas = 2, max_replicas = 2 WHERE id = $1`, dep)
+	// A second job on the silent host had not finished starting.
+	var startingGPU string
+	f.scan(&startingGPU, `INSERT INTO gpus (host_id, model, vram_gb, uuid) VALUES ($1, 'Test GPU', 8, 'GPU-' || gen_random_uuid()) RETURNING id`, silent)
+	dep2 := f.deployment()
+	starting := f.replica(dep2, silent, startingGPU)
+	f.exec(`UPDATE replicas SET state = 'loading' WHERE id = $1`, starting)
 	f.exec(`UPDATE hosts SET last_heartbeat_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, silent)
-	st := f.connect(silent)
+	f.connect(silent)
 	ch, _ := f.s.sessions.get(silent).open("req-1")
 
 	if err := f.s.sweepOffline(f.ctx, 15*time.Second); err != nil {
@@ -578,17 +597,24 @@ func TestSilentHostGoesOfflineAndItsReplicasFail(t *testing.T) {
 	if s := f.str(`SELECT status FROM hosts WHERE id = $1`, alive); s != "active" {
 		t.Fatalf("a host that is heartbeating was marked %s", s)
 	}
-	if s := f.replicaState(lost); s != "failed" {
-		t.Fatalf("replica on the offline host is %s, want failed", s)
+	if s := f.replicaState(lost); s != "degraded" {
+		t.Fatalf("serving replica on the offline host is %s, want degraded while the host may return", s)
+	}
+	if s := f.str(`SELECT status FROM gpus WHERE id = $1`, silentGPU); s != "reserved" {
+		t.Fatalf("the waiting replica's GPU is %s, want it kept reserved", s)
+	}
+	if s := f.replicaState(starting); s != "failed" {
+		t.Fatalf("a replica that was still starting on the offline host is %s, want failed so it is placed elsewhere", s)
 	}
 	if s := f.replicaState(kept); s != "serving" {
 		t.Fatalf("replica on the live host is %s, want serving", s)
 	}
-	if s := f.str(`SELECT status FROM gpus WHERE id = $1`, silentGPU); s != "available" {
-		t.Fatalf("offline host's GPU is %s, want released", s)
-	}
 	if s := f.str(`SELECT state FROM deployments WHERE id = $1`, dep); s != "degraded" {
-		t.Fatalf("deployment is %s with one of two replicas left, want degraded", s)
+		t.Fatalf("deployment is %s with one of two replicas reachable, want degraded", s)
+	}
+	// The dead connection is gone, not left for jobs to be sent into.
+	if f.s.sessions.get(silent) != nil {
+		t.Fatal("the offline host still has a session")
 	}
 	// A request in flight on the dead host is failed so the gateway can retry.
 	select {
@@ -599,7 +625,25 @@ func TestSilentHostGoesOfflineAndItsReplicasFail(t *testing.T) {
 	default:
 		t.Fatal("an in-flight request on the offline host was left hanging")
 	}
-	_ = st
+
+	// Inside the minute nothing more happens.
+	if err := f.s.failUnreturned(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.replicaState(lost); s != "degraded" {
+		t.Fatalf("the replica was given up after no time at all: %s", s)
+	}
+	// After it, the replica is given up and its GPU released.
+	f.exec(`UPDATE replicas SET updated_at = NOW() - INTERVAL '2 minutes' WHERE id = $1`, lost)
+	if err := f.s.failUnreturned(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.replicaState(lost); s != "failed" {
+		t.Fatalf("replica is %s a minute after its host vanished, want failed", s)
+	}
+	if s := f.str(`SELECT status FROM gpus WHERE id = $1`, silentGPU); s != "available" {
+		t.Fatalf("the given-up replica's GPU is %s, want released", s)
+	}
 
 	// A heartbeat brings the host back.
 	var last time.Time
@@ -609,7 +653,139 @@ func TestSilentHostGoesOfflineAndItsReplicasFail(t *testing.T) {
 	}
 }
 
-func TestReconnectResendsTheJob(t *testing.T) {
+// reporting is what an agent that lists its replicas sends when it registers.
+func reporting(replicas ...string) *agentv1.RegisterRequest {
+	reg := &agentv1.RegisterRequest{Capabilities: []string{capReplicaReport}}
+	for _, id := range replicas {
+		reg.Replicas = append(reg.Replicas, &agentv1.HeldReplica{ReplicaId: id, RuntimeModel: "gemma2:2b"})
+	}
+	return reg
+}
+
+// The whole point of the reconnect handshake: a blip changes nothing.
+func TestReconnectLeavesAnAgreedReplicaAlone(t *testing.T) {
+	f := setup(t)
+	hostID, gpuID := f.host()
+	dep := f.deployment()
+	rep := f.replica(dep, hostID, gpuID)
+	f.exec(`UPDATE replicas SET state = 'serving', healthy = TRUE, dispatched_at = NOW() - INTERVAL '1 hour',
+	        started_at = NOW() - INTERVAL '1 hour', updated_at = NOW() - INTERVAL '1 hour' WHERE id = $1`, rep)
+	f.exec(`UPDATE deployments SET state = 'serving' WHERE id = $1`, dep)
+	before := f.str(`SELECT updated_at::TEXT || '|' || dispatched_at::TEXT || '|' || started_at::TEXT FROM replicas WHERE id = $1`, rep)
+	var events int
+	f.scan(&events, `SELECT COUNT(*) FROM deployment_events WHERE deployment_id = $1`, dep)
+
+	orphans, err := f.s.reconcileOnRegister(f.ctx, hostID, reporting(rep))
+	if err != nil || len(orphans) != 0 {
+		t.Fatalf("reconcile = %v, %v", orphans, err)
+	}
+	st := f.connect(hostID)
+	if err := f.s.dispatchPending(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(st.messages()) != 0 {
+		t.Fatalf("the host was sent %d messages for a replica it is already serving", len(st.messages()))
+	}
+	if after := f.str(`SELECT updated_at::TEXT || '|' || dispatched_at::TEXT || '|' || started_at::TEXT FROM replicas WHERE id = $1`, rep); after != before {
+		t.Fatalf("the replica row was touched: %s -> %s", before, after)
+	}
+	if s := f.replicaState(rep); s != "serving" {
+		t.Fatalf("replica is %s, want serving", s)
+	}
+	if s := f.str(`SELECT state FROM deployments WHERE id = $1`, dep); s != "serving" {
+		t.Fatalf("deployment is %s across a reconnect, want serving throughout", s)
+	}
+	var after int
+	f.scan(&after, `SELECT COUNT(*) FROM deployment_events WHERE deployment_id = $1`, dep)
+	if after != events {
+		t.Fatalf("%d events were logged for a reconnect that changed nothing", after-events)
+	}
+}
+
+func TestReconnectReconcilesEveryCase(t *testing.T) {
+	f := setup(t)
+	hostID, _ := f.host()
+	other, otherGPU := f.host()
+	place := func(state string) (rep, dep string) {
+		var g string
+		f.scan(&g, `INSERT INTO gpus (host_id, model, vram_gb, uuid) VALUES ($1, 'Test GPU', 8, 'GPU-' || gen_random_uuid()) RETURNING id`, hostID)
+		dep = f.deployment()
+		rep = f.replica(dep, hostID, g)
+		f.exec(`UPDATE replicas SET state = $2, dispatched_at = NOW(), stop_sent_at = CASE WHEN $2 = 'stopping' THEN NOW() END WHERE id = $1`, rep, state)
+		f.exec(`UPDATE deployments SET state = 'serving' WHERE id = $1`, dep)
+		return rep, dep
+	}
+	forgotten, forgottenDep := place("serving") // the agent restarted and lost it
+	waited, _ := place("degraded")              // the host was unreachable for a while
+	unheard, _ := place("warming")              // it finished starting while we could not hear it
+	stopping, _ := place("stopping")            // a stop was sent to the old connection
+	stopped, _ := place("stopped")              // stopped while the host was away
+	failed, _ := place("failed")                // given up and replaced while the host was away
+	halfway, _ := place("pulling")              // was mid-download; the agent starts over
+	elsewhere := f.replica(f.deployment(), other, otherGPU)
+	f.exec(`UPDATE replicas SET state = 'serving' WHERE id = $1`, elsewhere)
+	const unknown = "00000000-0000-4000-8000-000000000001"
+
+	orphans, err := f.s.reconcileOnRegister(f.ctx, hostID, reporting(waited, unheard, stopping, stopped, failed, elsewhere, unknown))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct{ name, id, want string }{
+		{"lost by a restarted agent", forgotten, "pending"},
+		{"kept through an outage", waited, "serving"},
+		{"finished starting unheard", unheard, "serving"},
+		{"being stopped", stopping, "stopping"},
+		{"stopped meanwhile", stopped, "stopped"},
+		{"given up meanwhile", failed, "failed"},
+		{"interrupted mid-download", halfway, "pending"},
+		{"another host's", elsewhere, "serving"},
+	} {
+		if got := f.replicaState(c.id); got != c.want {
+			t.Errorf("replica %s: %s, want %s", c.name, got, c.want)
+		}
+	}
+	for _, id := range []string{forgotten, halfway} {
+		if f.str(`SELECT (dispatched_at IS NULL)::TEXT FROM replicas WHERE id = $1`, id) != "true" {
+			t.Errorf("replica %s is pending but would not be sent again", id)
+		}
+	}
+	if f.str(`SELECT (stop_sent_at IS NULL)::TEXT FROM replicas WHERE id = $1`, stopping) != "true" {
+		t.Error("the stop would not be sent again on the new connection")
+	}
+	if s := f.str(`SELECT state FROM deployments WHERE id = $1`, forgottenDep); s != "degraded" {
+		t.Errorf("deployment is %s while its only replica reloads, want degraded", s)
+	}
+
+	// What the agent holds but should not: told to stop, never adopted.
+	want := map[string]bool{stopped: true, failed: true, elsewhere: true, unknown: true}
+	if len(orphans) != len(want) {
+		t.Fatalf("orphans = %v, want %d of them", orphans, len(want))
+	}
+	for _, id := range orphans {
+		if !want[id] {
+			t.Errorf("replica %s was wrongly listed to be stopped", id)
+		}
+	}
+
+	// And the two that are pending are sent again; nothing else is.
+	st := f.connect(hostID)
+	if err := f.s.dispatchPending(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	resent := map[string]bool{}
+	for _, m := range st.messages() {
+		resent[m.GetManifest().GetReplicaId()] = true
+	}
+	if len(resent) != 2 || !resent[forgotten] || !resent[halfway] {
+		t.Fatalf("manifests re-sent for %v, want exactly the two the agent does not have", resent)
+	}
+}
+
+// An agent from before the handshake says nothing about what it holds, so it
+// is sent everything again, as it always was.
+func TestReconnectResendsEverythingToAnAgentThatDoesNotReport(t *testing.T) {
 	f := setup(t)
 	hostID, gpuID := f.host()
 	dep := f.deployment()
@@ -617,8 +793,11 @@ func TestReconnectResendsTheJob(t *testing.T) {
 	f.exec(`UPDATE replicas SET state = 'serving', dispatched_at = NOW() WHERE id = $1`, rep)
 	f.exec(`UPDATE deployments SET state = 'serving' WHERE id = $1`, dep)
 
-	if err := f.s.redispatchOnReconnect(f.ctx, hostID); err != nil {
-		t.Fatal(err)
+	// Even if it lists replicas, without the capability they are not trusted.
+	old := &agentv1.RegisterRequest{Replicas: []*agentv1.HeldReplica{{ReplicaId: rep}}}
+	orphans, err := f.s.reconcileOnRegister(f.ctx, hostID, old)
+	if err != nil || len(orphans) != 0 {
+		t.Fatalf("reconcile = %v, %v", orphans, err)
 	}
 	st := f.connect(hostID)
 	if err := f.s.dispatchPending(f.ctx); err != nil {
@@ -633,6 +812,67 @@ func TestReconnectResendsTheJob(t *testing.T) {
 	}
 	if s := f.str(`SELECT state FROM deployments WHERE id = $1`, dep); s != "degraded" {
 		t.Fatalf("deployment is %s while its only replica reloads, want degraded", s)
+	}
+}
+
+// After a start, or a stall (the computer slept, the database was away), every
+// heartbeat on record is stale through no fault of the hosts. Nobody is
+// declared offline until they have had time to reconnect.
+func TestHostsGetAGracePeriodAfterAStartOrAStall(t *testing.T) {
+	f := setup(t)
+	hostID, gpuID := f.host()
+	dep := f.deployment()
+	rep := f.replica(dep, hostID, gpuID)
+	f.exec(`UPDATE replicas SET state = 'serving' WHERE id = $1`, rep)
+	f.exec(`UPDATE deployments SET state = 'serving' WHERE id = $1`, dep)
+	silent := func() {
+		f.exec(`UPDATE hosts SET last_heartbeat_at = NOW() - INTERVAL '30 minutes', status = 'active' WHERE id = $1`, hostID)
+	}
+	status := func() string { return f.str(`SELECT status FROM hosts WHERE id = $1`, hostID) }
+
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	f.s.clock = func() time.Time { return now }
+	f.s.lastTick, f.s.graceUntil = time.Time{}, time.Time{} // a fresh process
+	pass := func(seconds int) {
+		for range seconds {
+			now = now.Add(time.Second)
+			f.s.tick(f.ctx, 15*time.Second)
+		}
+	}
+
+	// Just started: the host has not been heard from for half an hour (the
+	// platform was down), and that is not held against it.
+	silent()
+	pass(int(livenessGrace.Seconds()) - 2)
+	if status() != "active" || f.replicaState(rep) != "serving" {
+		t.Fatalf("inside the grace period after a start: host %s, replica %s; want both untouched", status(), f.replicaState(rep))
+	}
+	// Still silent once the period is over: now it counts.
+	pass(5)
+	if status() != "offline" || f.replicaState(rep) != "degraded" {
+		t.Fatalf("after the grace period: host %s, replica %s; want offline and degraded", status(), f.replicaState(rep))
+	}
+
+	// The computer sleeps for an hour. On waking, the same patience again.
+	f.exec(`UPDATE replicas SET state = 'serving' WHERE id = $1`, rep)
+	silent()
+	now = now.Add(time.Hour)
+	pass(int(livenessGrace.Seconds()) - 2)
+	if status() != "active" || f.replicaState(rep) != "serving" {
+		t.Fatalf("inside the grace period after a stall: host %s, replica %s; want both untouched", status(), f.replicaState(rep))
+	}
+	// A host that does reconnect in that time is never marked at all.
+	f.exec(`UPDATE hosts SET last_heartbeat_at = NOW() WHERE id = $1`, hostID)
+	pass(5)
+	if status() != "active" || f.replicaState(rep) != "serving" {
+		t.Fatalf("a host that came back inside the grace period: host %s, replica %s", status(), f.replicaState(rep))
+	}
+
+	// Ordinary running: no grace, silence is noticed on the next pass.
+	silent()
+	pass(1)
+	if status() != "offline" {
+		t.Fatalf("a host that falls silent in ordinary running is %s, want offline at once", status())
 	}
 }
 
@@ -681,6 +921,193 @@ func TestSessionRegistersHeartbeatsAndCleansUp(t *testing.T) {
 	}
 	if f.s.sessions.get(hostID) != nil {
 		t.Fatal("the session outlived its stream")
+	}
+}
+
+// start runs a Session for a newly enrolling agent and returns once it is
+// registered.
+func (f *fixture) start(t *testing.T, reg *agentv1.RegisterRequest) (st *fakeStream, hostID, credential string, done chan error) {
+	t.Helper()
+	st = newStream()
+	t.Cleanup(st.cancel)
+	done = make(chan error, 1)
+	st.in <- &agentv1.AgentMessage{Payload: &agentv1.AgentMessage_Register{Register: reg}}
+	go func() { done <- f.s.Session(st) }()
+	var resp *agentv1.RegisterResponse
+	select {
+	case m := <-st.out:
+		resp = m.GetRegisterResponse()
+		if !resp.GetAccepted() {
+			t.Fatalf("registration refused: %s", resp.GetRejectionReason())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no RegisterResponse")
+	}
+	// The answer is sent before the session is installed; wait for this
+	// stream's session, not whichever one the host had before.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if sess := f.s.sessions.get(resp.GetHostId()); sess != nil && sess.stream == st {
+			return st, resp.GetHostId(), resp.GetHostCredential(), done
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the session was never installed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func ended(t *testing.T, done chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the session's handler is still running after %s", what)
+		return nil
+	}
+}
+
+// Closing a session from the platform's side has to end the stream. A handler
+// left blocked on a closed session is a host that looks connected and can
+// never be sent anything again.
+func TestClosingASessionEndsItsStream(t *testing.T) {
+	f := setup(t)
+	_, hostID, credential, done := f.start(t, f.register("t3", "sha256:closing", 8))
+
+	// The host is declared offline.
+	f.s.sessions.drop(hostID)
+	if err := ended(t, done, "the host was dropped"); status.Code(err) != codes.Unavailable {
+		t.Fatalf("a dropped session ended with %v, want Unavailable so the agent reconnects", err)
+	}
+	if f.s.sessions.get(hostID) != nil {
+		t.Fatal("a dropped host still has a session")
+	}
+
+	// The agent reconnects twice without the first connection ever closing
+	// (it is behind a NAT that forgot it). The newer one replaces the older.
+	back := func() *agentv1.RegisterRequest {
+		r := reporting()
+		r.HostCredential, r.HardwareFingerprint, r.Gpus, r.Runtime = credential, "sha256:closing", gpu(8), "ollama"
+		return r
+	}
+	_, _, _, first := f.start(t, back())
+	_, _, _, second := f.start(t, back())
+	if err := ended(t, first, "a newer session replaced it"); status.Code(err) != codes.Unavailable {
+		t.Fatalf("a replaced session ended with %v, want Unavailable", err)
+	}
+	select {
+	case err := <-second:
+		t.Fatalf("the newer session ended too: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if sess := f.s.sessions.get(hostID); sess == nil {
+		t.Fatal("the reconnected host has no session")
+	} else if err := sess.send(&agentv1.CoordinatorMessage{}); err != nil {
+		t.Fatalf("the current session cannot be sent to: %v", err)
+	}
+}
+
+// An agent that vanishes (killed, or its network gone) must not leave a
+// session behind: one that looks connected but can never be written to.
+func TestAVanishedAgentLeavesNoSession(t *testing.T) {
+	f := setup(t)
+	// The stream's context ending and its Recv failing happen together, and
+	// which the handler notices first is a coin toss: try it many times.
+	for i := range 25 {
+		st, hostID, _, done := f.start(t, f.register("t3", fmt.Sprintf("sha256:vanish-%d", i), 8))
+		st.cancel()
+		if err := ended(t, done, "the agent vanished"); err != nil {
+			t.Fatalf("round %d: Session returned %v for an agent that went away", i, err)
+		}
+		if f.s.sessions.get(hostID) != nil {
+			t.Fatalf("round %d: a vanished agent still has a session", i)
+		}
+	}
+}
+
+// A stream that cannot be written to is finished, whatever the registry says.
+func TestAFailedSendDropsTheSession(t *testing.T) {
+	f := setup(t)
+	hostID, gpuID := f.host()
+	dep := f.deployment()
+	rep := f.replica(dep, hostID, gpuID)
+	f.exec(`UPDATE replicas SET state = 'stopping' WHERE id = $1`, rep)
+	st := f.connect(hostID)
+	st.failSends = true
+
+	if err := f.s.sendStops(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.s.sessions.get(hostID) != nil {
+		t.Fatal("a session whose stream cannot be written to was kept")
+	}
+	if err := f.s.sendStops(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.replicaState(rep); s != "stopped" {
+		t.Fatalf("replica is %s after its host's stream broke, want stopped rather than stopping for ever", s)
+	}
+}
+
+// Shutting down ends every session, so agents move to the process that
+// replaces this one instead of staying attached to it.
+func TestShutdownEndsEverySession(t *testing.T) {
+	f := setup(t)
+	_, a, _, doneA := f.start(t, f.register("t3", "sha256:shutdown-a", 8))
+	_, b, _, doneB := f.start(t, f.register("t3", "sha256:shutdown-b", 8))
+
+	f.s.sessions.closeAll()
+
+	for _, done := range []chan error{doneA, doneB} {
+		if err := ended(t, done, "shutdown"); status.Code(err) != codes.Unavailable {
+			t.Fatalf("a session ended with %v at shutdown, want Unavailable", err)
+		}
+	}
+	if f.s.sessions.get(a) != nil || f.s.sessions.get(b) != nil || len(f.s.sessions.connected()) != 0 {
+		t.Fatal("sessions remain after shutdown")
+	}
+}
+
+// What the agent holds and should not is stopped as soon as it registers.
+func TestSessionStopsWhatTheAgentShouldNotBeRunning(t *testing.T) {
+	f := setup(t)
+	_, hostID, credential, done := f.start(t, f.register("t3", "sha256:orphans", 8))
+	f.s.sessions.drop(hostID)
+	ended(t, done, "the host was dropped")
+
+	gpuID := f.str(`SELECT id FROM gpus WHERE host_id = $1`, hostID)
+	dep := f.deployment()
+	kept := f.replica(dep, hostID, gpuID)
+	f.exec(`UPDATE replicas SET state = 'serving' WHERE id = $1`, kept)
+	gone := f.replica(f.deployment(), hostID, gpuID)
+	f.exec(`UPDATE replicas SET state = 'failed' WHERE id = $1`, gone)
+
+	reg := reporting(kept, gone)
+	reg.HostCredential, reg.HardwareFingerprint, reg.Gpus, reg.Runtime = credential, "sha256:orphans", gpu(8), "ollama"
+	st, _, _, _ := f.start(t, reg)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var stops []string
+		for _, m := range st.messages() {
+			if sr := m.GetStopReplica(); sr != nil {
+				stops = append(stops, sr.GetReplicaId())
+			}
+			if m.GetManifest() != nil {
+				t.Fatalf("a manifest was sent for a replica the agent is already serving")
+			}
+		}
+		if len(stops) == 1 && stops[0] == gone {
+			break
+		}
+		if len(stops) > 1 || time.Now().After(deadline) {
+			t.Fatalf("stops sent = %v, want exactly the replica the platform gave up on", stops)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if s := f.replicaState(kept); s != "serving" {
+		t.Fatalf("the replica both sides agree on is %s, want serving", s)
 	}
 }
 

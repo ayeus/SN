@@ -4,7 +4,8 @@
 #
 #   sign up → enrol two hosts → deploy (2 replicas) → SERVING → streamed chat →
 #   OpenAI SDK call → usage recorded for the customer and the host → kill one
-#   host → requests keep succeeding → stop the deployment
+#   the coordinator restarts, then freezes: the models stay loaded through both
+#   → kill one host → requests keep succeeding → stop the deployment
 #
 #   scripts/smoke.sh            # uses gemma2:2b via gemma-2-2b-it
 #   MODEL=qwen2.5-7b-instruct scripts/smoke.sh
@@ -24,10 +25,17 @@ COORD="${COORD:-$BASE}"
 COORD_DIRECT="${COORD_DIRECT:-http://localhost:50051}"
 MODEL="${MODEL:-gemma-2-2b-it}"
 RUNTIME_URL="${SN_RUNTIME_URL:-http://127.0.0.1:11434}"
+# How to restart, freeze and thaw the coordinator. The defaults suit `make dev`;
+# a stack run another way (the private installation) names its own commands.
+COORD_RESTART="${COORD_RESTART:-scripts/dev.sh restart coordinator}"
+COORD_FREEZE="${COORD_FREEZE:-kill -STOP \$(scripts/dev.sh pid coordinator)}"
+COORD_THAW="${COORD_THAW:-kill -CONT \$(scripts/dev.sh pid coordinator)}"
 WORK="$(mktemp -d)"
 AGENTS=()
 RUN="$(uuidgen | tr A-Z a-z | cut -c1-8)"   # fresh host identities each run
 cleanup() {
+  # A coordinator left frozen would take the whole stack down with it.
+  [ -z "${FROZEN:-}" ] || eval "$COORD_THAW" >/dev/null 2>&1 || true
   # Runs on success and on failure: a leftover running deployment would claim
   # every GPU that connects afterwards.
   if [ -n "${TOKEN:-}" ]; then
@@ -147,7 +155,53 @@ TOKENS=$(api GET /v1/hosts/activity | json "['summary']['lifetime']['tokens']")
 [ "$SERVED" -ge 2 ] && [ "$TOKENS" -gt 0 ] || fail "host activity shows $SERVED requests and $TOKENS tokens"
 pass "usage recorded: $REQS requests for the customer; hosts served $SERVED requests, $TOKENS tokens"
 
-# 8. Failover: kill one host, requests keep working (NFR-2: < 5 s).
+# 8. The platform restarts, and then stalls the way a sleeping laptop does.
+# The hosts only lose their connection, so the models must stay loaded: the
+# same two replicas, nothing sent again, nothing reloaded, and answers again
+# within 30 s.
+ask() {
+  curl -s -m 20 -o /dev/null -w '%{http_code}' "$BASE_URL/chat/completions" -H "Authorization: Bearer $KEY" \
+    -H 'Content-Type: application/json' -d '{"model":"smoke","messages":[{"role":"user","content":"ping"}],"max_tokens":3}'
+}
+serving() { api GET "/v1/deployments/$DEP/replicas" | python3 -c "import json,sys; print(' '.join(sorted(r['id'] for r in json.load(sys.stdin)['replicas'] if r['state']=='serving')))"; }
+last_event() { api GET "/v1/deployments/$DEP/logs" | python3 -c "import json,sys; e=json.load(sys.stdin)['events']; print(e[-1]['id'] if e else 0)"; }
+since() { api GET "/v1/deployments/$DEP/logs?after=$1" | python3 -c "import json,sys; print('; '.join(e['message'] for e in json.load(sys.stdin)['events']))"; }
+# survived WHAT: both hosts are back and serving the replicas they had before,
+# with no event logged for the deployment in between.
+survived() {
+  local t0 c="" n=0 now
+  t0=$(date +%s)
+  # Both replicas answer, not just one: each is asked in turn by the router.
+  for _ in $(seq 1 60); do
+    c=$(ask); if [ "$c" = 200 ]; then n=$((n + 1)); else n=0; fi
+    [ "$n" -ge 4 ] && break
+    [ $(( $(date +%s) - t0 )) -ge 30 ] && break
+    sleep 0.5
+  done
+  [ "$n" -ge 4 ] || fail "$1: requests did not work again within 30 s (last answer $c)"
+  now=$(serving)
+  [ "$now" = "$REPLICAS" ] || fail "$1: the serving replicas changed: before [$REPLICAS], after [$now]"
+  [ "$(last_event)" = "$EVENT" ] || fail "$1: the deployment was disturbed: $(since "$EVENT")"
+  pass "$1: same replicas, nothing reloaded, answering again after $(( $(date +%s) - t0 ))s"
+}
+REPLICAS=$(serving)
+[ "$(echo "$REPLICAS" | wc -w | tr -d ' ')" = 2 ] || fail "expected two serving replicas before the restart, got [$REPLICAS]"
+EVENT=$(last_event)
+
+eval "$COORD_RESTART" >/dev/null || fail "could not restart the coordinator ($COORD_RESTART)"
+survived "coordinator restarted"
+
+FROZEN=1
+eval "$COORD_FREEZE" || fail "could not freeze the coordinator ($COORD_FREEZE)"
+sleep 25
+eval "$COORD_THAW" || fail "could not thaw the coordinator ($COORD_THAW)"
+FROZEN=""
+survived "coordinator frozen for 25 s"
+# The grace period after a stall is not a blind spot: both hosts are still there.
+N=$(api GET /v1/hosts | python3 -c "import json,sys; print(sum(1 for h in json.load(sys.stdin)['hosts'] if h['online'] and h['runtime_healthy']))")
+[ "$N" -ge 2 ] || fail "only $N of the two hosts is online after the freeze"
+
+# 9. Failover: kill one host, requests keep working (NFR-2: < 5 s).
 kill "${AGENTS[0]}"
 T0=$(date +%s)
 for i in 1 2 3 4 5; do
@@ -157,7 +211,7 @@ for i in 1 2 3 4 5; do
 done
 pass "5/5 requests succeeded within $(( $(date +%s) - T0 ))s of losing a host"
 
-# 9. Stop.
+# 10. Stop.
 api DELETE "/v1/deployments/$DEP" >/dev/null
 for _ in $(seq 1 60); do
   S=$(api GET "/v1/deployments/$DEP" | json "['deployment']['state']"); [ "$S" = "stopped" ] && break; sleep 1

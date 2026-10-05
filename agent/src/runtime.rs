@@ -187,6 +187,23 @@ impl Runtime {
         Ok(())
     }
 
+    /// Whether the model can answer right now, making sure it stays loaded.
+    /// Asked before the agent tells the platform it is still serving a
+    /// replica: the runtime may have been restarted, or have evicted the
+    /// model, while the connection was down.
+    pub async fn still_serving(&self, model: &str) -> bool {
+        match self.kind {
+            // Loads the model if it is not loaded and pins it either way, so a
+            // yes here is true by the time it is reported.
+            Kind::Ollama => self.pin(model).await.is_ok(),
+            Kind::Vllm => self
+                .cached_models()
+                .await
+                .map(|m| m.iter().any(|x| x == model))
+                .unwrap_or(false),
+        }
+    }
+
     /// Frees the model's memory once no replica uses it.
     pub async fn unload(&self, model: &str) -> Result<()> {
         if self.kind == Kind::Ollama {

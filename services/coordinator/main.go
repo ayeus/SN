@@ -108,7 +108,24 @@ func main() {
 			log.Fatalf("gRPC server error: %v", err)
 		}
 	}()
-	defer grpcServer.GracefulStop()
+	// Agent sessions are streams that never end by themselves, so a graceful
+	// stop alone would wait on them for ever, and the agents would stay
+	// attached to a process that has stopped doing its job. Closing the
+	// sessions first ends each stream; the agents then reconnect to whatever
+	// replaces this process and carry on with the models they have loaded.
+	defer func() {
+		agentServer.sessions.closeAll()
+		stopped := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			grpcServer.Stop()
+		}
+	}()
 
 	go agentServer.runLoops(ctx, platform.HeartbeatTimeout())
 

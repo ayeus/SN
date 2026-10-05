@@ -107,7 +107,11 @@ pass "nobody signs up uninvited; the owner code made exactly one operator and is
 
 # 5. The whole product path, with no GPU. Each test is invited by the operator.
 export BASE
-OPERATOR_TOKEN="$(op)" COORD_DIRECT="$BASE" scripts/smoke-fake.sh || fail "smoke tests failed against the private stack"
+OPERATOR_TOKEN="$(op)" COORD_DIRECT="$BASE" \
+  COORD_RESTART="scripts/private.sh compose restart coordinator" \
+  COORD_FREEZE="scripts/private.sh compose pause coordinator" \
+  COORD_THAW="scripts/private.sh compose unpause coordinator" \
+  scripts/smoke-fake.sh || fail "smoke tests failed against the private stack"
 
 # 6. Backups: one is taken on its own, one on request, and it restores.
 BACKUPS="$AYEUSANN_PLATFORM_DIR/backups"

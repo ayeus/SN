@@ -4,6 +4,8 @@
 #   scripts/dev.sh up       infra + database + all services + web console
 #   scripts/dev.sh db       create, migrate and seed ayeusann_dev and ayeusann_test
 #   scripts/dev.sh services (re)build and (re)start the Go services only
+#   scripts/dev.sh restart NAME   restart one service without rebuilding it
+#   scripts/dev.sh pid NAME       print one service's process id
 #   scripts/dev.sh web      start the web console dev server
 #   scripts/dev.sh down     stop services and the console (infra keeps running)
 #   scripts/dev.sh status   health of every service
@@ -72,10 +74,37 @@ db() {
   done
 }
 
+# The pid file holds one "pid name" line per service.
 stop_pids() {
   [ -f "$PIDS" ] || return 0
-  while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$PIDS"
+  while read -r pid _; do kill "$pid" 2>/dev/null || true; done < "$PIDS"
   rm -f "$PIDS"
+}
+
+pid_of() {
+  [ -f "$PIDS" ] || return 0
+  awk -v s="$1" '$2 == s { print $1 }' "$PIDS" | tail -1
+}
+
+# restart NAME: stop one service and start the same binary again. This is what
+# a crash or an upgrade of that service looks like to everything else.
+restart() {
+  local s="${1:-}" known=0 x pid
+  for x in "${SERVICES[@]}"; do [ "$x" = "$s" ] && known=1; done
+  [ "$known" = 1 ] || { echo "unknown service: $s (one of: ${SERVICES[*]})" >&2; exit 2; }
+  [ -x "bin/$s" ] || { echo "bin/$s is not built; run scripts/dev.sh services" >&2; exit 1; }
+  pid="$(pid_of "$s")"
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 200); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    # Two of the same service would both answer; make sure the old one is gone.
+    kill -9 "$pid" 2>/dev/null || true
+    grep -v " $s\$" "$PIDS" > "$PIDS.tmp" || true
+    mv "$PIDS.tmp" "$PIDS"
+  fi
+  "./bin/$s" >> "$LOGS/$s.log" 2>&1 &
+  echo "$! $s" >> "$PIDS"
+  echo "restarted $s"
 }
 
 services() {
@@ -88,7 +117,7 @@ services() {
   done
   for s in "${SERVICES[@]}"; do
     "./bin/$s" > "$LOGS/$s.log" 2>&1 &
-    echo $! >> "$PIDS"
+    echo "$! $s" >> "$PIDS"
   done
   sleep 2
   status
@@ -149,8 +178,10 @@ case "${1:-up}" in
     ;;
   db) db ;;
   services) services ;;
+  restart) restart "${2:-}" ;;
+  pid) pid_of "${2:-}" ;;
   web) web ;;
   down) stop_pids; stop_web; echo "stopped" ;;
   status) status ;;
-  *) sed -n '2,12p' "$0"; exit 2 ;;
+  *) sed -n '2,14p' "$0"; exit 2 ;;
 esac

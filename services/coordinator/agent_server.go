@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,11 @@ type AgentServer struct {
 	// allowFakeGPU admits hosts that report a simulated GPU (development and
 	// end-to-end tests only).
 	allowFakeGPU bool
+
+	// Liveness bookkeeping, touched only by the control loop (loops.go).
+	clock      func() time.Time // wall clock; replaced in tests
+	lastTick   time.Time        // when the loop last completed a pass
+	graceUntil time.Time        // no host is declared offline before this
 }
 
 // enrolment is the host row an agent session binds to.
@@ -119,18 +125,23 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 		return fmt.Errorf("failed to send RegisterResponse: %w", err)
 	}
 
+	// An agent that reconnects replaces its old stream. That one goes first,
+	// so nothing more is sent down a line the agent has already left.
+	s.sessions.drop(en.hostID)
+
+	// Then agree with the agent on what it is running, before the dispatch
+	// loop can see the new session and send it anything.
+	orphans, err := s.reconcileOnRegister(ctx, en.hostID, reg)
+	if err != nil {
+		s.log.Error("failed to reconcile replicas on reconnect", "host_id", en.hostID, "err", err)
+	}
+
 	sess := newSession(en.hostID, stream)
 	if old := s.sessions.put(sess); old != nil {
 		old.close()
 	}
-	s.log.Info("agent connected", "host_id", en.hostID, "tier", en.tier, "status", en.status, "runtime", reg.GetRuntime())
-
-	// An agent that restarted has forgotten its replicas. Re-dispatching every
-	// replica still assigned to the host lets it rebuild them; a model already in
-	// the runtime cache comes back to SERVING in seconds.
-	if err := s.redispatchOnReconnect(ctx, en.hostID); err != nil {
-		s.log.Error("failed to reset replicas on reconnect", "host_id", en.hostID, "err", err)
-	}
+	s.log.Info("agent connected", "host_id", en.hostID, "tier", en.tier, "status", en.status,
+		"runtime", reg.GetRuntime(), "still_serving", len(reg.GetReplicas()), "to_stop", len(orphans))
 
 	defer func() {
 		sess.close()
@@ -139,14 +150,56 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 		}
 	}()
 
+	// The agent is holding models the platform no longer wants there.
+	for _, id := range orphans {
+		if err := sess.send(&agentv1.CoordinatorMessage{Payload: &agentv1.CoordinatorMessage_StopReplica{
+			StopReplica: &agentv1.StopReplica{ReplicaId: id, Reason: "no longer assigned to this host"},
+		}}); err != nil {
+			return err
+		}
+	}
+
+	// Recv blocks until the agent speaks, so it runs on its own goroutine and
+	// this one can also notice the session being closed from our side (a newer
+	// session for the same host, or the host declared offline). Returning ends
+	// the stream, which is what tells the agent to reconnect.
+	type received struct {
+		msg *agentv1.AgentMessage
+		err error
+	}
+	inbox := make(chan received)
+	go func() {
+		for {
+			msg, err := stream.Recv()
+			select {
+			case inbox <- received{msg, err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	var lastTelemetry time.Time
 	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) || status.Code(err) == codes.Canceled {
-				return nil
+		var msg *agentv1.AgentMessage
+		select {
+		case <-sess.done:
+			return status.Error(codes.Unavailable, "session closed by the platform; reconnect")
+		case <-ctx.Done():
+			// The agent went away. The receiving goroutine may have seen the
+			// same thing and left without a word, so this is watched here too.
+			return nil
+		case r := <-inbox:
+			if r.err != nil {
+				if errors.Is(r.err, io.EOF) || status.Code(r.err) == codes.Canceled {
+					return nil
+				}
+				return r.err
 			}
-			return err
+			msg = r.msg
 		}
 
 		switch p := msg.Payload.(type) {
@@ -560,26 +613,54 @@ func (s *AgentServer) onStage(ctx context.Context, hostID string, se *agentv1.St
 	}
 }
 
-// redispatchOnReconnect moves every replica still assigned to a host back to
-// PENDING with no dispatch timestamp, so the dispatch loop re-sends its
-// manifest to the new session.
-func (s *AgentServer) redispatchOnReconnect(ctx context.Context, hostID string) error {
-	return s.db.ExecTx(ctx, func(tx pgx.Tx) error {
+// capReplicaReport is the capability of an agent that lists, when it
+// registers, the replicas it is still serving.
+const capReplicaReport = "replica-report"
+
+// reconcileOnRegister brings the platform's view of a host and the host's own
+// view back together when it connects.
+//
+// The connection between them drops for ordinary reasons: Wi-Fi, a platform
+// restart, a laptop lid. The models stay loaded through all of them, so:
+//
+//   - a replica both sides agree is serving is left exactly as it is;
+//   - a replica the platform expects but the agent does not have is sent again;
+//   - a replica the agent holds but the platform has given up on (stopped,
+//     failed, moved elsewhere) is returned, for the caller to stop.
+//
+// An agent without the replica-report capability says nothing about what it
+// holds, so every job is sent again, as before.
+func (s *AgentServer) reconcileOnRegister(ctx context.Context, hostID string, reg *agentv1.RegisterRequest) (orphans []string, err error) {
+	reports := false
+	for _, c := range reg.GetCapabilities() {
+		if c == capReplicaReport {
+			reports = true
+		}
+	}
+	held := map[string]bool{}
+	if reports {
+		for _, r := range reg.GetReplicas() {
+			held[r.GetReplicaId()] = true
+		}
+	}
+
+	err = s.db.ExecTx(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT id FROM replicas
-			WHERE host_id = $1 AND state IN ('pending', 'pulling', 'loading', 'warming', 'serving', 'degraded');
+			SELECT id, state FROM replicas
+			WHERE host_id = $1 AND state IN ('pending', 'pulling', 'loading', 'warming', 'serving', 'degraded', 'stopping');
 		`, hostID)
 		if err != nil {
 			return err
 		}
-		var ids []string
+		type rep struct{ id, state string }
+		var expected []rep
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var r rep
+			if err := rows.Scan(&r.id, &r.state); err != nil {
 				rows.Close()
 				return err
 			}
-			ids = append(ids, id)
+			expected = append(expected, r)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -587,17 +668,32 @@ func (s *AgentServer) redispatchOnReconnect(ctx context.Context, hostID string) 
 		}
 
 		deps := map[string]bool{}
-		for _, id := range ids {
-			depID, _, err := lifecycle.SetReplicaState(ctx, tx, id, lifecycle.Pending, "host reconnected; re-sending job", "")
-			if err != nil {
-				return err
+		for _, r := range expected {
+			var depID string
+			var err error
+			switch {
+			case r.state == lifecycle.Stopping:
+				// The stop may have gone to the old connection; send it again.
+				_, err = tx.Exec(ctx, `UPDATE replicas SET stop_sent_at = NULL WHERE id = $1;`, r.id)
+			case held[r.id] && r.state == lifecycle.Serving:
+				// Both sides agree. Nothing to do, and nothing is done.
+			case held[r.id]:
+				// It kept serving while we could not hear it (or its last
+				// report was lost with the old connection).
+				depID, _, err = lifecycle.SetReplicaState(ctx, tx, r.id, lifecycle.Serving, "host reconnected; still serving", "")
+			default:
+				depID, _, err = lifecycle.SetReplicaState(ctx, tx, r.id, lifecycle.Pending, "host reconnected; re-sending job", "")
+				if err == nil {
+					_, err = tx.Exec(ctx, `UPDATE replicas SET dispatched_at = NULL WHERE id = $1;`, r.id)
+				}
 			}
-			if _, err := tx.Exec(ctx, `UPDATE replicas SET dispatched_at = NULL WHERE id = $1;`, id); err != nil {
+			if err != nil {
 				return err
 			}
 			if depID != "" {
 				deps[depID] = true
 			}
+			delete(held, r.id)
 		}
 		for depID := range deps {
 			if _, _, err := lifecycle.Recompute(ctx, tx, depID); err != nil {
@@ -606,4 +702,13 @@ func (s *AgentServer) redispatchOnReconnect(ctx context.Context, hostID string) 
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Whatever is left was reported by the agent and is not expected of it.
+	for id := range held {
+		orphans = append(orphans, id)
+	}
+	sort.Strings(orphans)
+	return orphans, nil
 }

@@ -329,7 +329,16 @@ type RegisterRequest struct {
 	// Local serving runtime the agent drives: "ollama" or "vllm".
 	Runtime string `protobuf:"bytes,12,opt,name=runtime,proto3" json:"runtime,omitempty"`
 	// Model identifiers already present in the runtime's local cache.
-	CachedModels  []string `protobuf:"bytes,13,rep,name=cached_models,json=cachedModels,proto3" json:"cached_models,omitempty"`
+	CachedModels []string `protobuf:"bytes,13,rep,name=cached_models,json=cachedModels,proto3" json:"cached_models,omitempty"`
+	// Replicas this agent is still serving from before the connection dropped,
+	// each checked against the runtime just before it was listed. With the
+	// "replica-report" capability the coordinator keeps the ones both sides
+	// agree on, re-sends what is missing and stops what it has given up on,
+	// instead of sending every job again.
+	Replicas []*HeldReplica `protobuf:"bytes,14,rep,name=replicas,proto3" json:"replicas,omitempty"`
+	// Optional protocol features this agent understands. An agent that lists
+	// none gets the original behaviour, so old agents keep working.
+	Capabilities  []string `protobuf:"bytes,15,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -455,6 +464,72 @@ func (x *RegisterRequest) GetCachedModels() []string {
 	return nil
 }
 
+func (x *RegisterRequest) GetReplicas() []*HeldReplica {
+	if x != nil {
+		return x.Replicas
+	}
+	return nil
+}
+
+func (x *RegisterRequest) GetCapabilities() []string {
+	if x != nil {
+		return x.Capabilities
+	}
+	return nil
+}
+
+type HeldReplica struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ReplicaId     string                 `protobuf:"bytes,1,opt,name=replica_id,json=replicaId,proto3" json:"replica_id,omitempty"`
+	RuntimeModel  string                 `protobuf:"bytes,2,opt,name=runtime_model,json=runtimeModel,proto3" json:"runtime_model,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HeldReplica) Reset() {
+	*x = HeldReplica{}
+	mi := &file_agent_v1_agent_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HeldReplica) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HeldReplica) ProtoMessage() {}
+
+func (x *HeldReplica) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HeldReplica.ProtoReflect.Descriptor instead.
+func (*HeldReplica) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *HeldReplica) GetReplicaId() string {
+	if x != nil {
+		return x.ReplicaId
+	}
+	return ""
+}
+
+func (x *HeldReplica) GetRuntimeModel() string {
+	if x != nil {
+		return x.RuntimeModel
+	}
+	return ""
+}
+
 type GpuInfo struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
 	Model                  string                 `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
@@ -471,7 +546,7 @@ type GpuInfo struct {
 
 func (x *GpuInfo) Reset() {
 	*x = GpuInfo{}
-	mi := &file_agent_v1_agent_proto_msgTypes[2]
+	mi := &file_agent_v1_agent_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -483,7 +558,7 @@ func (x *GpuInfo) String() string {
 func (*GpuInfo) ProtoMessage() {}
 
 func (x *GpuInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[2]
+	mi := &file_agent_v1_agent_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -496,7 +571,7 @@ func (x *GpuInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuInfo.ProtoReflect.Descriptor instead.
 func (*GpuInfo) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{2}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GpuInfo) GetModel() string {
@@ -571,7 +646,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_agent_v1_agent_proto_msgTypes[3]
+	mi := &file_agent_v1_agent_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -583,7 +658,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[3]
+	mi := &file_agent_v1_agent_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -596,7 +671,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{3}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Heartbeat) GetTs() *timestamppb.Timestamp {
@@ -669,7 +744,7 @@ type GpuStatus struct {
 
 func (x *GpuStatus) Reset() {
 	*x = GpuStatus{}
-	mi := &file_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_agent_v1_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -681,7 +756,7 @@ func (x *GpuStatus) String() string {
 func (*GpuStatus) ProtoMessage() {}
 
 func (x *GpuStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_agent_v1_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -694,7 +769,7 @@ func (x *GpuStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuStatus.ProtoReflect.Descriptor instead.
 func (*GpuStatus) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{4}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GpuStatus) GetGpuUuid() string {
@@ -755,7 +830,7 @@ type BenchmarkReport struct {
 
 func (x *BenchmarkReport) Reset() {
 	*x = BenchmarkReport{}
-	mi := &file_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_agent_v1_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -767,7 +842,7 @@ func (x *BenchmarkReport) String() string {
 func (*BenchmarkReport) ProtoMessage() {}
 
 func (x *BenchmarkReport) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_agent_v1_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -780,7 +855,7 @@ func (x *BenchmarkReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BenchmarkReport.ProtoReflect.Descriptor instead.
 func (*BenchmarkReport) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *BenchmarkReport) GetHardwareFingerprint() string {
@@ -850,7 +925,7 @@ type GpuBenchmark struct {
 
 func (x *GpuBenchmark) Reset() {
 	*x = GpuBenchmark{}
-	mi := &file_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_agent_v1_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -862,7 +937,7 @@ func (x *GpuBenchmark) String() string {
 func (*GpuBenchmark) ProtoMessage() {}
 
 func (x *GpuBenchmark) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_agent_v1_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -875,7 +950,7 @@ func (x *GpuBenchmark) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuBenchmark.ProtoReflect.Descriptor instead.
 func (*GpuBenchmark) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GpuBenchmark) GetGpuUuid() string {
@@ -916,7 +991,7 @@ type StageEvent struct {
 
 func (x *StageEvent) Reset() {
 	*x = StageEvent{}
-	mi := &file_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_agent_v1_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -928,7 +1003,7 @@ func (x *StageEvent) String() string {
 func (*StageEvent) ProtoMessage() {}
 
 func (x *StageEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_agent_v1_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -941,7 +1016,7 @@ func (x *StageEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StageEvent.ProtoReflect.Descriptor instead.
 func (*StageEvent) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *StageEvent) GetReplicaId() string {
@@ -1009,7 +1084,7 @@ type UsageBatch struct {
 
 func (x *UsageBatch) Reset() {
 	*x = UsageBatch{}
-	mi := &file_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_agent_v1_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1021,7 +1096,7 @@ func (x *UsageBatch) String() string {
 func (*UsageBatch) ProtoMessage() {}
 
 func (x *UsageBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_agent_v1_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1034,7 +1109,7 @@ func (x *UsageBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UsageBatch.ProtoReflect.Descriptor instead.
 func (*UsageBatch) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *UsageBatch) GetRecords() []*UsageRecord {
@@ -1061,7 +1136,7 @@ type UsageRecord struct {
 
 func (x *UsageRecord) Reset() {
 	*x = UsageRecord{}
-	mi := &file_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_agent_v1_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1073,7 +1148,7 @@ func (x *UsageRecord) String() string {
 func (*UsageRecord) ProtoMessage() {}
 
 func (x *UsageRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_agent_v1_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1086,7 +1161,7 @@ func (x *UsageRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UsageRecord.ProtoReflect.Descriptor instead.
 func (*UsageRecord) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{9}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *UsageRecord) GetRequestId() string {
@@ -1162,7 +1237,7 @@ type DrainAck struct {
 
 func (x *DrainAck) Reset() {
 	*x = DrainAck{}
-	mi := &file_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_agent_v1_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1174,7 +1249,7 @@ func (x *DrainAck) String() string {
 func (*DrainAck) ProtoMessage() {}
 
 func (x *DrainAck) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_agent_v1_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1187,7 +1262,7 @@ func (x *DrainAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainAck.ProtoReflect.Descriptor instead.
 func (*DrainAck) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DrainAck) GetReason() string {
@@ -1223,7 +1298,7 @@ type InferenceChunk struct {
 
 func (x *InferenceChunk) Reset() {
 	*x = InferenceChunk{}
-	mi := &file_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_agent_v1_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1235,7 +1310,7 @@ func (x *InferenceChunk) String() string {
 func (*InferenceChunk) ProtoMessage() {}
 
 func (x *InferenceChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_agent_v1_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1248,7 +1323,7 @@ func (x *InferenceChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InferenceChunk.ProtoReflect.Descriptor instead.
 func (*InferenceChunk) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *InferenceChunk) GetRequestId() string {
@@ -1318,7 +1393,7 @@ type CoordinatorMessage struct {
 
 func (x *CoordinatorMessage) Reset() {
 	*x = CoordinatorMessage{}
-	mi := &file_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_agent_v1_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1330,7 +1405,7 @@ func (x *CoordinatorMessage) String() string {
 func (*CoordinatorMessage) ProtoMessage() {}
 
 func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_agent_v1_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1343,7 +1418,7 @@ func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CoordinatorMessage.ProtoReflect.Descriptor instead.
 func (*CoordinatorMessage) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CoordinatorMessage) GetPayload() isCoordinatorMessage_Payload {
@@ -1489,7 +1564,7 @@ type RegisterResponse struct {
 
 func (x *RegisterResponse) Reset() {
 	*x = RegisterResponse{}
-	mi := &file_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_agent_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1501,7 +1576,7 @@ func (x *RegisterResponse) String() string {
 func (*RegisterResponse) ProtoMessage() {}
 
 func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_agent_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1514,7 +1589,7 @@ func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterResponse.ProtoReflect.Descriptor instead.
 func (*RegisterResponse) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RegisterResponse) GetAccepted() bool {
@@ -1631,7 +1706,7 @@ type ManifestDispatch struct {
 
 func (x *ManifestDispatch) Reset() {
 	*x = ManifestDispatch{}
-	mi := &file_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1643,7 +1718,7 @@ func (x *ManifestDispatch) String() string {
 func (*ManifestDispatch) ProtoMessage() {}
 
 func (x *ManifestDispatch) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1656,7 +1731,7 @@ func (x *ManifestDispatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ManifestDispatch.ProtoReflect.Descriptor instead.
 func (*ManifestDispatch) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ManifestDispatch) GetJobId() string {
@@ -1809,7 +1884,7 @@ type StopReplica struct {
 
 func (x *StopReplica) Reset() {
 	*x = StopReplica{}
-	mi := &file_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_agent_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1821,7 +1896,7 @@ func (x *StopReplica) String() string {
 func (*StopReplica) ProtoMessage() {}
 
 func (x *StopReplica) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_agent_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1834,7 +1909,7 @@ func (x *StopReplica) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopReplica.ProtoReflect.Descriptor instead.
 func (*StopReplica) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *StopReplica) GetReplicaId() string {
@@ -1867,7 +1942,7 @@ type InferenceRequest struct {
 
 func (x *InferenceRequest) Reset() {
 	*x = InferenceRequest{}
-	mi := &file_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_agent_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1879,7 +1954,7 @@ func (x *InferenceRequest) String() string {
 func (*InferenceRequest) ProtoMessage() {}
 
 func (x *InferenceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_agent_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1892,7 +1967,7 @@ func (x *InferenceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InferenceRequest.ProtoReflect.Descriptor instead.
 func (*InferenceRequest) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *InferenceRequest) GetRequestId() string {
@@ -1946,7 +2021,7 @@ type InferenceCancel struct {
 
 func (x *InferenceCancel) Reset() {
 	*x = InferenceCancel{}
-	mi := &file_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_agent_v1_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1958,7 +2033,7 @@ func (x *InferenceCancel) String() string {
 func (*InferenceCancel) ProtoMessage() {}
 
 func (x *InferenceCancel) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_agent_v1_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1971,7 +2046,7 @@ func (x *InferenceCancel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InferenceCancel.ProtoReflect.Descriptor instead.
 func (*InferenceCancel) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{17}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *InferenceCancel) GetRequestId() string {
@@ -1991,7 +2066,7 @@ type DrainRequest struct {
 
 func (x *DrainRequest) Reset() {
 	*x = DrainRequest{}
-	mi := &file_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_agent_v1_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2003,7 +2078,7 @@ func (x *DrainRequest) String() string {
 func (*DrainRequest) ProtoMessage() {}
 
 func (x *DrainRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_agent_v1_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2016,7 +2091,7 @@ func (x *DrainRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainRequest.ProtoReflect.Descriptor instead.
 func (*DrainRequest) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{18}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DrainRequest) GetReason() string {
@@ -2046,7 +2121,7 @@ type UpdateAvailable struct {
 
 func (x *UpdateAvailable) Reset() {
 	*x = UpdateAvailable{}
-	mi := &file_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_agent_v1_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2058,7 +2133,7 @@ func (x *UpdateAvailable) String() string {
 func (*UpdateAvailable) ProtoMessage() {}
 
 func (x *UpdateAvailable) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_agent_v1_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2071,7 +2146,7 @@ func (x *UpdateAvailable) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateAvailable.ProtoReflect.Descriptor instead.
 func (*UpdateAvailable) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *UpdateAvailable) GetVersion() string {
@@ -2124,7 +2199,7 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"usageBatch\x12:\n" +
 	"\tdrain_ack\x18\x06 \x01(\v2\x1b.ayeusann.agent.v1.DrainAckH\x00R\bdrainAck\x12L\n" +
 	"\x0finference_chunk\x18\a \x01(\v2!.ayeusann.agent.v1.InferenceChunkH\x00R\x0einferenceChunkB\t\n" +
-	"\apayload\"\xcf\x03\n" +
+	"\apayload\"\xaf\x04\n" +
 	"\x0fRegisterRequest\x12-\n" +
 	"\x12registration_token\x18\x01 \x01(\tR\x11registrationToken\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x0e\n" +
@@ -2140,7 +2215,13 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	" \x01(\tR\vwgPublicKey\x12'\n" +
 	"\x0fhost_credential\x18\v \x01(\tR\x0ehostCredential\x12\x18\n" +
 	"\aruntime\x18\f \x01(\tR\aruntime\x12#\n" +
-	"\rcached_models\x18\r \x03(\tR\fcachedModels\"\xac\x02\n" +
+	"\rcached_models\x18\r \x03(\tR\fcachedModels\x12:\n" +
+	"\breplicas\x18\x0e \x03(\v2\x1e.ayeusann.agent.v1.HeldReplicaR\breplicas\x12\"\n" +
+	"\fcapabilities\x18\x0f \x03(\tR\fcapabilities\"Q\n" +
+	"\vHeldReplica\x12\x1d\n" +
+	"\n" +
+	"replica_id\x18\x01 \x01(\tR\treplicaId\x12#\n" +
+	"\rruntime_model\x18\x02 \x01(\tR\fruntimeModel\"\xac\x02\n" +
 	"\aGpuInfo\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12\x17\n" +
 	"\avram_gb\x18\x02 \x01(\x05R\x06vramGb\x12%\n" +
@@ -2338,66 +2419,68 @@ func file_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_agent_v1_agent_proto_goTypes = []any{
 	(ReplicaState)(0),             // 0: ayeusann.agent.v1.ReplicaState
 	(RequestStatus)(0),            // 1: ayeusann.agent.v1.RequestStatus
 	(*AgentMessage)(nil),          // 2: ayeusann.agent.v1.AgentMessage
 	(*RegisterRequest)(nil),       // 3: ayeusann.agent.v1.RegisterRequest
-	(*GpuInfo)(nil),               // 4: ayeusann.agent.v1.GpuInfo
-	(*Heartbeat)(nil),             // 5: ayeusann.agent.v1.Heartbeat
-	(*GpuStatus)(nil),             // 6: ayeusann.agent.v1.GpuStatus
-	(*BenchmarkReport)(nil),       // 7: ayeusann.agent.v1.BenchmarkReport
-	(*GpuBenchmark)(nil),          // 8: ayeusann.agent.v1.GpuBenchmark
-	(*StageEvent)(nil),            // 9: ayeusann.agent.v1.StageEvent
-	(*UsageBatch)(nil),            // 10: ayeusann.agent.v1.UsageBatch
-	(*UsageRecord)(nil),           // 11: ayeusann.agent.v1.UsageRecord
-	(*DrainAck)(nil),              // 12: ayeusann.agent.v1.DrainAck
-	(*InferenceChunk)(nil),        // 13: ayeusann.agent.v1.InferenceChunk
-	(*CoordinatorMessage)(nil),    // 14: ayeusann.agent.v1.CoordinatorMessage
-	(*RegisterResponse)(nil),      // 15: ayeusann.agent.v1.RegisterResponse
-	(*ManifestDispatch)(nil),      // 16: ayeusann.agent.v1.ManifestDispatch
-	(*StopReplica)(nil),           // 17: ayeusann.agent.v1.StopReplica
-	(*InferenceRequest)(nil),      // 18: ayeusann.agent.v1.InferenceRequest
-	(*InferenceCancel)(nil),       // 19: ayeusann.agent.v1.InferenceCancel
-	(*DrainRequest)(nil),          // 20: ayeusann.agent.v1.DrainRequest
-	(*UpdateAvailable)(nil),       // 21: ayeusann.agent.v1.UpdateAvailable
-	nil,                           // 22: ayeusann.agent.v1.ManifestDispatch.EnvVarsEntry
-	(*timestamppb.Timestamp)(nil), // 23: google.protobuf.Timestamp
+	(*HeldReplica)(nil),           // 4: ayeusann.agent.v1.HeldReplica
+	(*GpuInfo)(nil),               // 5: ayeusann.agent.v1.GpuInfo
+	(*Heartbeat)(nil),             // 6: ayeusann.agent.v1.Heartbeat
+	(*GpuStatus)(nil),             // 7: ayeusann.agent.v1.GpuStatus
+	(*BenchmarkReport)(nil),       // 8: ayeusann.agent.v1.BenchmarkReport
+	(*GpuBenchmark)(nil),          // 9: ayeusann.agent.v1.GpuBenchmark
+	(*StageEvent)(nil),            // 10: ayeusann.agent.v1.StageEvent
+	(*UsageBatch)(nil),            // 11: ayeusann.agent.v1.UsageBatch
+	(*UsageRecord)(nil),           // 12: ayeusann.agent.v1.UsageRecord
+	(*DrainAck)(nil),              // 13: ayeusann.agent.v1.DrainAck
+	(*InferenceChunk)(nil),        // 14: ayeusann.agent.v1.InferenceChunk
+	(*CoordinatorMessage)(nil),    // 15: ayeusann.agent.v1.CoordinatorMessage
+	(*RegisterResponse)(nil),      // 16: ayeusann.agent.v1.RegisterResponse
+	(*ManifestDispatch)(nil),      // 17: ayeusann.agent.v1.ManifestDispatch
+	(*StopReplica)(nil),           // 18: ayeusann.agent.v1.StopReplica
+	(*InferenceRequest)(nil),      // 19: ayeusann.agent.v1.InferenceRequest
+	(*InferenceCancel)(nil),       // 20: ayeusann.agent.v1.InferenceCancel
+	(*DrainRequest)(nil),          // 21: ayeusann.agent.v1.DrainRequest
+	(*UpdateAvailable)(nil),       // 22: ayeusann.agent.v1.UpdateAvailable
+	nil,                           // 23: ayeusann.agent.v1.ManifestDispatch.EnvVarsEntry
+	(*timestamppb.Timestamp)(nil), // 24: google.protobuf.Timestamp
 }
 var file_agent_v1_agent_proto_depIdxs = []int32{
 	3,  // 0: ayeusann.agent.v1.AgentMessage.register:type_name -> ayeusann.agent.v1.RegisterRequest
-	5,  // 1: ayeusann.agent.v1.AgentMessage.heartbeat:type_name -> ayeusann.agent.v1.Heartbeat
-	7,  // 2: ayeusann.agent.v1.AgentMessage.benchmark:type_name -> ayeusann.agent.v1.BenchmarkReport
-	9,  // 3: ayeusann.agent.v1.AgentMessage.stage_event:type_name -> ayeusann.agent.v1.StageEvent
-	10, // 4: ayeusann.agent.v1.AgentMessage.usage_batch:type_name -> ayeusann.agent.v1.UsageBatch
-	12, // 5: ayeusann.agent.v1.AgentMessage.drain_ack:type_name -> ayeusann.agent.v1.DrainAck
-	13, // 6: ayeusann.agent.v1.AgentMessage.inference_chunk:type_name -> ayeusann.agent.v1.InferenceChunk
-	4,  // 7: ayeusann.agent.v1.RegisterRequest.gpus:type_name -> ayeusann.agent.v1.GpuInfo
-	23, // 8: ayeusann.agent.v1.Heartbeat.ts:type_name -> google.protobuf.Timestamp
-	6,  // 9: ayeusann.agent.v1.Heartbeat.gpu_status:type_name -> ayeusann.agent.v1.GpuStatus
-	8,  // 10: ayeusann.agent.v1.BenchmarkReport.gpu_benchmarks:type_name -> ayeusann.agent.v1.GpuBenchmark
-	23, // 11: ayeusann.agent.v1.BenchmarkReport.ran_at:type_name -> google.protobuf.Timestamp
-	0,  // 12: ayeusann.agent.v1.StageEvent.state:type_name -> ayeusann.agent.v1.ReplicaState
-	23, // 13: ayeusann.agent.v1.StageEvent.ts:type_name -> google.protobuf.Timestamp
-	11, // 14: ayeusann.agent.v1.UsageBatch.records:type_name -> ayeusann.agent.v1.UsageRecord
-	23, // 15: ayeusann.agent.v1.UsageRecord.ts:type_name -> google.protobuf.Timestamp
-	1,  // 16: ayeusann.agent.v1.UsageRecord.status:type_name -> ayeusann.agent.v1.RequestStatus
-	15, // 17: ayeusann.agent.v1.CoordinatorMessage.register_response:type_name -> ayeusann.agent.v1.RegisterResponse
-	16, // 18: ayeusann.agent.v1.CoordinatorMessage.manifest:type_name -> ayeusann.agent.v1.ManifestDispatch
-	20, // 19: ayeusann.agent.v1.CoordinatorMessage.drain:type_name -> ayeusann.agent.v1.DrainRequest
-	21, // 20: ayeusann.agent.v1.CoordinatorMessage.update:type_name -> ayeusann.agent.v1.UpdateAvailable
-	18, // 21: ayeusann.agent.v1.CoordinatorMessage.inference_request:type_name -> ayeusann.agent.v1.InferenceRequest
-	19, // 22: ayeusann.agent.v1.CoordinatorMessage.inference_cancel:type_name -> ayeusann.agent.v1.InferenceCancel
-	17, // 23: ayeusann.agent.v1.CoordinatorMessage.stop_replica:type_name -> ayeusann.agent.v1.StopReplica
-	22, // 24: ayeusann.agent.v1.ManifestDispatch.env_vars:type_name -> ayeusann.agent.v1.ManifestDispatch.EnvVarsEntry
-	2,  // 25: ayeusann.agent.v1.AgentService.Session:input_type -> ayeusann.agent.v1.AgentMessage
-	14, // 26: ayeusann.agent.v1.AgentService.Session:output_type -> ayeusann.agent.v1.CoordinatorMessage
-	26, // [26:27] is the sub-list for method output_type
-	25, // [25:26] is the sub-list for method input_type
-	25, // [25:25] is the sub-list for extension type_name
-	25, // [25:25] is the sub-list for extension extendee
-	0,  // [0:25] is the sub-list for field type_name
+	6,  // 1: ayeusann.agent.v1.AgentMessage.heartbeat:type_name -> ayeusann.agent.v1.Heartbeat
+	8,  // 2: ayeusann.agent.v1.AgentMessage.benchmark:type_name -> ayeusann.agent.v1.BenchmarkReport
+	10, // 3: ayeusann.agent.v1.AgentMessage.stage_event:type_name -> ayeusann.agent.v1.StageEvent
+	11, // 4: ayeusann.agent.v1.AgentMessage.usage_batch:type_name -> ayeusann.agent.v1.UsageBatch
+	13, // 5: ayeusann.agent.v1.AgentMessage.drain_ack:type_name -> ayeusann.agent.v1.DrainAck
+	14, // 6: ayeusann.agent.v1.AgentMessage.inference_chunk:type_name -> ayeusann.agent.v1.InferenceChunk
+	5,  // 7: ayeusann.agent.v1.RegisterRequest.gpus:type_name -> ayeusann.agent.v1.GpuInfo
+	4,  // 8: ayeusann.agent.v1.RegisterRequest.replicas:type_name -> ayeusann.agent.v1.HeldReplica
+	24, // 9: ayeusann.agent.v1.Heartbeat.ts:type_name -> google.protobuf.Timestamp
+	7,  // 10: ayeusann.agent.v1.Heartbeat.gpu_status:type_name -> ayeusann.agent.v1.GpuStatus
+	9,  // 11: ayeusann.agent.v1.BenchmarkReport.gpu_benchmarks:type_name -> ayeusann.agent.v1.GpuBenchmark
+	24, // 12: ayeusann.agent.v1.BenchmarkReport.ran_at:type_name -> google.protobuf.Timestamp
+	0,  // 13: ayeusann.agent.v1.StageEvent.state:type_name -> ayeusann.agent.v1.ReplicaState
+	24, // 14: ayeusann.agent.v1.StageEvent.ts:type_name -> google.protobuf.Timestamp
+	12, // 15: ayeusann.agent.v1.UsageBatch.records:type_name -> ayeusann.agent.v1.UsageRecord
+	24, // 16: ayeusann.agent.v1.UsageRecord.ts:type_name -> google.protobuf.Timestamp
+	1,  // 17: ayeusann.agent.v1.UsageRecord.status:type_name -> ayeusann.agent.v1.RequestStatus
+	16, // 18: ayeusann.agent.v1.CoordinatorMessage.register_response:type_name -> ayeusann.agent.v1.RegisterResponse
+	17, // 19: ayeusann.agent.v1.CoordinatorMessage.manifest:type_name -> ayeusann.agent.v1.ManifestDispatch
+	21, // 20: ayeusann.agent.v1.CoordinatorMessage.drain:type_name -> ayeusann.agent.v1.DrainRequest
+	22, // 21: ayeusann.agent.v1.CoordinatorMessage.update:type_name -> ayeusann.agent.v1.UpdateAvailable
+	19, // 22: ayeusann.agent.v1.CoordinatorMessage.inference_request:type_name -> ayeusann.agent.v1.InferenceRequest
+	20, // 23: ayeusann.agent.v1.CoordinatorMessage.inference_cancel:type_name -> ayeusann.agent.v1.InferenceCancel
+	18, // 24: ayeusann.agent.v1.CoordinatorMessage.stop_replica:type_name -> ayeusann.agent.v1.StopReplica
+	23, // 25: ayeusann.agent.v1.ManifestDispatch.env_vars:type_name -> ayeusann.agent.v1.ManifestDispatch.EnvVarsEntry
+	2,  // 26: ayeusann.agent.v1.AgentService.Session:input_type -> ayeusann.agent.v1.AgentMessage
+	15, // 27: ayeusann.agent.v1.AgentService.Session:output_type -> ayeusann.agent.v1.CoordinatorMessage
+	27, // [27:28] is the sub-list for method output_type
+	26, // [26:27] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_agent_v1_agent_proto_init() }
@@ -2414,7 +2497,7 @@ func file_agent_v1_agent_proto_init() {
 		(*AgentMessage_DrainAck)(nil),
 		(*AgentMessage_InferenceChunk)(nil),
 	}
-	file_agent_v1_agent_proto_msgTypes[12].OneofWrappers = []any{
+	file_agent_v1_agent_proto_msgTypes[13].OneofWrappers = []any{
 		(*CoordinatorMessage_RegisterResponse)(nil),
 		(*CoordinatorMessage_Manifest)(nil),
 		(*CoordinatorMessage_Drain)(nil),
@@ -2429,7 +2512,7 @@ func file_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_v1_agent_proto_rawDesc), len(file_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

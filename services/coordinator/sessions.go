@@ -24,13 +24,22 @@ type session struct {
 	mu       sync.Mutex
 	inflight map[string]chan *agentv1.InferenceChunk
 	closed   bool
+	// done is closed with the session. The stream's handler watches it, so
+	// closing a session really does end the connection: the agent sees the
+	// stream finish and reconnects, instead of holding a line nobody reads.
+	done chan struct{}
 }
 
 func newSession(hostID string, stream agentv1.AgentService_SessionServer) *session {
-	return &session{hostID: hostID, stream: stream, inflight: map[string]chan *agentv1.InferenceChunk{}}
+	return &session{hostID: hostID, stream: stream, inflight: map[string]chan *agentv1.InferenceChunk{}, done: make(chan struct{})}
 }
 
 func (s *session) send(msg *agentv1.CoordinatorMessage) error {
+	select {
+	case <-s.done:
+		return errSessionClosed
+	default:
+	}
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	return s.stream.Send(msg)
@@ -78,6 +87,7 @@ func (s *session) close() {
 		return
 	}
 	s.closed = true
+	close(s.done)
 	for id, ch := range s.inflight {
 		select {
 		case ch <- &agentv1.InferenceChunk{RequestId: id, Done: true, StatusCode: 502, Error: errSessionClosed.Error()}:
@@ -110,6 +120,34 @@ func (r *registry) put(s *session) *session {
 	r.byHost[s.hostID] = s
 	platform.HostsConnected.Set(float64(len(r.byHost)))
 	return old
+}
+
+// drop closes a host's session and takes it out of the registry at once, so
+// nothing is sent to a host that has been given up on.
+func (r *registry) drop(hostID string) {
+	r.mu.Lock()
+	s := r.byHost[hostID]
+	delete(r.byHost, hostID)
+	platform.HostsConnected.Set(float64(len(r.byHost)))
+	r.mu.Unlock()
+	if s != nil {
+		s.close()
+	}
+}
+
+// closeAll ends every session, for shutdown.
+func (r *registry) closeAll() {
+	r.mu.Lock()
+	all := make([]*session, 0, len(r.byHost))
+	for _, s := range r.byHost {
+		all = append(all, s)
+	}
+	r.byHost = map[string]*session{}
+	platform.HostsConnected.Set(0)
+	r.mu.Unlock()
+	for _, s := range all {
+		s.close()
+	}
 }
 
 // remove deletes a session only if it is still the current one for its host.

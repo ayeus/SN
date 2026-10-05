@@ -7,8 +7,8 @@ use crate::output::{self, Out};
 use crate::proto::agent_service_client::AgentServiceClient;
 use crate::proto::{
     agent_message, coordinator_message, AgentMessage, BenchmarkReport as ProtoBenchmark,
-    GpuBenchmark, GpuInfo as ProtoGpuInfo, Heartbeat, ManifestDispatch, RegisterRequest,
-    ReplicaState, StageEvent,
+    GpuBenchmark, GpuInfo as ProtoGpuInfo, Heartbeat, HeldReplica, ManifestDispatch,
+    RegisterRequest, ReplicaState, StageEvent,
 };
 use crate::runtime::Runtime;
 use crate::state;
@@ -46,6 +46,10 @@ struct Replica {
     serving: bool,
 }
 
+/// Tells the coordinator this agent lists the replicas it still serves when it
+/// registers, so a reconnect does not reload them.
+pub const CAP_REPLICA_REPORT: &str = "replica-report";
+
 /// State that survives reconnects: replicas stay loaded in the runtime while
 /// the control connection blips.
 #[derive(Default)]
@@ -53,6 +57,82 @@ pub struct Shared {
     replicas: Mutex<HashMap<String, Replica>>,
     starting: Mutex<HashMap<String, AbortHandle>>,
     inflight: Mutex<HashMap<String, AbortHandle>>,
+}
+
+impl Shared {
+    /// Stops the work that belonged to a connection that has ended. A replica
+    /// that was still starting reports its progress down that connection, and
+    /// a request in flight streams its answer down it; neither can finish
+    /// usefully, and the coordinator sends the job again on the new one.
+    /// Replicas that are serving are not touched.
+    pub fn end_session(&self) {
+        for (_, h) in self.starting.lock().unwrap().drain() {
+            h.abort();
+        }
+        for (_, h) in self.inflight.lock().unwrap().drain() {
+            h.abort();
+        }
+    }
+
+    /// The replicas this agent can honestly say it is still serving. Each
+    /// model is checked against the runtime first; a replica whose model is
+    /// gone is forgotten, so the coordinator sends its job again.
+    pub async fn held(&self, runtime: &Runtime) -> Vec<HeldReplica> {
+        let snapshot: Vec<(String, String)> = self
+            .replicas
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, r)| r.serving)
+            .map(|(id, r)| (id.clone(), r.runtime_model.clone()))
+            .collect();
+        let mut checked: HashMap<String, bool> = HashMap::new();
+        let mut held = Vec::new();
+        for (id, model) in snapshot {
+            let ok = match checked.get(&model) {
+                Some(ok) => *ok,
+                None => {
+                    let ok = runtime.still_serving(&model).await;
+                    checked.insert(model.clone(), ok);
+                    ok
+                }
+            };
+            if ok {
+                held.push(HeldReplica {
+                    replica_id: id,
+                    runtime_model: model,
+                });
+            } else {
+                warn!(replica_id = %id, model = %model, "model is no longer loaded; the coordinator will send the job again");
+                self.replicas.lock().unwrap().remove(&id);
+            }
+        }
+        held
+    }
+
+    pub fn has_replicas(&self) -> bool {
+        !self.replicas.lock().unwrap().is_empty()
+    }
+
+    /// Frees everything this agent holds for the platform. Used when the
+    /// platform has been unreachable for so long that holding a GPU's memory
+    /// for it is no longer reasonable.
+    pub async fn unload_all(&self, runtime: &Runtime) {
+        self.end_session();
+        let models: std::collections::HashSet<String> = self
+            .replicas
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, r)| r.runtime_model)
+            .collect();
+        for m in models {
+            match runtime.unload(&m).await {
+                Ok(()) => info!(model = %m, "unloaded"),
+                Err(e) => warn!(model = %m, error = %format!("{e:#}"), "failed to unload"),
+            }
+        }
+    }
 }
 
 /// Why a session ended, which decides whether to retry.
@@ -128,13 +208,16 @@ async fn stage(
 impl Session<'_> {
     pub async fn run(&self) -> Outcome {
         let registered = std::sync::atomic::AtomicBool::new(false);
-        match self.run_inner(&registered).await {
+        let outcome = match self.run_inner(&registered).await {
             Ok(o) => o,
             Err(error) => Outcome::Disconnected {
                 error,
                 registered: registered.load(std::sync::atomic::Ordering::Relaxed),
             },
-        }
+        };
+        // However it ended, nothing may keep talking into the old connection.
+        self.shared.end_session();
+        outcome
     }
 
     async fn run_inner(&self, registered: &std::sync::atomic::AtomicBool) -> Result<Outcome> {
@@ -147,6 +230,15 @@ impl Session<'_> {
         }
 
         let cached = self.runtime.cached_models().await.unwrap_or_default();
+        // What is still loaded from before the connection dropped. Empty on a
+        // fresh start, and the coordinator then sends every job again.
+        let held = self.shared.held(&self.runtime).await;
+        if !held.is_empty() {
+            info!(
+                replicas = held.len(),
+                "still serving from before the connection dropped"
+            );
+        }
         let reg = RegisterRequest {
             registration_token: if credential.is_some() {
                 String::new()
@@ -165,6 +257,8 @@ impl Session<'_> {
             wg_public_key: self.facts.wg_public_key.clone(),
             runtime: self.runtime.kind.name().to_string(),
             cached_models: cached,
+            replicas: held,
+            capabilities: vec![CAP_REPLICA_REPORT.to_string()],
         };
 
         let mut client = AgentServiceClient::new(
@@ -326,6 +420,32 @@ impl Session<'_> {
             )
             .await;
             return;
+        }
+        // Asked to start what is already serving: say so at once. Reloading a
+        // model that is in memory helps nobody.
+        let already = self
+            .shared
+            .replicas
+            .lock()
+            .unwrap()
+            .get(&replica_id)
+            .is_some_and(|r| r.serving && r.runtime_model == m.runtime_model);
+        if already {
+            info!(replica_id = %replica_id, "asked to start a replica that is already serving");
+            stage(
+                tx,
+                &replica_id,
+                ReplicaState::Serving,
+                &format!("{} via {}", m.runtime_model, self.runtime.kind.name()),
+                "",
+            )
+            .await;
+            return;
+        }
+        // A second manifest for a replica that is still starting replaces the
+        // first attempt rather than racing it.
+        if let Some(h) = self.shared.starting.lock().unwrap().remove(&replica_id) {
+            h.abort();
         }
         info!(replica_id = %replica_id, model = %m.model_name, runtime_model = %m.runtime_model, "manifest verified; starting replica");
 
@@ -633,4 +753,171 @@ fn print_banner(f: &HostFacts, tier: &str, status: &str, runtime: &Runtime) {
         lines.push(String::new());
     }
     let _ = writeln!(Out, "{}", lines.join("\n"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::Kind;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A stand-in for Ollama's `/api/generate`: answers 200 unless the request
+    /// names the model "gone:1", and records every body it was sent.
+    async fn stub_runtime() -> (Runtime, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let body = loop {
+                        let Ok(n) = sock.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                            let len = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            if body.len() >= len {
+                                break body.to_string();
+                            }
+                        }
+                    };
+                    let status = if body.contains("gone:1") {
+                        "404 Not Found"
+                    } else {
+                        "200 OK"
+                    };
+                    log.lock().unwrap().push(body);
+                    let _ = sock
+                        .write_all(
+                            format!("HTTP/1.1 {status}\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}")
+                                .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        (
+            Runtime::new(Kind::Ollama, &format!("http://{addr}")).unwrap(),
+            seen,
+        )
+    }
+
+    fn serving(shared: &Shared, id: &str, model: &str) {
+        shared.replicas.lock().unwrap().insert(
+            id.to_string(),
+            Replica {
+                runtime_model: model.to_string(),
+                model_name: model.to_string(),
+                serving: true,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn ending_a_session_stops_its_work_and_keeps_what_is_serving() {
+        let shared = Shared::default();
+        serving(&shared, "r-serving", "kept:1");
+        let starting = tokio::spawn(tokio::time::sleep(Duration::from_secs(3600)));
+        let request = tokio::spawn(tokio::time::sleep(Duration::from_secs(3600)));
+        shared
+            .starting
+            .lock()
+            .unwrap()
+            .insert("r-starting".into(), starting.abort_handle());
+        shared
+            .inflight
+            .lock()
+            .unwrap()
+            .insert("req-1".into(), request.abort_handle());
+
+        shared.end_session();
+
+        assert!(starting.await.unwrap_err().is_cancelled());
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(shared.starting.lock().unwrap().is_empty());
+        assert!(shared.inflight.lock().unwrap().is_empty());
+        assert!(
+            shared.replicas.lock().unwrap().contains_key("r-serving"),
+            "a serving replica must survive the end of a connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_replicas_the_runtime_still_has_are_reported() {
+        let (runtime, seen) = stub_runtime().await;
+        let shared = Shared::default();
+        serving(&shared, "r-1", "kept:1");
+        serving(&shared, "r-2", "kept:1");
+        serving(&shared, "r-3", "gone:1");
+
+        let mut held: Vec<String> = shared
+            .held(&runtime)
+            .await
+            .into_iter()
+            .map(|h| format!("{}={}", h.replica_id, h.runtime_model))
+            .collect();
+        held.sort();
+
+        assert_eq!(held, vec!["r-1=kept:1", "r-2=kept:1"]);
+        // The one whose model is gone is forgotten, so its job is sent again.
+        assert!(!shared.replicas.lock().unwrap().contains_key("r-3"));
+        assert_eq!(shared.replicas.lock().unwrap().len(), 2);
+        // Each model is asked about once, and the asking pins it.
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one check per distinct model: {seen:?}");
+        assert!(seen.iter().all(|b| b.contains("\"keep_alive\":-1")));
+    }
+
+    #[tokio::test]
+    async fn nothing_is_reported_when_the_runtime_is_down() {
+        let dead = Runtime::new(Kind::Ollama, "http://127.0.0.1:9").unwrap();
+        let shared = Shared::default();
+        serving(&shared, "r-1", "kept:1");
+        assert!(shared.held(&dead).await.is_empty());
+        assert!(!shared.has_replicas());
+    }
+
+    #[tokio::test]
+    async fn an_orphaned_agent_unloads_every_model_once() {
+        let (runtime, seen) = stub_runtime().await;
+        let shared = Shared::default();
+        serving(&shared, "r-1", "kept:1");
+        serving(&shared, "r-2", "kept:1");
+        serving(&shared, "r-3", "other:2");
+        let starting = tokio::spawn(tokio::time::sleep(Duration::from_secs(3600)));
+        shared
+            .starting
+            .lock()
+            .unwrap()
+            .insert("r-4".into(), starting.abort_handle());
+
+        shared.unload_all(&runtime).await;
+
+        assert!(!shared.has_replicas());
+        assert!(starting.await.unwrap_err().is_cancelled());
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(seen.len(), 2, "one unload per distinct model: {seen:?}");
+        assert!(seen[0].contains("kept:1") && seen[0].contains("\"keep_alive\":0"));
+        assert!(seen[1].contains("other:2") && seen[1].contains("\"keep_alive\":0"));
+    }
 }

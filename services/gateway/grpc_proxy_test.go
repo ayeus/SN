@@ -41,6 +41,16 @@ func (s *stubCoordinator) Session(stream agentv1.AgentService_SessionServer) err
 	if reg.GetHostname() == "banned" {
 		return status.Error(codes.PermissionDenied, "this host has been banned from the network")
 	}
+	if reg.GetHostname() == "dropped" {
+		// Accepted, then the platform ends the session while the agent is idle.
+		if err := stream.Send(&agentv1.CoordinatorMessage{Payload: &agentv1.CoordinatorMessage_RegisterResponse{
+			RegisterResponse: &agentv1.RegisterResponse{Accepted: true, HostId: "host-1"},
+		}}); err != nil {
+			return err
+		}
+		time.Sleep(200 * time.Millisecond)
+		return status.Error(codes.Unavailable, "session closed by the platform; reconnect")
+	}
 	if err := stream.Send(&agentv1.CoordinatorMessage{Payload: &agentv1.CoordinatorMessage_RegisterResponse{
 		RegisterResponse: &agentv1.RegisterResponse{Accepted: true, HostId: "host-1"},
 	}}); err != nil {
@@ -193,6 +203,29 @@ func TestAgentRefusalKeepsItsStatusThroughTheGateway(t *testing.T) {
 	_, err := stream.Recv()
 	if status.Code(err) != codes.PermissionDenied || status.Convert(err).Message() != "this host has been banned from the network" {
 		t.Fatalf("refusal arrived as %v, want PermissionDenied with the coordinator's message", err)
+	}
+}
+
+// When the coordinator ends a session (it is restarting, or it replaced the
+// session) the agent has to hear about it at once, not when it next happens
+// to send something: until it does, it is attached to nothing.
+func TestAgentHearsAtOnceWhenTheCoordinatorEndsTheSession(t *testing.T) {
+	addr := gatewayInFrontOf(t, &stubCoordinator{sawEOF: make(chan struct{})}, 30*time.Second)
+	stream := dialSession(t, addr)
+	if err := stream.Send(register("dropped")); err != nil {
+		t.Fatal(err)
+	}
+	if resp, err := stream.Recv(); err != nil || !resp.GetRegisterResponse().GetAccepted() {
+		t.Fatalf("registration answer = %v, %v", resp, err)
+	}
+	// The agent now sends nothing at all.
+	start := time.Now()
+	_, err := stream.Recv()
+	if status.Code(err) != codes.Unavailable || status.Convert(err).Message() != "session closed by the platform; reconnect" {
+		t.Fatalf("the end of the session arrived as %v, want Unavailable with the coordinator's message", err)
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Fatalf("the agent heard %s after the session ended, want at once", waited.Round(time.Millisecond))
 	}
 }
 
