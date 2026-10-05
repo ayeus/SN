@@ -25,6 +25,10 @@ func main() {
 		log.Fatalf("configuration error: %v", err)
 	}
 
+	if err := platform.RequirePublicURL(); err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+
 	ctx := context.Background()
 	dbClient, err := platform.ConnectDB(ctx)
 	if err != nil {
@@ -43,6 +47,7 @@ func main() {
 		InferenceHost:        platform.Env("INFERENCE_HOST", ""),
 		HeartbeatTimeout:     platform.HeartbeatTimeout(),
 		PlatformAdminEmails:  httpx.SplitList(platform.Env("PLATFORM_ADMIN_EMAILS", "")),
+		PersonalHostsOnly:    platform.Mode() == platform.ModePrivate,
 	})
 
 	srv, err := platform.NewServer(platform.ServiceConfig{Name: "control-api", Version: "0.3.0", Port: port})

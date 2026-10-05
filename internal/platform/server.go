@@ -132,16 +132,17 @@ func (s *Server) SetReady() {
 // It performs graceful shutdown with a 15-second timeout.
 //
 // When TLS_CERT_FILE and TLS_KEY_FILE are set the server serves HTTPS with
-// TLS 1.2 as the floor. Plain HTTP is intended for local development and for
-// running behind a TLS-terminating ingress; production deployments should set
-// either the cert pair or SN_TLS_TERMINATED_BY_PROXY=true to acknowledge that
-// termination happens upstream.
+// TLS 1.2 as the floor. Plain HTTP is for development, for a private network
+// (SN_ENV=private), and for running behind a TLS-terminating ingress;
+// production deployments must set either the cert pair or
+// SN_TLS_TERMINATED_BY_PROXY=true to acknowledge that termination happens
+// upstream.
 func (s *Server) Run() error {
 	certFile := os.Getenv("TLS_CERT_FILE")
 	keyFile := os.Getenv("TLS_KEY_FILE")
 	tlsEnabled := certFile != "" && keyFile != ""
 
-	if !tlsEnabled && IsProduction() && !EnvBool("SN_TLS_TERMINATED_BY_PROXY", false) {
+	if !tlsEnabled && !AllowsPlaintext() {
 		return fmt.Errorf(
 			"platform: refusing to serve plaintext HTTP in production; set TLS_CERT_FILE and TLS_KEY_FILE, " +
 				"or set SN_TLS_TERMINATED_BY_PROXY=true if an ingress terminates TLS upstream")

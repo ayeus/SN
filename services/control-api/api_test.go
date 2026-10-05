@@ -72,6 +72,7 @@ func (h *harness) do(method, path, token string, body any, out any, headers ...s
 type session struct {
 	Token string
 	OrgID string
+	Email string
 }
 
 func (h *harness) signup(prefix string) session {
@@ -84,7 +85,7 @@ func (h *harness) signup(prefix string) session {
 	if code != http.StatusCreated {
 		h.t.Fatalf("signup: status %d", code)
 	}
-	return session{Token: resp.AccessToken, OrgID: resp.Organization.ID}
+	return session{Token: resp.AccessToken, OrgID: resp.Organization.ID, Email: email}
 }
 
 func TestSignupDefaultsToIndia(t *testing.T) {
@@ -289,6 +290,28 @@ func TestHostOnboardingAPI(t *testing.T) {
 	if code := h.do("POST", "/v1/hosts/register-token", s.Token, map[string]string{"tier": "t1"}, nil); code != http.StatusForbidden {
 		t.Fatalf("self-serve T1 should be forbidden, got %d", code)
 	}
+
+	// On a private network every machine is somebody's own computer: it joins
+	// as Tier 3 unless the operator enrols it.
+	if code := h.do("POST", "/v1/hosts/register-token", s.Token, map[string]string{"tier": "t2"}, nil); code != http.StatusCreated {
+		t.Fatalf("self-serve T2 on a public installation: %d", code)
+	}
+	h.api.personalHostsOnly = true
+	if code := h.do("POST", "/v1/hosts/register-token", s.Token, map[string]string{"tier": "t2"}, nil); code != http.StatusForbidden {
+		t.Fatalf("self-serve T2 on a private network should be forbidden, got %d", code)
+	}
+	if code := h.do("POST", "/v1/hosts/register-token", s.Token, map[string]string{"tier": "t3"}, nil); code != http.StatusCreated {
+		t.Fatalf("T3 on a private network: %d", code)
+	}
+	if code := h.do("POST", "/v1/hosts/register-token", s.Token, nil, &tok); code != http.StatusCreated || tok.Tier != "t3" {
+		t.Fatalf("the default tier on a private network = %d %q, want t3", code, tok.Tier)
+	}
+	h.api.platformAdmins[strings.ToLower(s.Email)] = true
+	if code := h.do("POST", "/v1/hosts/register-token", s.Token, map[string]string{"tier": "t2"}, nil); code != http.StatusCreated {
+		t.Fatalf("the operator enrolling a T2 machine on a private network: %d", code)
+	}
+	delete(h.api.platformAdmins, strings.ToLower(s.Email))
+	h.api.personalHostsOnly = false
 
 	var hosts struct {
 		Hosts []any `json:"hosts"`

@@ -75,6 +75,7 @@ func main() {
 		wgEndpoint:      platform.Env("WIREGUARD_ENDPOINT", ""),
 		wgServerPubKey:  platform.Env("WIREGUARD_SERVER_PUBKEY", ""),
 		coordinatorURLs: platform.CoordinatorURLs(),
+		allowFakeGPU:    platform.AllowsFakeGPU(),
 	}
 
 	// gRPC: keepalives detect dead NAT mappings on home/campus networks long
@@ -89,8 +90,9 @@ func main() {
 			log.Fatalf("failed to load gRPC TLS credentials: %v", err)
 		}
 		opts = append(opts, grpc.Creds(creds))
-	} else if platform.IsProduction() && !platform.EnvBool("SN_TLS_TERMINATED_BY_PROXY", false) {
-		// Behind a TLS-terminating proxy the coordinator speaks cleartext HTTP/2 (h2c).
+	} else if !platform.AllowsPlaintext() {
+		// Behind a TLS-terminating proxy, and on a private network, the
+		// coordinator speaks cleartext HTTP/2 (h2c).
 		log.Fatalf("configuration error: set GRPC_TLS_CERT_FILE and GRPC_TLS_KEY_FILE, or SN_TLS_TERMINATED_BY_PROXY=true behind a TLS-terminating proxy")
 	}
 

@@ -44,6 +44,9 @@ type AgentServer struct {
 	wgServerPubKey string
 	// coordinatorURLs is pushed to every agent at registration (COORDINATOR_URLS).
 	coordinatorURLs []string
+	// allowFakeGPU admits hosts that report a simulated GPU (development and
+	// end-to-end tests only).
+	allowFakeGPU bool
 }
 
 // enrolment is the host row an agent session binds to.
@@ -188,7 +191,7 @@ func (s *AgentServer) resume(ctx context.Context, reg *agentv1.RegisterRequest) 
 	if fingerprint != nil && reg.GetHardwareFingerprint() != "" && *fingerprint != reg.GetHardwareFingerprint() {
 		return nil, codes.PermissionDenied, "hardware fingerprint changed since enrolment; re-enrol this machine with a new registration token"
 	}
-	if reason := validateGPUs(reg.GetGpus()); reason != "" {
+	if reason := s.refuseGPUs(reg.GetGpus()); reason != "" {
 		return nil, codes.FailedPrecondition, reason
 	}
 
@@ -227,7 +230,7 @@ func (s *AgentServer) enrol(ctx context.Context, reg *agentv1.RegisterRequest) (
 	if !domain.IsValidRegion(region) {
 		return nil, codes.InvalidArgument, fmt.Sprintf("unknown region %q; use one of %s", region, strings.Join(domain.AllRegions, ", "))
 	}
-	if reason := validateGPUs(reg.GetGpus()); reason != "" {
+	if reason := s.refuseGPUs(reg.GetGpus()); reason != "" {
 		return nil, codes.FailedPrecondition, reason
 	}
 	if reg.GetHardwareFingerprint() == "" {
@@ -378,6 +381,28 @@ func validateGPUs(gpus []*agentv1.GpuInfo) string {
 			major, err := strconv.Atoi(strings.SplitN(g.GetDriverVersion(), ".", 2)[0])
 			if err == nil && major < minNvidiaDriverMajor {
 				return fmt.Sprintf("NVIDIA driver %s is too old; R%d or newer is required", g.GetDriverVersion(), minNvidiaDriverMajor)
+			}
+		}
+	}
+	return ""
+}
+
+// fakeGPUPrefix marks the simulated GPU an agent reports under --fake-gpu.
+const fakeGPUPrefix = "GPU-fake-"
+
+// refuseGPUs returns why this machine's hardware may not join, or "".
+//
+// The simulated-GPU check is a guard against a mistake (a development agent
+// pointed at a real installation), not a defence: a host that wants to lie
+// about its hardware is the trust engine's problem, not this function's.
+func (s *AgentServer) refuseGPUs(gpus []*agentv1.GpuInfo) string {
+	if reason := validateGPUs(gpus); reason != "" {
+		return reason
+	}
+	if !s.allowFakeGPU {
+		for _, g := range gpus {
+			if strings.HasPrefix(g.GetUuid(), fakeGPUPrefix) {
+				return "this agent is reporting a simulated GPU (--fake-gpu or SN_FAKE_GPU), which only a development platform accepts; run it without that setting"
 			}
 		}
 	}

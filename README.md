@@ -52,6 +52,8 @@ client.chat.completions.create(model="<deployment-name>", messages=[{"role": "us
 
 To use a GPU that sits in a different computer (a friend's laptop, a lab machine), follow [docs/connect-a-gpu.md](docs/connect-a-gpu.md). `make dev` prints the address other machines on your network use.
 
+To run it for real for yourself and people you know (generated secrets, its own database, daily backups, back after a reboot), follow [docs/private-network.md](docs/private-network.md).
+
 To verify the whole flow automatically, run `scripts/smoke.sh`. It signs up, enrols two hosts, deploys, streams, checks the usage records, kills a host to test failover, and stops the deployment.
 
 ## Commands
@@ -70,6 +72,8 @@ To verify the whole flow automatically, run `scripts/smoke.sh`. It signs up, enr
 | `make dist-agent` | Publish this machine's agent build so the installer can download it |
 | `make dist-agent-linux` | Build the Linux agent in Docker for the installer |
 | `make dist-agent-windows` | Cross-compile the Windows agent in Docker for the installer |
+| `make private-up` | Start a private installation on this computer ([guide](docs/private-network.md)) |
+| `make private-check` | Prove the private installation works, on a throwaway copy |
 | `make prod-up` | Build, migrate and start the production stack ([guide](docs/deployment.md)) |
 
 Logs are written to `logs/<service>.log`.
@@ -105,10 +109,10 @@ proto/            Agent ↔ coordinator gRPC contract (generated code in gen/go)
 schema/           SQL migrations and seed data (catalogue, GPU rate card)
 web/console/      Next.js console: landing page, customer console, host console, ops
 web/install/      Host installers served at /install.sh
-scripts/          dev.sh (local environment), smoke.sh, smoke-remote.sh and smoke-fake.sh (end-to-end tests)
+scripts/          dev.sh (local environment), private.sh (private installation), smoke*.sh and private-check.sh (end-to-end tests)
 cmd/              fake-runtime: a stand-in for Ollama used by the end-to-end tests
-deploy/           Dockerfiles and docker-compose (dev infrastructure, production stack)
-docs/             Guides (development, connecting a GPU, deployment), architecture decision records
+deploy/           Dockerfiles and docker-compose (dev infrastructure, private installation, production stack)
+docs/             Guides (development, connecting a GPU, private network, deployment), architecture decision records
 _archive/         Superseded code kept for reference (old frontends, standalone router)
 ```
 
@@ -120,7 +124,8 @@ _archive/         Superseded code kept for reference (old frontends, standalone 
 - Streaming inference through the OpenAI SDK
 - Per-request usage records (requests, tokens, latency) for customers and hosts
 - Failover
-- Host onboarding from other machines: one-line installers for macOS, Linux and Windows
+- Host onboarding from other machines: one-line installers for macOS, Linux and Windows, over one address and one port
+- A private installation on one computer, with generated secrets and checked backups
 - Reputation scoring
 - Ops console
 
@@ -134,7 +139,7 @@ _archive/         Superseded code kept for reference (old frontends, standalone 
 
 ## Configuration
 
-Every service has working development defaults. In production the services refuse to start without real secrets and TLS. See [`.env.example`](.env.example) for every setting, including platform admin emails and public URLs.
+Every service has working development defaults. `SN_ENV` chooses the mode: `dev`, `private` (a real installation on a network you trust: real secrets required, plain HTTP allowed) or `production` (real secrets and TLS required; also what an unset or misspelled value means). See [`.env.example`](.env.example) for every setting, including platform admin emails and public URLs.
 
 ## Production
 

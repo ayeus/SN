@@ -1,0 +1,225 @@
+# AyeusANN on one computer, for you and people you know.
+#
+#   make private-init     # once: writes the secrets file
+#   make private-up
+#
+# Do not run `docker compose` on this file directly: scripts/private.sh supplies
+# the secrets file and the values below that have no default.
+#
+# Only the gateway is published, on one port. Postgres, Redis and every other
+# service are reachable from inside this stack and from nowhere else. The stack
+# uses its own project name, volumes and port, so `make dev` can run beside it.
+# See docs/private-network.md.
+
+name: ayeusann-private
+
+x-service: &service
+  image: ayeusann/services:${TAG:-latest}
+  build:
+    context: ../..
+    dockerfile: deploy/docker/services.Dockerfile
+  restart: unless-stopped
+  # Longer than the services' own 15 s graceful shutdown.
+  stop_grace_period: 30s
+  mem_limit: 256m
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+x-env: &env
+  # A real installation in every respect except the certificate: generated
+  # secrets, a required signing key and a fixed address, over plain HTTP on a
+  # network you trust.
+  SN_ENV: private
+  JWT_SECRET: ${JWT_SECRET:?run make private-init}
+  INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:?run make private-init}
+  DATABASE_URL: &database_url postgres://ayeusann:${POSTGRES_PASSWORD:?run make private-init}@postgres:5432/ayeusann?sslmode=disable
+  # Six services share one small Postgres.
+  DB_MAX_CONNS: "8"
+  DB_MIN_CONNS: "1"
+  REDIS_URL: redis://redis:6379
+  PUBLIC_URL: ${PUBLIC_URL:?run make private-init}
+  # Every address agents may use, newest first (scripts/private.sh address).
+  COORDINATOR_URLS: ${COORDINATOR_URLS:-}
+  CONTROL_API_URL: http://control-api:8081
+  SCHEDULER_URL: http://scheduler:8082
+  COORDINATOR_URL: http://coordinator:8083
+  COORDINATOR_GRPC_URL: http://coordinator:50051
+  INFERENCE_GATEWAY_URL: http://inference-gateway:8085
+  TRUST_ENGINE_URL: http://trust-engine:8087
+  WEB_URL: http://console:3000
+
+x-backup: &backup
+  image: ayeusann/services:${TAG:-latest}
+  # The machine owner's own user, so dumps on disk belong to them.
+  user: "${HOST_UID:?use scripts/private.sh}:${HOST_GID:?use scripts/private.sh}"
+  environment: &backup_env
+    DATABASE_URL: *database_url
+    BACKUP_DIR: /backups
+    BACKUP_EVERY_HOURS: ${BACKUP_EVERY_HOURS:-24}
+  volumes:
+    - ${BACKUP_DIR:?use scripts/private.sh}:/backups
+    - ${PRIVATE_ENV_FILE:?use scripts/private.sh}:/secrets/private.env:ro
+  logging: *logging
+
+services:
+  # ─── Data ───────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: 512m
+    shm_size: 128m
+    environment:
+      POSTGRES_USER: ayeusann
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ayeusann
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ayeusann -d ayeusann"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: 192m
+    # Rate-limit counters only: nothing here needs to survive a restart.
+    command: redis-server --save "" --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+  migrate:
+    <<: *backup
+    build:
+      context: ../..
+      dockerfile: deploy/docker/services.Dockerfile
+    command: migrate-and-seed
+    restart: "no"
+    environment:
+      <<: *backup_env
+      # An existing database is dumped before a newer schema is applied to it.
+      BACKUP_BEFORE_MIGRATE: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backup:
+    <<: *backup
+    command: backup loop
+    restart: unless-stopped
+    stop_grace_period: 10s
+    mem_limit: 256m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # ─── Services ───────────────────────────────────────────────
+  gateway:
+    <<: *service
+    command: gateway
+    mem_limit: 192m
+    environment:
+      <<: *env
+      # Reachable inside the stack only; never published.
+      METRICS_ADDR: 0.0.0.0:9080
+    ports:
+      # The one way in: console, API, installers and agent sessions.
+      - "${PRIVATE_BIND:-0.0.0.0}:${PRIVATE_PORT:-8090}:8080"
+    volumes:
+      # Host agents served at /downloads (make dist-agent and friends).
+      - ../../dist/agent:/app/downloads:ro
+    healthcheck: &health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  control-api:
+    <<: *service
+    command: control-api
+    environment:
+      <<: *env
+      PLATFORM_ADMIN_EMAILS: ${PLATFORM_ADMIN_EMAILS:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8081/readyz"]
+
+  scheduler:
+    <<: *service
+    command: scheduler
+    mem_limit: 192m
+    environment: *env
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8082/readyz"]
+
+  coordinator:
+    <<: *service
+    command: coordinator
+    mem_limit: 384m
+    environment:
+      <<: *env
+      # Hosts pin this key when they enrol. It never changes after the first start.
+      MANIFEST_SIGNING_KEY: ${MANIFEST_SIGNING_KEY:?run make private-init}
+      HOST_PROBATION_DAYS: ${HOST_PROBATION_DAYS:-0}
+      # Simulated GPUs are for the end-to-end tests of this stack, nothing else.
+      ALLOW_FAKE_GPU: ${ALLOW_FAKE_GPU:-false}
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8083/readyz"]
+
+  inference-gateway:
+    <<: *service
+    command: inference-gateway
+    mem_limit: 384m
+    environment: *env
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8085/readyz"]
+
+  trust-engine:
+    <<: *service
+    command: trust-engine
+    mem_limit: 192m
+    environment: *env
+    healthcheck:
+      <<: *health
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8087/readyz"]
+
+  console:
+    image: ayeusann/console:${TAG:-latest}
+    build:
+      context: ../../web/console
+    restart: unless-stopped
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    logging: *logging
+
+volumes:
+  pgdata:

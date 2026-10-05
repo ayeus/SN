@@ -23,7 +23,8 @@ RUN wget -qO- "https://github.com/golang-migrate/migrate/releases/download/${MIG
     | tar xz -C /usr/local/bin migrate
 
 FROM alpine:3.20
-# psql applies the seed files; wget (busybox) backs the compose healthchecks.
+# psql applies the seed files, pg_dump and pg_restore take and check backups;
+# wget (busybox) backs the compose healthchecks.
 RUN apk add --no-cache ca-certificates tzdata postgresql16-client \
     && adduser -D -H -u 10001 ayeusann
 WORKDIR /app
@@ -32,6 +33,7 @@ COPY --from=migrate /usr/local/bin/migrate /usr/local/bin/migrate
 COPY schema ./schema
 COPY web/install ./web/install
 COPY deploy/docker/migrate.sh /usr/local/bin/migrate-and-seed
-RUN chmod +x /usr/local/bin/migrate-and-seed && mkdir -p /app/downloads
+COPY deploy/docker/backup.sh /usr/local/bin/backup
+RUN chmod +x /usr/local/bin/migrate-and-seed /usr/local/bin/backup && mkdir -p /app/downloads
 ENV INSTALL_DIR=/app/web/install DOWNLOADS_DIR=/app/downloads
 USER ayeusann

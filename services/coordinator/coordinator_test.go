@@ -286,6 +286,47 @@ func TestEnrolRefusals(t *testing.T) {
 	}
 }
 
+// A development agent pointed at a real installation reports a simulated GPU.
+// It must be turned away at enrolment and again on every reconnect, and
+// admitted only where the platform says simulated machines are welcome.
+func TestSimulatedGPUsAreRefusedUnlessAllowed(t *testing.T) {
+	f := setup(t)
+	fake := func(reg *agentv1.RegisterRequest) *agentv1.RegisterRequest {
+		reg.Gpus = []*agentv1.GpuInfo{{Model: "NVIDIA GeForce RTX 4090", VramGb: 24, Uuid: "GPU-fake-4090-00000000-0001"}}
+		return reg
+	}
+
+	_, code, reason := f.s.enrol(f.ctx, fake(f.register("t3", "sha256:simulated", 24)))
+	if code != codes.FailedPrecondition || !strings.Contains(reason, "simulated GPU") {
+		t.Fatalf("a simulated GPU enrolled on a real installation: %s %q", code, reason)
+	}
+	var hosts int
+	f.scan(&hosts, `SELECT COUNT(*) FROM hosts`)
+	if hosts != 0 {
+		t.Fatalf("the refused machine left %d host rows behind", hosts)
+	}
+
+	// Enrolled while it was allowed, then the platform stops allowing it.
+	f.s.allowFakeGPU = true
+	en, code, reason := f.s.enrol(f.ctx, fake(f.register("t3", "sha256:simulated", 24)))
+	if code != codes.OK {
+		t.Fatalf("a simulated GPU must enrol where it is allowed: %s %q", code, reason)
+	}
+	back := fake(&agentv1.RegisterRequest{HostCredential: en.credential, Hostname: "box", HardwareFingerprint: "sha256:simulated", Runtime: "ollama"})
+	if _, code, reason := f.s.resume(f.ctx, back); code != codes.OK {
+		t.Fatalf("reconnect where simulated GPUs are allowed: %s %q", code, reason)
+	}
+	f.s.allowFakeGPU = false
+	if _, code, _ := f.s.resume(f.ctx, back); code != codes.FailedPrecondition {
+		t.Fatalf("a simulated GPU reconnected to a real installation: %s", code)
+	}
+
+	// Real hardware is unaffected either way.
+	if _, code, reason := f.s.enrol(f.ctx, f.register("t3", "sha256:real", 8)); code != codes.OK {
+		t.Fatalf("real hardware was refused: %s %q", code, reason)
+	}
+}
+
 func TestAMachineBelongsToOneAccount(t *testing.T) {
 	f := setup(t)
 	first, code, reason := f.s.enrol(f.ctx, f.register("t3", "sha256:shared-machine", 8))

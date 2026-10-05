@@ -3,6 +3,8 @@ package platform
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -46,7 +48,13 @@ func ConnectDB(ctx context.Context) (*db.Client, error) {
 	var lastErr error
 	for attempt := 0; attempt < 10; attempt++ {
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		client, err := db.NewClient(cctx, db.Config{URL: url})
+		client, err := db.NewClient(cctx, db.Config{
+			URL: url,
+			// Unset keeps the pool's defaults. A single-machine installation
+			// lowers both: six services share one small Postgres.
+			MaxConns: int32(EnvInt("DB_MAX_CONNS", 0)),
+			MinConns: int32(EnvInt("DB_MIN_CONNS", 0)),
+		})
 		cancel()
 		if err == nil {
 			return client, nil
@@ -86,6 +94,27 @@ func PublicURL() string {
 		return Env("PUBLIC_URL", "http://localhost:8080")
 	}
 	return Env("PUBLIC_URL", "")
+}
+
+// RequirePublicURL checks that a real installation names its own address.
+// Install commands, endpoints and reset links are built from it, and outside
+// development nothing else is trusted to supply it.
+func RequirePublicURL() error {
+	if !IsProduction() {
+		return nil
+	}
+	raw := strings.TrimSpace(os.Getenv("PUBLIC_URL"))
+	if raw == "" {
+		return fmt.Errorf("platform: PUBLIC_URL is not set; it is the address people and host agents use to reach this installation (SN_ENV=%s)", Mode())
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("platform: PUBLIC_URL %q is not an http(s) address", raw)
+	}
+	if Mode() == ModeProduction && u.Scheme != "https" {
+		return fmt.Errorf("platform: PUBLIC_URL must be https in production (got %q); use SN_ENV=private for a private network without a certificate", raw)
+	}
+	return nil
 }
 
 // CoordinatorPublicURL is the address host agents dial. Unset, it is the same

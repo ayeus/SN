@@ -30,6 +30,8 @@ type API struct {
 	inferenceHost        string // optional {dep-id}.<host> endpoints (SRS FR-22)
 	heartbeatTimeout     time.Duration
 	platformAdmins       map[string]bool
+	// personalHostsOnly: machines join as Tier 3 unless an operator enrols them.
+	personalHostsOnly bool
 
 	mailer       Mailer          // nil when email cannot be sent
 	loginLimiter *attemptLimiter // failed sign-ins per address+email
@@ -45,6 +47,9 @@ type Config struct {
 	InferenceHost        string
 	HeartbeatTimeout     time.Duration
 	PlatformAdminEmails  []string
+	// PersonalHostsOnly is set on a private network, where every machine is
+	// somebody's own computer: only an operator may enrol a higher tier.
+	PersonalHostsOnly bool
 }
 
 // NewAPI wires the control plane.
@@ -67,6 +72,7 @@ func NewAPI(database *db.Client, tm *auth.TokenManager, rev auth.RevocationStore
 		inferenceHost:        cfg.InferenceHost,
 		heartbeatTimeout:     cfg.HeartbeatTimeout,
 		platformAdmins:       admins,
+		personalHostsOnly:    cfg.PersonalHostsOnly,
 		loginLimiter:         newAttemptLimiter(10, 10*time.Minute),
 		resetLimiter:         newAttemptLimiter(5, time.Hour),
 	}

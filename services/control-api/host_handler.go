@@ -35,7 +35,12 @@ func (a *API) HandleIssueRegistrationToken(w http.ResponseWriter, r *http.Reques
 		req.Tier = domain.TierT3
 	}
 	switch req.Tier {
-	case domain.TierT2, domain.TierT3:
+	case domain.TierT3:
+	case domain.TierT2:
+		if a.personalHostsOnly && !a.isPlatformAdmin(r.Context(), claims.UserID) {
+			writeError(w, http.StatusForbidden, "On this network machines join as Tier 3 (personal). Ask the operator if a machine should be enrolled at a higher tier.")
+			return
+		}
 	case domain.TierT1:
 		// T1 onboarding is BD-led: audit, contract, VLAN (PRD F-10).
 		if !a.isPlatformAdmin(r.Context(), claims.UserID) {

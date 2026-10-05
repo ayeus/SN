@@ -19,16 +19,60 @@ var knownWeakSecrets = map[string]bool{
 	"password": true,
 }
 
-// IsProduction reports whether the service is running outside a developer machine.
-// Anything other than SN_ENV=dev or SN_ENV=test is treated as production, so a
-// missing or misspelled SN_ENV fails closed rather than silently relaxing checks.
-func IsProduction() bool {
-	switch strings.ToLower(os.Getenv("SN_ENV")) {
-	case "dev", "development", "test":
-		return false
+// RunMode is where an installation runs, chosen with SN_ENV.
+type RunMode string
+
+const (
+	// ModeDev is a developer's checkout: published default secrets, addresses
+	// taken from each request, simulated GPUs allowed.
+	ModeDev RunMode = "dev"
+	// ModeTest is the test suites.
+	ModeTest RunMode = "test"
+	// ModePrivate is a real installation for people who know each other, on a
+	// network they trust (a home LAN or a private VPN). It keeps every
+	// production safeguard except one: it may serve plain HTTP, because there
+	// is no public name to hold a certificate.
+	ModePrivate RunMode = "private"
+	// ModeProduction is a public installation.
+	ModeProduction RunMode = "production"
+)
+
+// Mode reads SN_ENV. Anything unrecognised, including an unset or misspelled
+// value, is production, so a mistake fails closed rather than relaxing checks.
+func Mode() RunMode {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SN_ENV"))) {
+	case "dev", "development":
+		return ModeDev
+	case "test":
+		return ModeTest
+	case "private":
+		return ModePrivate
 	default:
-		return true
+		return ModeProduction
 	}
+}
+
+// IsProduction reports whether this is a real installation (private or
+// production) rather than a developer's machine or a test run. Real
+// installations need real secrets and a signing key, and take nothing on trust
+// from the request.
+func IsProduction() bool {
+	m := Mode()
+	return m == ModePrivate || m == ModeProduction
+}
+
+// AllowsPlaintext reports whether a service may listen without TLS: always in
+// development and on a private network, and in production only behind a proxy
+// that terminates TLS.
+func AllowsPlaintext() bool {
+	return Mode() != ModeProduction || EnvBool("SN_TLS_TERMINATED_BY_PROXY", false)
+}
+
+// AllowsFakeGPU reports whether hosts reporting a simulated GPU may join. They
+// exist for development and for end-to-end tests; on a real installation a
+// simulated machine would be handed work it cannot do.
+func AllowsFakeGPU() bool {
+	return !IsProduction() || EnvBool("ALLOW_FAKE_GPU", false)
 }
 
 // Env reads an environment variable, falling back to defaultVal when unset or empty.

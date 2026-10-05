@@ -146,6 +146,37 @@ jobs:
           name: e2e-logs
           path: logs/
 
+  private:
+    name: Private installation
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+      - name: Install tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler uuid-runtime
+          python3 -m pip install --user openai
+      - name: Publish the agent for the installer
+        run: make dist-agent
+      # A throwaway installation with generated secrets: started, smoke-tested
+      # with no GPU, backed up, restored and checked for open ports.
+      - name: Start, test, back up and restore
+        run: make private-check
+        env:
+          REQUIRE_SDK: "1"
+      - name: Keep the logs when it fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-logs
+          path: logs/
+
   images:
     name: Production images
     runs-on: ubuntu-latest

@@ -13,7 +13,8 @@ services:
       POSTGRES_PASSWORD: ayeusann_dev
       POSTGRES_DB: ayeusann
     ports:
-      - "5433:5432"
+      # This machine only: the password is published in this repository.
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -26,7 +27,7 @@ services:
     image: redis:7-alpine
     container_name: ann-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redisdata:/data
@@ -41,8 +42,8 @@ services:
     image: nats:2-alpine
     container_name: ann-nats
     ports:
-      - "4222:4222"   # Client
-      - "8222:8222"   # Monitoring
+      - "127.0.0.1:4222:4222"   # Client
+      - "127.0.0.1:8222:8222"   # Monitoring
     command: "--jetstream --store_dir /data"
     volumes:
       - natsdata:/data
@@ -61,8 +62,8 @@ services:
       MINIO_ROOT_USER: ayeusann
       MINIO_ROOT_PASSWORD: ayeusann_dev
     ports:
-      - "9000:9000"   # API
-      - "9001:9001"   # Console
+      - "127.0.0.1:9000:9000"   # API
+      - "127.0.0.1:9001:9001"   # Console
     command: server /data --console-address ":9001"
     volumes:
       - miniodata:/data

@@ -2,6 +2,7 @@
 
 .PHONY: help dev db services web down status build build-go build-agent build-web dist-agent \
         dist-agent-linux dist-agent-windows images prod-up prod-down prod-logs prod-status \
+        private-init private-up private-down private-status private-logs private-backup private-restore private-check \
         test test-go test-agent test-web smoke-fake lint lint-go lint-agent lint-proto proto fmt migrate migrate-down clean
 
 GO_SERVICES := gateway control-api scheduler coordinator inference-gateway trust-engine
@@ -63,6 +64,33 @@ dist-agent-linux: ## Build the Linux agent in Docker for /downloads (ARCH=amd64|
 dist-agent-windows: ## Cross-compile the Windows agent in Docker for /downloads
 	@mkdir -p dist/agent
 	docker build -f agent/Dockerfile.windows --output type=local,dest=dist/agent .
+
+# ─── Private network (this computer, for you and people you know) ───
+# docs/private-network.md
+
+private-init: ## Create the private installation's secrets file (once)
+	scripts/private.sh init
+
+private-up: ## Build, migrate and start the private installation
+	scripts/private.sh up
+
+private-down: ## Stop the private installation (data and backups are kept)
+	scripts/private.sh down
+
+private-status: ## Health, address and last backup of the private installation
+	scripts/private.sh status
+
+private-logs: ## Follow the private installation's logs
+	scripts/private.sh logs
+
+private-backup: ## Take a database dump now
+	scripts/private.sh backup
+
+private-restore: ## Check that a dump restores: make private-restore FILE=path (see docs to replace)
+	scripts/private.sh restore "$(FILE)"
+
+private-check: ## Prove the private installation works, on a throwaway copy of it
+	scripts/private-check.sh
 
 # ─── Production (single machine, Docker Compose) ─────────────
 
