@@ -95,6 +95,51 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
 
+  # The whole loop with no GPU: a stand-in runtime replaces Ollama and the
+  # agents report a simulated card. Everything between them is the real code.
+  e2e:
+    name: End to end (no GPU)
+    # 22.04 keeps the agent's glibc old enough to run in the Debian container
+    # that plays the second machine.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+      - name: Install tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler uuid-runtime
+          curl -sSL https://github.com/golang-migrate/migrate/releases/download/v4.18.1/migrate.linux-amd64.tar.gz | tar xz
+          sudo mv migrate /usr/local/bin/
+          python3 -m pip install --user openai
+      - name: Start the platform
+        run: |
+          scripts/dev.sh db
+          scripts/dev.sh services
+          for _ in $(seq 1 60); do
+            curl -sf http://localhost:8080/v1/network/stats >/dev/null && exit 0
+            sleep 1
+          done
+          echo "the gateway did not come up" >&2
+          exit 1
+      - name: Publish the agent for the installer
+        run: make dist-agent
+      - name: Smoke tests
+        run: make smoke-fake
+        env:
+          REQUIRE_SDK: "1"
+      - name: Keep the logs when it fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: logs/
+
   images:
     name: Production images
     runs-on: ubuntu-latest

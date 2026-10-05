@@ -2,7 +2,7 @@
 
 .PHONY: help dev db services web down status build build-go build-agent build-web dist-agent \
         dist-agent-linux dist-agent-windows images prod-up prod-down prod-logs prod-status \
-        test test-go test-agent test-web lint lint-go lint-agent lint-proto proto fmt migrate migrate-down clean
+        test test-go test-agent test-web smoke-fake lint lint-go lint-agent lint-proto proto fmt migrate migrate-down clean
 
 GO_SERVICES := gateway control-api scheduler coordinator inference-gateway trust-engine
 TEST_DB_URL := postgres://ayeusann:ayeusann_dev@localhost:5433/ayeusann_test?sslmode=disable
@@ -96,6 +96,9 @@ test-agent: ## Rust agent tests
 
 test-web: ## Type-check the web console
 	cd web/console && npx tsc --noEmit
+
+smoke-fake: ## End-to-end tests with no GPU and no Ollama (needs the dev stack running)
+	scripts/smoke-fake.sh
 
 lint: lint-go lint-agent lint-proto ## Run all linters
 

@@ -11,12 +11,16 @@
 #   scripts/smoke-remote.sh
 #
 # The container has no GPU, so the agent reports a simulated one (SN_FAKE_GPU)
-# and drives this machine's Ollama. Everything else is the real path.
+# and drives this machine's runtime: Ollama by default, or whatever
+# REMOTE_RUNTIME_URL names as seen from inside the container (`make smoke-fake`
+# points it at the stand-in runtime). Everything else is the real path.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BASE="${BASE:-http://localhost:8080}"
 MODEL="${MODEL:-gemma-2-2b-it}"
+RUNTIME_URL="${SN_RUNTIME_URL:-http://127.0.0.1:11434}"
+REMOTE_RUNTIME_URL="${REMOTE_RUNTIME_URL:-http://host.docker.internal:11434}"
 NAME="sn-remote-host-$$"
 
 pass() { printf '  \033[32mpass\033[0m  %s\n' "$*"; }
@@ -34,7 +38,7 @@ trap cleanup EXIT
 
 echo "Remote-host smoke test against $BASE with $MODEL"
 curl -sf "$BASE/v1/network/stats" >/dev/null || fail "gateway not reachable at $BASE (run make dev)"
-curl -sf http://127.0.0.1:11434/api/version >/dev/null || fail "Ollama is not running"
+curl -sf "$RUNTIME_URL/api/version" >/dev/null || fail "no model runtime at $RUNTIME_URL (start Ollama, or run make smoke-fake)"
 docker info >/dev/null 2>&1 || fail "Docker is not running"
 ARCH=$(docker info --format '{{.Architecture}}' | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 [ -f "dist/agent/ayeusann-agent-linux-$ARCH" ] || fail "no Linux agent published; run: make dist-agent-linux ARCH=$ARCH"
@@ -52,7 +56,7 @@ esac
 pass "install command targets $SERVER"
 
 # 2. A clean machine runs it.
-docker run -d --name "$NAME" -e SN_FAKE_GPU=true -e SN_RUNTIME_URL=http://host.docker.internal:11434 \
+docker run -d --name "$NAME" -e SN_FAKE_GPU=true -e SN_RUNTIME_URL="$REMOTE_RUNTIME_URL" \
   --add-host host.docker.internal:host-gateway debian:bookworm-slim \
   sh -c "apt-get update -qq >/dev/null && apt-get install -y -qq curl ca-certificates >/dev/null 2>&1 && $CMD" >/dev/null
 N=0

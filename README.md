@@ -64,6 +64,7 @@ To verify the whole flow automatically, run `scripts/smoke.sh`. It signs up, enr
 | `make services` | Rebuild and restart the Go services |
 | `make db` | Create, migrate and seed the dev and test databases |
 | `make test` | Go, Rust and web tests |
+| `make smoke-fake` | End-to-end tests with no GPU and no Ollama (needs `make dev` running) |
 | `make lint` | `go vet`, `clippy`, `buf lint` |
 | `make proto` | Regenerate protobuf code |
 | `make dist-agent` | Publish this machine's agent build so the installer can download it |
@@ -104,7 +105,8 @@ proto/            Agent ↔ coordinator gRPC contract (generated code in gen/go)
 schema/           SQL migrations and seed data (catalogue, GPU rate card)
 web/console/      Next.js console: landing page, customer console, host console, ops
 web/install/      Host installers served at /install.sh
-scripts/          dev.sh (local environment), smoke.sh and smoke-remote.sh (end-to-end tests)
+scripts/          dev.sh (local environment), smoke.sh, smoke-remote.sh and smoke-fake.sh (end-to-end tests)
+cmd/              fake-runtime: a stand-in for Ollama used by the end-to-end tests
 deploy/           Dockerfiles and docker-compose (dev infrastructure, production stack)
 docs/             Guides (development, connecting a GPU, deployment), architecture decision records
 _archive/         Superseded code kept for reference (old frontends, standalone router)

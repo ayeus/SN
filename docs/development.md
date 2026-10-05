@@ -75,10 +75,18 @@ make test-go        # needs `make db`; integration tests use ayeusann_test
 make test-agent
 make test-web       # type-check
 scripts/smoke.sh    # end to end against a running `make dev` and Ollama
+make smoke-fake     # the same, plus the second-machine test, with no GPU and no Ollama
 ```
 
 `scripts/smoke.sh` signs up, enrols two hosts, deploys, streams a chat, checks
 the usage records, kills a host to test failover, and stops the deployment.
+
+`make smoke-fake` runs both smoke tests against a stand-in for Ollama
+(`cmd/fake-runtime`, port 11435) with agents that report a simulated GPU, so
+they need no GPU and download nothing. Everything between the runtime and the
+GPU report is the real code. CI runs it on every push. It answers with a fixed
+sentence, so use the real-Ollama run when a change touches how answers are
+parsed.
 
 `scripts/smoke-remote.sh` checks that a machine other than this one can join:
 a clean Linux container enrols with the console's install command and serves a

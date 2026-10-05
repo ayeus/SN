@@ -8,12 +8,18 @@
 #
 #   scripts/smoke.sh            # uses gemma2:2b via gemma-2-2b-it
 #   MODEL=qwen2.5-7b-instruct scripts/smoke.sh
+#
+# The agents started here inherit the environment, so SN_RUNTIME_URL points
+# them at another runtime and SN_FAKE_GPU=true lets them run without a GPU.
+# `make smoke-fake` uses both to run this script with no GPU and no Ollama.
+# REQUIRE_SDK=1 fails the run when the OpenAI Python SDK is missing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BASE="${BASE:-http://localhost:8080}"
 COORD="${COORD:-http://localhost:50051}"
 MODEL="${MODEL:-gemma-2-2b-it}"
+RUNTIME_URL="${SN_RUNTIME_URL:-http://127.0.0.1:11434}"
 WORK="$(mktemp -d)"
 AGENTS=()
 RUN="$(uuidgen | tr A-Z a-z | cut -c1-8)"   # fresh host identities each run
@@ -38,7 +44,7 @@ api()  { local m=$1 p=$2; shift 2; curl -sS -X "$m" "$BASE$p" -H "Authorization:
 
 echo "Smoke test against $BASE with $MODEL"
 curl -sf "$BASE/v1/network/stats" >/dev/null || fail "gateway not reachable at $BASE (run make dev)"
-curl -sf http://127.0.0.1:11434/api/version >/dev/null || fail "Ollama is not running"
+curl -sf "$RUNTIME_URL/api/version" >/dev/null || fail "no model runtime at $RUNTIME_URL (start Ollama, or run make smoke-fake)"
 
 # Hosts serve whichever deployment is waiting, so a deployment already short of
 # replicas would take the two hosts enrolled below before the smoke deployment.
@@ -115,6 +121,8 @@ assert r.choices[0].message.content
 assert [m.id for m in c.models.list()] == ["smoke"]
 PY
   pass "OpenAI Python SDK works with only base_url changed"
+elif [ "${REQUIRE_SDK:-0}" = "1" ]; then
+  fail "the OpenAI Python SDK is not installed (pip install openai)"
 else
   echo "  skip  OpenAI Python SDK not installed (pip install openai)"
 fi
