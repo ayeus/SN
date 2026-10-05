@@ -2,6 +2,7 @@ package platform
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -139,17 +140,50 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
+// routeLabel lets a handler name the route it turned out to be.
+type routeLabel struct{ name string }
+
+type routeLabelKey struct{}
+
+// SetRouteLabel names the current request for metrics. It has an effect only
+// under MetricsMiddlewareLabeled.
+func SetRouteLabel(r *http.Request, name string) {
+	if l, ok := r.Context().Value(routeLabelKey{}).(*routeLabel); ok {
+		l.name = name
+	}
+}
+
+// MetricsMiddlewareLabeled is MetricsMiddleware for a service that serves
+// arbitrary paths, as the public gateway does. The route label is whatever a
+// handler set with SetRouteLabel, and "other" when none did, so no request
+// path can add a new time series.
+func MetricsMiddlewareLabeled(service string, next http.Handler) http.Handler {
+	return metricsMiddleware(service, next, func(_ *http.Request, l *routeLabel) string {
+		if l.name != "" {
+			return l.name
+		}
+		return "other"
+	})
+}
+
 // MetricsMiddleware records request counts and latency for every request.
-// The route label comes from the matched ServeMux pattern rather than the raw
-// path, so high-cardinality path parameters do not explode the metric series.
+// The route label is the path with ids and opaque segments collapsed, which
+// suits services with a fixed set of routes.
 func MetricsMiddleware(service string, next http.Handler) http.Handler {
+	return metricsMiddleware(service, next, func(r *http.Request, _ *routeLabel) string {
+		return normalizeRoute(r.URL.Path)
+	})
+}
+
+func metricsMiddleware(service string, next http.Handler, label func(*http.Request, *routeLabel) string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
+		l := &routeLabel{}
 
-		next.ServeHTTP(rec, r)
+		next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), routeLabelKey{}, l)))
 
-		route := normalizeRoute(r.URL.Path)
+		route := label(r, l)
 		if rec.status == 0 {
 			rec.status = http.StatusOK
 		}

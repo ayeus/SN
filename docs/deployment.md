@@ -92,8 +92,9 @@ Postgres data lives in the `ayeusann_pgdata` volume and certificates in
 `ayeusann_caddydata`. `docker compose down -v` deletes both. Schedule the
 backup; nothing here does it for you.
 
-Each service exposes Prometheus metrics at `/metrics` on its internal port.
-They are not reachable from outside.
+Each service exposes Prometheus metrics at `/metrics` on its internal port. The
+gateway, whose port is the public one, serves them on port 9080 instead. None
+are reachable from outside.
 
 ## What the edge does
 

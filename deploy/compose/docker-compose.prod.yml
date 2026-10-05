@@ -40,6 +40,7 @@ x-env: &env
   CONTROL_API_URL: http://control-api:8081
   SCHEDULER_URL: http://scheduler:8082
   COORDINATOR_URL: http://coordinator:8083
+  COORDINATOR_GRPC_URL: http://coordinator:50051
   INFERENCE_GATEWAY_URL: http://inference-gateway:8085
   TRUST_ENGINE_URL: http://trust-engine:8087
   WEB_URL: http://console:3000
@@ -123,6 +124,9 @@ services:
     environment:
       <<: *env
       CORS_ALLOWED_ORIGINS: https://${APP_DOMAIN}
+      # The gateway's port is the public one, so its metrics are served apart
+      # from it. Reachable inside the stack's network only; never published.
+      METRICS_ADDR: 0.0.0.0:9080
     volumes:
       # Prebuilt host agents served at /downloads (make dist-agent-linux).
       - ../../dist/agent:/app/downloads:ro

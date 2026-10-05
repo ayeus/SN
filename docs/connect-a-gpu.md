@@ -27,14 +27,18 @@ It ends by printing the address other machines use:
 
 ```
   From other machines on this network: http://192.168.1.4:8080
-  (agents connect to 192.168.1.4:50051; allow incoming connections if your firewall asks)
+  (the console, the API, the installers and the agents all use this one address;
+   allow incoming connections if your firewall asks)
 ```
 
 `make status` prints it again. If the line is missing, the machine is not on a
 network.
 
-On macOS, the firewall may ask whether `gateway` and `coordinator` may accept
-incoming connections. Allow both. If you dismissed the prompt, allow them under
+That one address is all a host needs. The agent's connection travels through
+the same port as everything else, so there is a single port to open or forward.
+
+On macOS, the firewall may ask whether `gateway` may accept incoming
+connections. Allow it. If you dismissed the prompt, allow it under
 System Settings > Network > Firewall > Options.
 
 ## 2. Publish the agent for the host's operating system
@@ -138,16 +142,35 @@ console using the platform's VPN address, for example
 `http://100.101.102.103:8080`, and create the install command from there. The
 command carries whichever address the console was opened with.
 
-**A fixed address.** Put the addresses in `.env` on the platform machine and
+**A fixed address.** Put the address in `.env` on the platform machine and
 restart it:
 
 ```bash
 PUBLIC_URL=http://203.0.113.10:8080
-COORDINATOR_PUBLIC_URL=http://203.0.113.10:50051
 ```
 
-Ports 8080 and 50051 must then be reachable at that address. Traffic is not
-encrypted in development mode, so use this only on networks you trust.
+Port 8080 must then be reachable at that address. Traffic is not encrypted in
+development mode, so use this only on networks you trust.
+
+**Moving to a new address later.** Hosts that are already connected do not need
+to be touched. List every address the platform answers on, newest first, and
+restart it while the old address still works:
+
+```bash
+COORDINATOR_URLS=http://new.example.net:8080,http://203.0.113.10:8080
+```
+
+Each agent receives the list the next time it connects, remembers it, and tries
+each address in turn whenever the one it last used stops answering. Once
+`ayeusann-agent service status` on a host shows the new address under "Other
+addresses", the old one can be retired. A host that was offline for the whole
+overlap needs its address set once by hand:
+`ayeusann-agent service install --coordinator http://new.example.net:8080`.
+
+**Agents on their own port (optional).** The coordinator still listens on port
+50051 and agents may connect to it directly. To hand out a separate agent
+address, set `COORDINATOR_PUBLIC_URL=http://203.0.113.10:50051`; both ports must
+then be reachable.
 
 **A public server.** For hosts and customers on the open internet, run the
 production stack, which adds TLS: see [deployment.md](deployment.md).
@@ -157,9 +180,9 @@ production stack, which adds TLS: see [deployment.md](deployment.md).
 | Symptom | Cause and fix |
 |---|---|
 | The console warns the command "only works on this computer" | The platform machine has no network address. Connect it to a network, or open the console by an address the host can reach, then create a new command. |
-| The address printed is a VPN's, or missing while on Wi-Fi | Set `PUBLIC_URL` and `COORDINATOR_PUBLIC_URL` in `.env` to the right address. |
+| The address printed is a VPN's, or missing while on Wi-Fi | Set `PUBLIC_URL` in `.env` to the right address. |
 | The installer cannot download the agent | Step 2 was skipped for this operating system. On macOS and Linux the installer falls back to building from source if it is run inside a checkout of this repository with Rust installed. |
-| The host cannot connect at all | A firewall on the platform machine is blocking ports 8080 and 50051, or the machines are on different networks (guest Wi-Fi often isolates devices from each other). |
+| The host cannot connect at all | A firewall on the platform machine is blocking port 8080, or the machines are on different networks (guest Wi-Fi often isolates devices from each other). |
 | The machine is online but shows "Runtime not reachable" | Ollama is not running on the host. Start it. |
 | "no supported GPU found" | The NVIDIA driver is missing or `nvidia-smi` is not on the PATH. |
 | "The coordinator refused this machine" | The token was already used or is older than 24 hours. Create a new command. |

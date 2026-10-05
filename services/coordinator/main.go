@@ -65,15 +65,16 @@ func main() {
 	}
 
 	agentServer := &AgentServer{
-		db:             dbClient,
-		tm:             tm,
-		revocations:    auth.NewPGRevocationStore(dbClient.Pool),
-		signer:         signer,
-		sessions:       newRegistry(),
-		log:            logger,
-		probationDays:  platform.EnvInt("HOST_PROBATION_DAYS", 7),
-		wgEndpoint:     platform.Env("WIREGUARD_ENDPOINT", ""),
-		wgServerPubKey: platform.Env("WIREGUARD_SERVER_PUBKEY", ""),
+		db:              dbClient,
+		tm:              tm,
+		revocations:     auth.NewPGRevocationStore(dbClient.Pool),
+		signer:          signer,
+		sessions:        newRegistry(),
+		log:             logger,
+		probationDays:   platform.EnvInt("HOST_PROBATION_DAYS", 7),
+		wgEndpoint:      platform.Env("WIREGUARD_ENDPOINT", ""),
+		wgServerPubKey:  platform.Env("WIREGUARD_SERVER_PUBKEY", ""),
+		coordinatorURLs: platform.CoordinatorURLs(),
 	}
 
 	// gRPC: keepalives detect dead NAT mappings on home/campus networks long

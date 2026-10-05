@@ -17,7 +17,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BASE="${BASE:-http://localhost:8080}"
-COORD="${COORD:-http://localhost:50051}"
+# Agents normally connect through the gateway, on the same address as
+# everything else. The coordinator's own port still works, so one of the two
+# hosts below uses each.
+COORD="${COORD:-$BASE}"
+COORD_DIRECT="${COORD_DIRECT:-http://localhost:50051}"
 MODEL="${MODEL:-gemma-2-2b-it}"
 RUNTIME_URL="${SN_RUNTIME_URL:-http://127.0.0.1:11434}"
 WORK="$(mktemp -d)"
@@ -69,7 +73,8 @@ pass "signed up $EMAIL"
 cargo build --release --quiet --manifest-path agent/Cargo.toml
 for i in a b; do
   REG=$(api POST /v1/hosts/register-token -d '{"tier":"t3","region":"IN-SOUTH"}' | json "['registration_token']")
-  agent/target/release/ayeusann-agent --token "$REG" --coordinator "$COORD" --region IN-SOUTH \
+  ADDR="$COORD"; [ "$i" = b ] && ADDR="$COORD_DIRECT"
+  agent/target/release/ayeusann-agent --token "$REG" --coordinator "$ADDR" --region IN-SOUTH \
       --data-dir "$WORK/$i" --instance "smoke-$RUN-$i" > "$WORK/agent-$i.log" 2>&1 &
   AGENTS+=($!)
 done
@@ -78,7 +83,7 @@ for _ in $(seq 1 60); do
   [ "$N" -ge 2 ] && break; sleep 1
 done
 [ "$N" -ge 2 ] || fail "hosts did not come online; see $WORK/agent-*.log"
-pass "two hosts online with a healthy runtime"
+pass "two hosts online with a healthy runtime (one through the gateway at $COORD, one direct at $COORD_DIRECT)"
 
 # 3. Deploy with two replicas.
 MID=$(curl -sS "$BASE/v1/models" | python3 -c "import json,sys; print([m['id'] for m in json.load(sys.stdin)['models'] if m['name']=='$MODEL'][0])")

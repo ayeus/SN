@@ -42,6 +42,8 @@ type AgentServer struct {
 	probationDays  int
 	wgEndpoint     string
 	wgServerPubKey string
+	// coordinatorURLs is pushed to every agent at registration (COORDINATOR_URLS).
+	coordinatorURLs []string
 }
 
 // enrolment is the host row an agent session binds to.
@@ -107,6 +109,7 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 				Tier:              en.tier,
 				Status:            en.status,
 				ManifestPublicKey: s.signer.PublicKey(),
+				CoordinatorUrls:   s.coordinatorURLs,
 			},
 		},
 	}); err != nil {

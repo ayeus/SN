@@ -57,14 +57,21 @@ pub struct Shared {
 
 /// Why a session ended, which decides whether to retry.
 pub enum Outcome {
-    /// Connection lost or closed; reconnect with backoff.
-    Disconnected(anyhow::Error),
+    /// Connection lost or closed; reconnect with backoff. `registered` tells a
+    /// session that worked and then ended from an address that never answered.
+    Disconnected {
+        error: anyhow::Error,
+        registered: bool,
+    },
     /// The coordinator refused this host; retrying cannot help.
     Rejected(String),
 }
 
 pub struct Session<'a> {
+    /// The address to dial for this attempt.
     pub coordinator_url: &'a str,
+    /// The address this machine was configured with, which is what is saved.
+    pub configured_url: &'a str,
     pub token: Option<&'a str>,
     pub data_dir: PathBuf,
     pub facts: &'a HostFacts,
@@ -120,13 +127,17 @@ async fn stage(
 
 impl Session<'_> {
     pub async fn run(&self) -> Outcome {
-        match self.run_inner().await {
+        let registered = std::sync::atomic::AtomicBool::new(false);
+        match self.run_inner(&registered).await {
             Ok(o) => o,
-            Err(e) => Outcome::Disconnected(e),
+            Err(error) => Outcome::Disconnected {
+                error,
+                registered: registered.load(std::sync::atomic::Ordering::Relaxed),
+            },
         }
     }
 
-    async fn run_inner(&self) -> Result<Outcome> {
+    async fn run_inner(&self, registered: &std::sync::atomic::AtomicBool) -> Result<Outcome> {
         let mut st = state::load(&self.data_dir);
         let credential = st.host_credential.clone().filter(|c| !c.is_empty());
         if credential.is_none() && self.token.is_none() {
@@ -195,7 +206,10 @@ impl Session<'_> {
                         }
                         Outcome::Rejected(reason)
                     }
-                    _ => Outcome::Disconnected(anyhow!(reason)),
+                    _ => Outcome::Disconnected {
+                        error: anyhow!(reason),
+                        registered: false,
+                    },
                 });
             }
         };
@@ -220,7 +234,13 @@ impl Session<'_> {
         }
         st.host_id = Some(resp.host_id.clone());
         st.tier = Some(resp.tier.clone());
-        st.coordinator_url = Some(self.coordinator_url.to_string());
+        st.coordinator_url = Some(self.configured_url.to_string());
+        st.last_good_url = Some(self.coordinator_url.to_string());
+        // The platform's list is for machines elsewhere. An agent on the
+        // platform's own machine keeps to the loopback address it was given.
+        if !resp.coordinator_urls.is_empty() && !state::is_loopback(self.configured_url) {
+            st.coordinator_urls = resp.coordinator_urls.clone();
+        }
         st.region = Some(self.facts.region.clone());
         st.runtime = Some(self.runtime.kind.name().to_string());
         st.runtime_url = Some(self.runtime.base_url().to_string());
@@ -228,6 +248,7 @@ impl Session<'_> {
         st.pending_token = None;
         st.last_error = None;
         state::save(&self.data_dir, &st).context("saving host credential")?;
+        registered.store(true, std::sync::atomic::Ordering::Relaxed);
         let pinned_key = resp.manifest_public_key.clone();
 
         info!(host_id = %resp.host_id, tier = %resp.tier, status = %resp.status, "registered with coordinator");
@@ -286,7 +307,10 @@ impl Session<'_> {
             }
         };
         hb.abort();
-        result.map(|_: ()| Outcome::Disconnected(anyhow!("session ended")))
+        result.map(|_: ()| Outcome::Disconnected {
+            error: anyhow!("session ended"),
+            registered: true,
+        })
     }
 
     async fn on_manifest(&self, m: ManifestDispatch, key: &[u8], tx: &Sender<AgentMessage>) {

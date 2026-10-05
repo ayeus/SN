@@ -52,8 +52,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the previous commit is the baseline below
       - uses: bufbuild/buf-setup-action@v1
       - run: buf lint
+      # Agents already installed on other people's machines speak the protocol
+      # as it was; a change must not break them.
+      - name: No breaking protocol changes
+        run: buf breaking --against ".git#ref=${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'HEAD~1' }}"
 
   agent:
     name: Rust agent

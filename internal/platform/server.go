@@ -26,6 +26,13 @@ type ServiceConfig struct {
 	Name    string
 	Version string
 	Port    int
+	// H2C also accepts HTTP/2 without TLS on the service port. The gateway
+	// needs it: host agents hold a gRPC stream, which is HTTP/2, and reach it
+	// through the same plain-HTTP port as everything else.
+	H2C bool
+	// PrivateMetrics keeps /metrics off the service port and serves it on
+	// METRICS_ADDR instead. Set by the one service whose port is public.
+	PrivateMetrics bool
 }
 
 // Server is the base server that every AyeusANN service embeds.
@@ -79,9 +86,39 @@ func NewServer(cfg ServiceConfig) (*Server, error) {
 	// Register standard endpoints
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.Handle("GET /metrics", promhttp.Handler())
+	if !cfg.PrivateMetrics {
+		mux.Handle("GET /metrics", promhttp.Handler())
+	}
 
 	return s, nil
+}
+
+// NewHTTPServer builds the http.Server every service runs. h2c additionally
+// accepts HTTP/2 without TLS.
+//
+// ReadTimeout bounds how long a request body may take to arrive. On HTTP/2 it
+// applies to each stream, so a handler that serves a long-lived stream (the
+// gateway's agent route) must clear its own deadline.
+func NewHTTPServer(addr string, handler http.Handler, h2c bool) *http.Server {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0, // 0 = no deadline; SSE streams outlive any fixed write timeout
+		IdleTimeout:       120 * time.Second,
+	}
+	if h2c {
+		p := new(http.Protocols)
+		p.SetHTTP1(true)
+		p.SetHTTP2(true)
+		p.SetUnencryptedHTTP2(true)
+		srv.Protocols = p
+		// Pings find connections whose peer vanished without closing, which is
+		// how a laptop that went to sleep looks from here.
+		srv.HTTP2 = &http.HTTP2Config{SendPingTimeout: 20 * time.Second, PingTimeout: 10 * time.Second}
+	}
+	return srv
 }
 
 // SetReady marks the server as ready to receive traffic.
@@ -110,13 +147,19 @@ func (s *Server) Run() error {
 				"or set SN_TLS_TERMINATED_BY_PROXY=true if an ingress terminates TLS upstream")
 	}
 
-	s.httpSrv = &http.Server{
-		Addr:              fmt.Sprintf(":%d", s.Config.Port),
-		Handler:           s.accessLog(s.Mux),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      0, // 0 = no deadline; SSE streams outlive any fixed write timeout
-		IdleTimeout:       120 * time.Second,
+	s.httpSrv = NewHTTPServer(fmt.Sprintf(":%d", s.Config.Port), s.accessLog(s.Mux), s.Config.H2C)
+
+	if s.Config.PrivateMetrics {
+		addr := Env("METRICS_ADDR", "127.0.0.1:9080")
+		mux := http.NewServeMux()
+		mux.Handle("GET /metrics", promhttp.Handler())
+		metrics := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			if err := metrics.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				s.Logger.Warn("metrics listener failed", zap.String("addr", addr), zap.Error(err))
+			}
+		}()
+		defer metrics.Close()
 	}
 
 	if tlsEnabled {

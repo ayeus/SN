@@ -1,8 +1,10 @@
 #!/bin/sh
 # Host agent installer for macOS and Linux (PRD F-11: one-command install).
 #
-#   curl -fsSL <server>/install.sh | sh -s -- --server <server> --token <token> \
-#        --coordinator <grpc-url> --region IN-SOUTH
+#   curl -fsSL <server>/install.sh | sh -s -- --server <server> --token <token> --region IN-SOUTH
+#
+# The agent connects to <server> as well. --coordinator <url> names a different
+# address for it, on installations that have one.
 #
 # Installs the agent to ~/.ayeusann/bin and sets it up to run in the background
 # and start again at every login. The token is single-use; after enrolling, the
@@ -38,6 +40,12 @@ done
 
 say()  { printf '  %s\n' "$*"; }
 fail() { printf '\n  error: %s\n\n' "$*" >&2; exit 1; }
+
+# A machine being enrolled connects to the server it was installed from. One
+# that is already enrolled keeps the address it remembers.
+if [ -z "$COORDINATOR" ] && [ -n "$SERVER" ] && [ -n "$TOKEN" ]; then
+    COORDINATOR="$SERVER"
+fi
 
 INSTALL_DIR="$HOME/.ayeusann/bin"
 BIN="$INSTALL_DIR/ayeusann-agent"

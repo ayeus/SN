@@ -6,13 +6,14 @@ import (
 	"strings"
 )
 
-// The console hands out two kinds of address: the gateway URL (install
-// commands, the endpoint a customer calls) and the coordinator's gRPC URL
-// (where an agent dials in). In production both are configured. In local
-// development they follow the request instead, so the same stack works on one
-// machine, across a home network, or over a VPN without any setup: whichever
-// address the browser used to reach the console is one the caller's network
-// can route, so it is the one handed out.
+// The console hands out one address: the gateway's. Install commands, the
+// endpoint a customer calls and the address an agent dials are all the same
+// URL, because the gateway carries agent sessions on its own port. In
+// production the address is configured. In local development it follows the
+// request instead, so the same stack works on one machine, across a home
+// network, or over a VPN without any setup: whichever address the browser used
+// to reach the console is one the caller's network can route, so it is the one
+// handed out.
 //
 // A loopback address is the exception. These addresses are meant to be pasted
 // on other machines, where "localhost" would point at themselves, so loopback
@@ -30,13 +31,13 @@ func (a *API) publicBase(r *http.Request) string {
 	return "http://" + net.JoinHostPort(a.reachableHost(host), port)
 }
 
-// coordinatorBase is the gRPC URL agents dial.
+// coordinatorBase is the address agents dial: the gateway's, unless the
+// installation gives the coordinator a name of its own.
 func (a *API) coordinatorBase(r *http.Request) string {
 	if a.coordinatorPublicURL != "" {
 		return a.coordinatorPublicURL
 	}
-	host, _ := splitHostPort(r.Host)
-	return "http://" + net.JoinHostPort(a.reachableHost(host), a.coordinatorGRPCPort)
+	return a.publicBase(r)
 }
 
 // reachableHost swaps a loopback host for the machine's network address when

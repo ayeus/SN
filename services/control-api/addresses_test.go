@@ -76,11 +76,11 @@ func TestInstallCommandFollowsTheAddressTheConsoleWasOpenedOn(t *testing.T) {
 	cases := []struct {
 		name, host, server, coordinator string
 	}{
-		{"opened by network address", "192.168.1.20:8080", "http://192.168.1.20:8080", "http://192.168.1.20:50051"},
-		{"opened by VPN name", "gpu-box.tailnet.ts.net:8080", "http://gpu-box.tailnet.ts.net:8080", "http://gpu-box.tailnet.ts.net:50051"},
-		{"localhost becomes the network address", "localhost:8080", "http://192.168.50.7:8080", "http://192.168.50.7:50051"},
-		{"127.0.0.1 becomes the network address", "127.0.0.1:8080", "http://192.168.50.7:8080", "http://192.168.50.7:50051"},
-		{"IPv6 loopback becomes the network address", "[::1]:8080", "http://192.168.50.7:8080", "http://192.168.50.7:50051"},
+		{"opened by network address", "192.168.1.20:8080", "http://192.168.1.20:8080", "http://192.168.1.20:8080"},
+		{"opened by VPN name", "gpu-box.tailnet.ts.net:8080", "http://gpu-box.tailnet.ts.net:8080", "http://gpu-box.tailnet.ts.net:8080"},
+		{"localhost becomes the network address", "localhost:8080", "http://192.168.50.7:8080", "http://192.168.50.7:8080"},
+		{"127.0.0.1 becomes the network address", "127.0.0.1:8080", "http://192.168.50.7:8080", "http://192.168.50.7:8080"},
+		{"IPv6 loopback becomes the network address", "[::1]:8080", "http://192.168.50.7:8080", "http://192.168.50.7:8080"},
 	}
 	for _, c := range cases {
 		server, coordinator, cmds := issueToken(t, h, s.Token, c.host)
@@ -90,6 +90,11 @@ func TestInstallCommandFollowsTheAddressTheConsoleWasOpenedOn(t *testing.T) {
 		for name, cmd := range cmds {
 			if !strings.Contains(cmd, c.coordinator) {
 				t.Errorf("%s: %s command does not dial %s: %s", c.name, name, c.coordinator, cmd)
+			}
+			// One address: only the from-source command, which has no --server,
+			// names the coordinator.
+			if name != "from_source" && strings.Contains(strings.ToLower(cmd), "coordinator") {
+				t.Errorf("%s: %s command names a coordinator although it is the same address: %s", c.name, name, cmd)
 			}
 			if strings.Contains(cmd, "localhost") || strings.Contains(cmd, "127.0.0.1") {
 				t.Errorf("%s: %s command points at the loopback address: %s", c.name, name, cmd)
@@ -102,13 +107,20 @@ func TestInstallCommandFollowsTheAddressTheConsoleWasOpenedOn(t *testing.T) {
 
 	// A machine with no network keeps working on its own.
 	h.api.lanIP = func() string { return "" }
-	if server, coordinator, _ := issueToken(t, h, s.Token, "localhost:8080"); server != "http://localhost:8080" || coordinator != "http://localhost:50051" {
+	if server, coordinator, _ := issueToken(t, h, s.Token, "localhost:8080"); server != "http://localhost:8080" || coordinator != "http://localhost:8080" {
 		t.Errorf("offline: got %q and %q, want the loopback addresses", server, coordinator)
 	}
 
 	// Configured addresses always win over the request.
 	h.api.publicURL, h.api.coordinatorPublicURL = "https://app.example.com", "https://agents.example.com"
-	if server, coordinator, _ := issueToken(t, h, s.Token, "evil.example.net"); server != "https://app.example.com" || coordinator != "https://agents.example.com" {
+	server, coordinator, cmds := issueToken(t, h, s.Token, "evil.example.net")
+	if server != "https://app.example.com" || coordinator != "https://agents.example.com" {
 		t.Errorf("configured: got %q and %q, want the configured addresses", server, coordinator)
+	}
+	// A coordinator with its own name must be spelled out for the installers.
+	for _, name := range []string{"linux_macos", "windows", "windows_wsl"} {
+		if !strings.Contains(cmds[name], "https://agents.example.com") {
+			t.Errorf("configured: %s command does not name the coordinator's own address: %s", name, cmds[name])
+		}
 	}
 }

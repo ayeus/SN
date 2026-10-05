@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ayeus/ayeusann/internal/db"
@@ -61,9 +62,13 @@ func ConnectDB(ctx context.Context) (*db.Client, error) {
 }
 
 // Service URLs. Inside docker-compose these are overridden with container names.
-func ControlAPIURL() string       { return Env("CONTROL_API_URL", "http://localhost:8081") }
-func SchedulerURL() string        { return Env("SCHEDULER_URL", "http://localhost:8082") }
-func CoordinatorURL() string      { return Env("COORDINATOR_URL", "http://localhost:8083") }
+func ControlAPIURL() string  { return Env("CONTROL_API_URL", "http://localhost:8081") }
+func SchedulerURL() string   { return Env("SCHEDULER_URL", "http://localhost:8082") }
+func CoordinatorURL() string { return Env("COORDINATOR_URL", "http://localhost:8083") }
+
+// CoordinatorGRPCURL is where the gateway forwards agent sessions.
+func CoordinatorGRPCURL() string { return Env("COORDINATOR_GRPC_URL", "http://localhost:50051") }
+
 func InferenceGatewayURL() string { return Env("INFERENCE_GATEWAY_URL", "http://localhost:8085") }
 func TrustEngineURL() string      { return Env("TRUST_ENGINE_URL", "http://localhost:8087") }
 func WebURL() string              { return Env("WEB_URL", "http://localhost:3000") }
@@ -83,13 +88,23 @@ func PublicURL() string {
 	return Env("PUBLIC_URL", "")
 }
 
-// CoordinatorPublicURL is where host agents dial the coordinator's gRPC port.
-// Unset in development means "the request's host, on the gRPC port".
-func CoordinatorPublicURL() string {
-	if IsProduction() {
-		return Env("COORDINATOR_PUBLIC_URL", "http://localhost:50051")
+// CoordinatorPublicURL is the address host agents dial. Unset, it is the same
+// as the public URL: the gateway carries agent sessions on its own port, so
+// one address serves the console, the API, the installers and the agents. Set
+// it only when agents must use a different name, as behind a proxy that gives
+// the coordinator its own hostname.
+func CoordinatorPublicURL() string { return Env("COORDINATOR_PUBLIC_URL", "") }
+
+// CoordinatorURLs is the full list of addresses agents may use, pushed to each
+// agent when it connects so the platform can be moved without touching hosts.
+func CoordinatorURLs() []string {
+	var out []string
+	for _, u := range strings.Split(Env("COORDINATOR_URLS", ""), ",") {
+		if u = strings.TrimRight(strings.TrimSpace(u), "/"); u != "" {
+			out = append(out, u)
+		}
 	}
-	return Env("COORDINATOR_PUBLIC_URL", "")
+	return out
 }
 
 // HeartbeatTimeout is how long a host may be silent before it is offline.

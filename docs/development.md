@@ -30,7 +30,7 @@ No `.env` is needed: every service has development defaults. Copy
 | gateway | 8080 | Public entry point; proxies the API and the console |
 | control-api | 8081 | Accounts, models, deployments, hosts, ops |
 | scheduler | 8082 | Places replicas on GPUs |
-| coordinator | 8083, gRPC 50051 | Agent sessions, manifests, inference tunnel |
+| coordinator | 8083, gRPC 50051 | Agent sessions, manifests, inference tunnel. Agents normally reach it through the gateway on 8080. |
 | inference-gateway | 8085 | OpenAI-compatible API, key auth, usage records |
 | trust-engine | 8087 | Host reputation |
 | web console | 3000 | Next.js dev server, reached through the gateway |

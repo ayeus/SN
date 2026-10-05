@@ -1,7 +1,9 @@
 # Host agent installer for Windows (PRD F-11: one-command install).
 #
-#   & ([scriptblock]::Create((irm <server>/install.ps1))) -Server <server> -Token <token> `
-#       -Coordinator <grpc-url> -Region IN-SOUTH
+#   & ([scriptblock]::Create((irm <server>/install.ps1))) -Server <server> -Token <token> -Region IN-SOUTH
+#
+# The agent connects to <server> as well. -Coordinator <url> names a different
+# address for it, on installations that have one.
 #
 # Installs the agent to %USERPROFILE%\.ayeusann\bin and sets it up to run in
 # the background and start again at every login. The token is single-use; after
@@ -29,6 +31,10 @@ function Fail([string]$Message) {
     Write-Host ""
     exit 1
 }
+
+# A machine being enrolled connects to the server it was installed from. One
+# that is already enrolled keeps the address it remembers.
+if (-not $Coordinator -and $Server -and $Token) { $Coordinator = $Server }
 
 if (-not [Environment]::Is64BitOperatingSystem) { Fail "the agent needs 64-bit Windows." }
 if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { Fail "Windows on ARM is not supported yet." }

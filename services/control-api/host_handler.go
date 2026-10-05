@@ -71,8 +71,15 @@ func (a *API) HandleIssueRegistrationToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// One address serves everything, so the commands name the coordinator
+	// only when the installation gives it an address of its own.
 	server, coordinator := a.publicBase(r), a.coordinatorBase(r)
-	args := fmt.Sprintf("--server %s --token %s --coordinator %s --region %s", server, tok.Token, coordinator, req.Region)
+	args := fmt.Sprintf("--server %s --token %s --region %s", server, tok.Token, req.Region)
+	psArgs := fmt.Sprintf("-Server %s -Token %s -Region %s", server, tok.Token, req.Region)
+	if coordinator != server {
+		args = fmt.Sprintf("--server %s --token %s --coordinator %s --region %s", server, tok.Token, coordinator, req.Region)
+		psArgs = fmt.Sprintf("-Server %s -Token %s -Coordinator %s -Region %s", server, tok.Token, coordinator, req.Region)
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"registration_token": tok.Token,
 		"token_id":           tok.JTI,
@@ -83,8 +90,7 @@ func (a *API) HandleIssueRegistrationToken(w http.ResponseWriter, r *http.Reques
 		"coordinator_url":    coordinator,
 		"commands": map[string]string{
 			"linux_macos": fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- %s", server, args),
-			"windows": fmt.Sprintf("& ([scriptblock]::Create((irm %s/install.ps1))) -Server %s -Token %s -Coordinator %s -Region %s",
-				server, server, tok.Token, coordinator, req.Region),
+			"windows":     fmt.Sprintf("& ([scriptblock]::Create((irm %s/install.ps1))) %s", server, psArgs),
 			"windows_wsl": fmt.Sprintf("wsl -e sh -c \"curl -fsSL %s/install.sh | sh -s -- %s\"", server, args),
 			"from_source": fmt.Sprintf("./run-node.sh --token %s --coordinator %s --region %s", tok.Token, coordinator, req.Region),
 		},

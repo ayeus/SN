@@ -116,7 +116,9 @@ pub fn install(spec: &Spec, settings: Settings) -> i32 {
         st.pending_token = Some(t);
     }
     if let Some(c) = settings.coordinator {
+        // A newly given address is tried before the one that worked last.
         st.coordinator_url = Some(c);
+        st.last_good_url = None;
     }
     if let Some(r) = settings.region {
         st.region = Some(r);
@@ -244,7 +246,21 @@ pub fn status(spec: &Spec) -> i32 {
         st.host_id.as_deref().unwrap_or("not enrolled")
     );
     if let Some(c) = &st.coordinator_url {
-        println!("  Coordinator          {c}");
+        println!("  Platform address     {c}");
+    }
+    if let Some(good) = st.last_good_url.as_deref() {
+        if Some(good) != st.coordinator_url.as_deref() {
+            println!("  Last connected via   {good}");
+        }
+    }
+    let others: Vec<&str> = st
+        .coordinator_urls
+        .iter()
+        .map(String::as_str)
+        .filter(|u| Some(*u) != st.coordinator_url.as_deref())
+        .collect();
+    if !others.is_empty() {
+        println!("  Other addresses      {}", others.join(", "));
     }
     if let Some(e) = &st.last_error {
         println!("  Last refusal         {e}");

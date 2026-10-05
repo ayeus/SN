@@ -6,12 +6,14 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ayeus/ayeusann/internal/auth"
 	"github.com/ayeus/ayeusann/internal/httpx"
@@ -22,6 +24,9 @@ import (
 // Upstreams the gateway forwards to.
 type Upstreams struct {
 	ControlAPI, Inference, Trust, Web *url.URL
+	// CoordinatorGRPC is the coordinator's agent port. When set, the gateway
+	// carries agent sessions too, so hosts need only this one address.
+	CoordinatorGRPC *url.URL
 	// InstallDir holds install.sh / install.ps1; DownloadsDir holds prebuilt
 	// agent binaries named ayeusann-agent-<os>-<arch>.
 	InstallDir, DownloadsDir string
@@ -35,8 +40,8 @@ type Upstreams struct {
 	TrustProxy bool
 }
 
-func newProxy(target *url.URL, name string, trustProxy bool) *httputil.ReverseProxy {
-	return &httputil.ReverseProxy{
+func newProxy(target *url.URL, name string, trustProxy bool) http.Handler {
+	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 			if trustProxy {
@@ -55,6 +60,73 @@ func newProxy(target *url.URL, name string, trustProxy bool) *httputil.ReversePr
 			httpx.WriteProblem(w, http.StatusBadGateway, fmt.Sprintf("%s is unavailable", name))
 		},
 	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		platform.SetRouteLabel(r, name)
+		proxy.ServeHTTP(w, r)
+	})
+}
+
+// agentServicePath is the gRPC service host agents call (proto/agent/v1).
+const agentServicePath = "/ayeusann.agent.v1.AgentService/"
+
+// newAgentProxy forwards agent sessions to the coordinator. A session is one
+// long-lived, two-way gRPC stream, so it differs from the other proxies in
+// three ways: the upstream is spoken to in HTTP/2 without TLS and nothing
+// else, the stream must not inherit the server's read deadline (it would be
+// cut after 30 seconds), and nothing may be buffered in either direction.
+func newAgentProxy(target *url.URL) http.Handler {
+	h2 := new(http.Protocols)
+	h2.SetUnencryptedHTTP2(true)
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.Out.Host = target.Host
+		},
+		Transport: &http.Transport{
+			Protocols:       h2,
+			DialContext:     (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+			IdleConnTimeout: 90 * time.Second,
+		},
+		FlushInterval: -1,
+		// A call refused before any message is sent comes back as headers only,
+		// with the status among them and the stream ended in the same frame.
+		// This proxy flushes headers as soon as it has them, which would split
+		// that into "headers, then an empty end": a response with no status at
+		// all. Sending the status as trailers instead keeps it valid.
+		ModifyResponse: func(res *http.Response) error {
+			if res.Header.Get("Grpc-Status") == "" {
+				return nil
+			}
+			if res.Trailer == nil {
+				res.Trailer = http.Header{}
+			}
+			for _, k := range []string{"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"} {
+				if v := res.Header.Values(k); len(v) > 0 {
+					res.Trailer[k] = v
+					res.Header.Del(k)
+				}
+			}
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// A gRPC client reads the failure from these headers, not the body.
+			w.Header().Set("Content-Type", "application/grpc")
+			w.Header().Set("Grpc-Status", "14") // UNAVAILABLE: the agent retries
+			w.Header().Set("Grpc-Message", "coordinator is unavailable")
+			w.WriteHeader(http.StatusOK)
+		},
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		platform.SetRouteLabel(r, "agent-session")
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+			httpx.WriteProblem(w, http.StatusUnsupportedMediaType, "This address is for host agents")
+			return
+		}
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Time{})
+		_ = rc.SetWriteDeadline(time.Time{})
+		proxy.ServeHTTP(w, r)
+	})
 }
 
 // isInferenceRequest decides whether GET /v1/models belongs to the OpenAI
@@ -97,6 +169,10 @@ func NewHandler(u Upstreams) http.Handler {
 		control.ServeHTTP(w, r)
 	})
 
+	// Host agents: one gRPC stream each, forwarded to the coordinator.
+	if u.CoordinatorGRPC != nil {
+		mux.Handle("POST "+agentServicePath, newAgentProxy(u.CoordinatorGRPC))
+	}
 	// Trust (owner-scoped reads only; writes are internal).
 	mux.Handle("GET /v1/reputation/", trust)
 	// Everything else under /v1 is the control API.
@@ -173,7 +249,9 @@ func mustURL(raw string) *url.URL {
 
 func main() {
 	port := platform.EnvInt("GATEWAY_PORT", 8080)
-	srv, err := platform.NewServer(platform.ServiceConfig{Name: "gateway", Version: "0.3.0", Port: port})
+	// The only public port: it also accepts HTTP/2 without TLS for agent
+	// sessions, and keeps its metrics off it.
+	srv, err := platform.NewServer(platform.ServiceConfig{Name: "gateway", Version: "0.3.0", Port: port, H2C: true, PrivateMetrics: true})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
@@ -183,18 +261,19 @@ func main() {
 		web = mustURL(raw)
 	}
 	handler := NewHandler(Upstreams{
-		ControlAPI:    mustURL(platform.ControlAPIURL()),
-		Inference:     mustURL(platform.InferenceGatewayURL()),
-		Trust:         mustURL(platform.TrustEngineURL()),
-		Web:           web,
-		InstallDir:    platform.Env("INSTALL_DIR", "web/install"),
-		DownloadsDir:  platform.Env("DOWNLOADS_DIR", "dist/agent"),
-		InferenceHost: platform.Env("INFERENCE_HOST", ""),
-		CORSOrigins:   httpx.SplitList(platform.Env("CORS_ALLOWED_ORIGINS", "")),
-		TrustProxy:    platform.EnvBool("TRUST_PROXY_HEADERS", false),
+		ControlAPI:      mustURL(platform.ControlAPIURL()),
+		Inference:       mustURL(platform.InferenceGatewayURL()),
+		Trust:           mustURL(platform.TrustEngineURL()),
+		Web:             web,
+		CoordinatorGRPC: mustURL(platform.CoordinatorGRPCURL()),
+		InstallDir:      platform.Env("INSTALL_DIR", "web/install"),
+		DownloadsDir:    platform.Env("DOWNLOADS_DIR", "dist/agent"),
+		InferenceHost:   platform.Env("INFERENCE_HOST", ""),
+		CORSOrigins:     httpx.SplitList(platform.Env("CORS_ALLOWED_ORIGINS", "")),
+		TrustProxy:      platform.EnvBool("TRUST_PROXY_HEADERS", false),
 	})
 
-	srv.Mux.Handle("/", platform.MetricsMiddleware("gateway", handler))
+	srv.Mux.Handle("/", platform.MetricsMiddlewareLabeled("gateway", handler))
 	srv.SetReady()
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server error: %v", err)

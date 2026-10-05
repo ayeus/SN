@@ -31,9 +31,11 @@ SERVICES=(control-api scheduler coordinator inference-gateway trust-engine gatew
 export SN_ENV=dev
 export DATABASE_URL="$PG_URL_BASE/$DEV_DB?sslmode=disable"
 export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
-# PUBLIC_URL and COORDINATOR_PUBLIC_URL are deliberately not set: in development
-# the control API hands out the address each request arrived on, so install
-# commands work on other machines. Set them in .env to pin an address.
+# PUBLIC_URL is deliberately not set: in development the control API hands out
+# the address each request arrived on, so install commands work on other
+# machines. Set it in .env to pin an address. Agents use the same address
+# (the gateway forwards their sessions) unless COORDINATOR_PUBLIC_URL names
+# another.
 export WEB_URL="${WEB_URL:-http://localhost:3000}"
 export CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS:-http://localhost:3000}"
 export HOST_PROBATION_DAYS="${HOST_PROBATION_DAYS:-0}"     # dev hosts take work immediately
@@ -128,7 +130,11 @@ status() {
     *)
       echo
       echo "  From other machines on this network: $server"
-      echo "  (agents connect to ${coord#http://}; allow incoming connections if your firewall asks)"
+      if [ "$coord" = "$server" ] || [ -z "$coord" ]; then
+        echo "  (one address for the console, the API and agents; allow incoming connections if your firewall asks)"
+      else
+        echo "  (agents connect to ${coord#http://}; allow incoming connections if your firewall asks)"
+      fi
       ;;
   esac
 }

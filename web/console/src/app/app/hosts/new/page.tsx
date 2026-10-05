@@ -185,8 +185,8 @@ export default function AddMachinePage() {
               </Notice>
             ) : (
               <p className="mt-3 text-[13px] text-muted">
-                The machine must be able to reach <span className="font-mono">{new URL(issued.server_url).host}</span> and{" "}
-                <span className="font-mono">{new URL(issued.coordinator_url).host}</span>: the same Wi-Fi or LAN, or a shared VPN.
+                The machine must be able to reach <span className="font-mono">{new URL(issued.coordinator_url).host}</span>: the
+                same Wi-Fi or LAN, or a shared VPN. That one address is all it needs, and it only ever connects out to it.
               </p>
             )}
           </Panel>

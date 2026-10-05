@@ -388,10 +388,21 @@ async fn main() -> Result<()> {
 
     let shared = Arc::new(Shared::default());
     let mut backoff = Duration::from_secs(1);
+    // Which of the known addresses to dial. An address that never answers is
+    // skipped for the next one; an address that worked is kept.
+    let mut attempt = 0usize;
     let run = async {
         loop {
+            let saved = state::load(&data_dir);
+            let candidates = state::coordinator_candidates(
+                saved.last_good_url.as_deref(),
+                &coordinator,
+                &saved.coordinator_urls,
+            );
+            let url = candidates[attempt % candidates.len()].clone();
             let s = Session {
-                coordinator_url: &coordinator,
+                coordinator_url: &url,
+                configured_url: &coordinator,
                 token: token.as_deref(),
                 data_dir: data_dir.clone(),
                 facts: &facts,
@@ -416,11 +427,20 @@ async fn main() -> Result<()> {
                     // supervisor would only start it straight back up.
                     tokio::time::sleep(REFUSED_RETRY).await;
                 }
-                Outcome::Disconnected(e) => {
+                Outcome::Disconnected {
+                    error: e,
+                    registered,
+                } => {
                     if started.elapsed() > Duration::from_secs(60) {
                         backoff = Duration::from_secs(1);
                     }
-                    warn!(error = %format!("{e:#}"), retry_in_s = backoff.as_secs(), "disconnected from coordinator; reconnecting");
+                    if registered {
+                        // It worked, so it is first in the list next time round.
+                        attempt = 0;
+                    } else {
+                        attempt += 1;
+                    }
+                    warn!(error = %format!("{e:#}"), address = %url, retry_in_s = backoff.as_secs(), "disconnected from coordinator; reconnecting");
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                 }

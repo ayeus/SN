@@ -14,7 +14,13 @@ pub struct State {
     pub host_credential: Option<String>,
     /// Base64 Ed25519 public key that signs manifests.
     pub manifest_public_key: Option<String>,
+    /// The address this machine was told to use (`--coordinator`).
     pub coordinator_url: Option<String>,
+    /// Other addresses the platform says it can be reached at, best first.
+    #[serde(default)]
+    pub coordinator_urls: Vec<String>,
+    /// The address the last successful connection used; tried first next time.
+    pub last_good_url: Option<String>,
     pub tier: Option<String>,
     /// Unix seconds of the last benchmark sent (PRD F-12: weekly re-runs).
     pub last_benchmark_at: Option<i64>,
@@ -63,9 +69,90 @@ pub fn clear(data_dir: &Path) {
     let _ = std::fs::remove_file(path(data_dir));
 }
 
+/// The addresses to try, in order: the one that worked last, the one this
+/// machine was configured with, then the rest of the platform's list.
+pub fn coordinator_candidates(
+    last_good: Option<&str>,
+    configured: &str,
+    pushed: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let all = last_good
+        .into_iter()
+        .chain(std::iter::once(configured))
+        .chain(pushed.iter().map(String::as_str));
+    for url in all {
+        let url = url.trim().trim_end_matches('/');
+        if !url.is_empty() && !out.iter().any(|u| u == url) {
+            out.push(url.to_string());
+        }
+    }
+    out
+}
+
+/// Whether a URL points at this machine. An agent on the platform's own
+/// machine keeps using that address and ignores the list meant for others.
+pub fn is_loopback(url: &str) -> bool {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        authority.rsplit_once(':').map_or(authority, |(h, _)| h)
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidates_are_ordered_and_deduplicated() {
+        let pushed = vec![
+            "https://gpu.example.com/".to_string(),
+            "http://192.168.1.4:8080".to_string(),
+        ];
+        assert_eq!(
+            coordinator_candidates(
+                Some("http://192.168.1.4:8080"),
+                "http://10.0.0.2:8080",
+                &pushed
+            ),
+            vec![
+                "http://192.168.1.4:8080",
+                "http://10.0.0.2:8080",
+                "https://gpu.example.com"
+            ]
+        );
+        assert_eq!(
+            coordinator_candidates(None, "http://127.0.0.1:50051", &[]),
+            vec!["http://127.0.0.1:50051"]
+        );
+    }
+
+    #[test]
+    fn recognises_loopback_addresses() {
+        for url in [
+            "http://127.0.0.1:50051",
+            "http://localhost:8080",
+            "https://LOCALHOST",
+            "http://[::1]:8080/",
+        ] {
+            assert!(is_loopback(url), "{url}");
+        }
+        for url in [
+            "http://192.168.1.4:8080",
+            "https://gpu.example.com",
+            "http://localhost.example.com:8080",
+        ] {
+            assert!(!is_loopback(url), "{url}");
+        }
+    }
 
     // An agent upgraded in place must keep its enrolment.
     #[test]

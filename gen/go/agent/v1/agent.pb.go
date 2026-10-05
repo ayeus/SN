@@ -1478,8 +1478,13 @@ type RegisterResponse struct {
 	// Ed25519 public key that signs every ManifestDispatch (SRS FR-53). The agent
 	// pins it on first enrolment and refuses manifests that do not verify.
 	ManifestPublicKey []byte `protobuf:"bytes,10,opt,name=manifest_public_key,json=manifestPublicKey,proto3" json:"manifest_public_key,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Every address this installation can be reached at, best first. The agent
+	// remembers them and tries each when it reconnects, so the platform can move
+	// to a new address without anyone touching the hosts. Empty when only one
+	// address exists.
+	CoordinatorUrls []string `protobuf:"bytes,11,rep,name=coordinator_urls,json=coordinatorUrls,proto3" json:"coordinator_urls,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RegisterResponse) Reset() {
@@ -1578,6 +1583,13 @@ func (x *RegisterResponse) GetStatus() string {
 func (x *RegisterResponse) GetManifestPublicKey() []byte {
 	if x != nil {
 		return x.ManifestPublicKey
+	}
+	return nil
+}
+
+func (x *RegisterResponse) GetCoordinatorUrls() []string {
+	if x != nil {
+		return x.CoordinatorUrls
 	}
 	return nil
 }
@@ -2221,7 +2233,7 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x11inference_request\x18\x05 \x01(\v2#.ayeusann.agent.v1.InferenceRequestH\x00R\x10inferenceRequest\x12O\n" +
 	"\x10inference_cancel\x18\x06 \x01(\v2\".ayeusann.agent.v1.InferenceCancelH\x00R\x0finferenceCancel\x12C\n" +
 	"\fstop_replica\x18\a \x01(\v2\x1e.ayeusann.agent.v1.StopReplicaH\x00R\vstopReplicaB\t\n" +
-	"\apayload\"\xdb\x02\n" +
+	"\apayload\"\x86\x03\n" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x1d\n" +
@@ -2235,7 +2247,8 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x04tier\x18\b \x01(\tR\x04tier\x12\x16\n" +
 	"\x06status\x18\t \x01(\tR\x06status\x12.\n" +
 	"\x13manifest_public_key\x18\n" +
-	" \x01(\fR\x11manifestPublicKey\"\xff\x05\n" +
+	" \x01(\fR\x11manifestPublicKey\x12)\n" +
+	"\x10coordinator_urls\x18\v \x03(\tR\x0fcoordinatorUrls\"\xff\x05\n" +
 	"\x10ManifestDispatch\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1d\n" +
 	"\n" +

@@ -21,12 +21,11 @@ type API struct {
 	revocations auth.RevocationStore
 	log         *slog.Logger
 
-	// publicURL and coordinatorPublicURL are the configured addresses of the
-	// gateway and of the coordinator's gRPC port. Empty means "follow the
-	// request" (see addresses.go).
+	// publicURL is the configured address of the gateway; empty means "follow
+	// the request". coordinatorPublicURL is set only when agents must dial a
+	// different address from everyone else (see addresses.go).
 	publicURL            string
 	coordinatorPublicURL string
-	coordinatorGRPCPort  string
 	lanIP                func() string
 	inferenceHost        string // optional {dep-id}.<host> endpoints (SRS FR-22)
 	heartbeatTimeout     time.Duration
@@ -43,7 +42,6 @@ type Config struct {
 	// addresses handed out follow the request.
 	PublicURL            string
 	CoordinatorPublicURL string
-	CoordinatorGRPCPort  string
 	InferenceHost        string
 	HeartbeatTimeout     time.Duration
 	PlatformAdminEmails  []string
@@ -58,9 +56,6 @@ func NewAPI(database *db.Client, tm *auth.TokenManager, rev auth.RevocationStore
 	if cfg.HeartbeatTimeout <= 0 {
 		cfg.HeartbeatTimeout = 15 * time.Second
 	}
-	if cfg.CoordinatorGRPCPort == "" {
-		cfg.CoordinatorGRPCPort = "50051"
-	}
 	api := &API{
 		db:                   database,
 		tm:                   tm,
@@ -68,7 +63,6 @@ func NewAPI(database *db.Client, tm *auth.TokenManager, rev auth.RevocationStore
 		log:                  log,
 		publicURL:            strings.TrimRight(cfg.PublicURL, "/"),
 		coordinatorPublicURL: strings.TrimRight(cfg.CoordinatorPublicURL, "/"),
-		coordinatorGRPCPort:  cfg.CoordinatorGRPCPort,
 		lanIP:                localNetworkIP,
 		inferenceHost:        cfg.InferenceHost,
 		heartbeatTimeout:     cfg.HeartbeatTimeout,

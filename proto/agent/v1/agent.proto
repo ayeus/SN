@@ -181,6 +181,12 @@ message RegisterResponse {
   // Ed25519 public key that signs every ManifestDispatch (SRS FR-53). The agent
   // pins it on first enrolment and refuses manifests that do not verify.
   bytes manifest_public_key = 10;
+
+  // Every address this installation can be reached at, best first. The agent
+  // remembers them and tries each when it reconnects, so the platform can move
+  // to a new address without anyone touching the hosts. Empty when only one
+  // address exists.
+  repeated string coordinator_urls = 11;
 }
 
 message ManifestDispatch {
