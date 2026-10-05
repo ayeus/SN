@@ -62,10 +62,16 @@ if docker exec ann-postgres true 2>/dev/null; then
   [ -z "$WAITING" ] || fail "other deployments are waiting for a host and would take the smoke hosts: $WAITING. Stop or pause them first."
 fi
 
-# 1. Sign up.
+# 1. Sign up. Where accounts are by invitation, OPERATOR_TOKEN (an operator's
+# session) lets the test invite itself, the way a person would be invited.
+INVITE=""
+if [ -n "${OPERATOR_TOKEN:-}" ]; then
+  INVITE=$(curl -sS -X POST "$BASE/v1/admin/invites" -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'Content-Type: application/json' \
+      -d '{"note":"smoke test"}' | json "['token']") || fail "could not create an invitation with OPERATOR_TOKEN"
+fi
 EMAIL="smoke@$(uuidgen | tr A-Z a-z | cut -c1-8).example.com"
 R=$(curl -sS -X POST "$BASE/v1/auth/signup" -H 'Content-Type: application/json' \
-    -d "{\"email\":\"$EMAIL\",\"password\":\"Smoke-Test-2026\",\"name\":\"Smoke Test\",\"country\":\"IN\"}")
+    -d "{\"email\":\"$EMAIL\",\"password\":\"Smoke-Test-2026\",\"name\":\"Smoke Test\",\"country\":\"IN\",\"invite\":\"$INVITE\"}")
 TOKEN=$(echo "$R" | json "['access_token']") || fail "signup: $R"
 pass "signed up $EMAIL"
 

@@ -41,12 +41,27 @@ func main() {
 		log.Fatalf("failed to initialize token manager: %v", err)
 	}
 
+	// Operators are accounts, not a list in the environment: the owner proves
+	// who they are once, with the owner code. The email list remains for
+	// development, where there is no owner code to type.
+	adminEmails := httpx.SplitList(platform.Env("PLATFORM_ADMIN_EMAILS", ""))
+	if platform.IsProduction() && len(adminEmails) > 0 {
+		logger.Warn("PLATFORM_ADMIN_EMAILS is ignored outside development; the operator is the account created with OWNER_CODE")
+		adminEmails = nil
+	}
+	ownerCode := platform.Env("OWNER_CODE", "")
+	if platform.IsProduction() && ownerCode != "" && len(ownerCode) < 12 {
+		log.Fatalf("configuration error: OWNER_CODE must be at least 12 characters")
+	}
+
 	api := NewAPI(dbClient, tm, auth.NewPGRevocationStore(dbClient.Pool), logger, Config{
 		PublicURL:            platform.PublicURL(),
 		CoordinatorPublicURL: platform.CoordinatorPublicURL(),
 		InferenceHost:        platform.Env("INFERENCE_HOST", ""),
 		HeartbeatTimeout:     platform.HeartbeatTimeout(),
-		PlatformAdminEmails:  httpx.SplitList(platform.Env("PLATFORM_ADMIN_EMAILS", "")),
+		PlatformAdminEmails:  adminEmails,
+		SignupMode:           platform.SignupMode(),
+		OwnerCode:            ownerCode,
 		PersonalHostsOnly:    platform.Mode() == platform.ModePrivate,
 	})
 

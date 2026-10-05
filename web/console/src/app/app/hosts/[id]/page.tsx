@@ -225,7 +225,7 @@ export default function HostPage() {
           </table>
         </Panel>
 
-        <Panel title="Jobs" description="You see which model runs and how busy it is, never the prompts." flush>
+        <Panel title="Jobs" description="You see which model runs and how busy it is. The console never shows you the requests themselves, though they are processed on this machine." flush>
           {jobs.length === 0 ? (
             <Empty title="No jobs yet">
               {online ? "The scheduler sends work here as customers deploy models that fit this GPU." : "Jobs are assigned while the machine is online."}

@@ -119,7 +119,7 @@ _archive/         Superseded code kept for reference (old frontends, standalone 
 ## Status
 
 **Working end to end:**
-- Sign-up and sign-in
+- Sign-up and sign-in; on a real installation accounts are by invitation and the first account, made with a one-time owner code, is the operator
 - Deploy wizard, placement and serving
 - Streaming inference through the OpenAI SDK
 - Per-request usage records (requests, tokens, latency) for customers and hosts

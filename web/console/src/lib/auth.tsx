@@ -10,7 +10,7 @@ type AuthState = {
   me: Me | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  signup: (input: { name: string; email: string; password: string; country: string }) => Promise<void>;
+  signup: (input: { name: string; email: string; password: string; country: string; invite?: string; owner_code?: string }) => Promise<void>;
   logout: () => Promise<void>;
   reload: () => Promise<void>;
 };

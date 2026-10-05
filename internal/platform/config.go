@@ -117,6 +117,21 @@ func RequirePublicURL() error {
 	return nil
 }
 
+// SignupMode is who may create an account: "open" (anyone who can reach the
+// address), "invite" (only with an invitation link) or "closed". Development
+// is open; a real installation is by invitation, and a value it does not
+// recognise means the same.
+func SignupMode() string {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("SIGNUP_MODE"))); {
+	case v == "open" || v == "invite" || v == "closed":
+		return v
+	case v == "" && !IsProduction():
+		return "open"
+	default:
+		return "invite"
+	}
+}
+
 // CoordinatorPublicURL is the address host agents dial. Unset, it is the same
 // as the public URL: the gateway carries agent sessions on its own port, so
 // one address serves the console, the API, the installers and the agents. Set

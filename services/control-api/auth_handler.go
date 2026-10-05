@@ -27,6 +27,12 @@ type SignupRequest struct {
 	// launch market (PRD §1).
 	Country string `json:"country,omitempty"`
 	Region  string `json:"region,omitempty"`
+	// Invite is the token from an invitation link. Required unless sign-up is
+	// open or OwnerCode is given.
+	Invite string `json:"invite,omitempty"`
+	// OwnerCode is the installation's one-time code. The account that presents
+	// it first becomes the operator.
+	OwnerCode string `json:"owner_code,omitempty"`
 }
 
 type LoginRequest struct {
@@ -84,6 +90,40 @@ func (a *API) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Decide what lets this person in before any work is done for them: the
+	// owner code, an invitation, or nothing at all where sign-up is open.
+	ctx := r.Context()
+	req.Invite = strings.TrimSpace(req.Invite)
+	asOwner := false
+	switch {
+	case strings.TrimSpace(req.OwnerCode) != "":
+		ip := "unknown"
+		if p := clientIP(r); p != nil {
+			ip = *p
+		}
+		if !a.ownerLimiter.allow(ip) {
+			writeError(w, http.StatusTooManyRequests, "Too many attempts with an owner code. Wait 10 minutes.")
+			return
+		}
+		if !a.ownerCodeMatches(req.OwnerCode) {
+			a.refuseSignup(w, errOwnerCode)
+			return
+		}
+		asOwner = true
+	case a.signupMode == SignupClosed:
+		a.refuseSignup(w, errSignupClosed)
+		return
+	case req.Invite != "":
+		if problem := inviteProblem(ctx, a.db.Pool, hashToken(req.Invite), req.Email); problem != "" {
+			a.refuseSignup(w, inviteError{problem})
+			return
+		}
+	case a.signupMode == SignupOpen:
+	default:
+		a.refuseSignup(w, errInviteRequired)
+		return
+	}
+
 	passwordHash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -93,16 +133,16 @@ func (a *API) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		req.OrgName = req.Name + "'s workspace"
 	}
 
-	ctx := r.Context()
 	var user domain.User
 	var org domain.Organization
+	role := domain.RoleAdmin
 
 	err = a.db.ExecTx(ctx, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
-			INSERT INTO users (email, password_hash, name, auth_provider)
-			VALUES ($1, $2, $3, 'email')
+			INSERT INTO users (email, password_hash, name, auth_provider, is_operator)
+			VALUES ($1, $2, $3, 'email', $4)
 			RETURNING id, email, name, auth_provider, email_verified, created_at, updated_at;
-		`, req.Email, passwordHash, req.Name).Scan(
+		`, req.Email, passwordHash, req.Name, asOwner).Scan(
 			&user.ID, &user.Email, &user.Name, &user.AuthProvider, &user.EmailVerified, &user.CreatedAt, &user.UpdatedAt,
 		)
 		if err != nil {
@@ -112,32 +152,96 @@ func (a *API) HandleSignup(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("create user: %w", err)
 		}
 
-		org, err = scanOrg(tx.QueryRow(ctx, `
-			INSERT INTO organizations (name, default_region, billing_country)
-			VALUES ($1, $2, $3)
-			RETURNING id, name, default_region, billing_country, created_at, updated_at;
-		`, req.OrgName, region, country))
-		if err != nil {
-			return fmt.Errorf("create organization: %w", err)
+		// The owner claims the installation in the same transaction that
+		// creates the account, so two people racing with the same code end
+		// with one owner and one refusal, never two operators.
+		if asOwner {
+			tag, err := tx.Exec(ctx, `INSERT INTO installation (owner_user_id) VALUES ($1) ON CONFLICT DO NOTHING;`, user.ID)
+			if err != nil {
+				return fmt.Errorf("claim installation: %w", err)
+			}
+			if tag.RowsAffected() == 0 {
+				return errOwnerClaimed
+			}
 		}
 
-		if _, err := tx.Exec(ctx, `INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'admin');`, user.ID, org.ID); err != nil {
+		// An invitation is used up by the account it creates, or not at all.
+		var joinOrg *string
+		if req.Invite != "" {
+			hash := hashToken(req.Invite)
+			err := tx.QueryRow(ctx, `
+				UPDATE invites SET used_at = NOW(), used_by = $2
+				WHERE token_hash = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()
+				  AND (email IS NULL OR LOWER(email) = $3)
+				RETURNING org_id, role;
+			`, hash, user.ID, req.Email).Scan(&joinOrg, &role)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return inviteError{inviteProblem(ctx, tx, hash, req.Email)}
+			}
+			if err != nil {
+				return fmt.Errorf("use invite: %w", err)
+			}
+		}
+
+		if joinOrg != nil {
+			org, err = scanOrg(tx.QueryRow(ctx, `SELECT `+orgColumns+` FROM organizations o WHERE o.id = $1 AND o.deleted_at IS NULL;`, *joinOrg))
+			if err != nil {
+				return inviteError{"The workspace this invitation was for no longer exists."}
+			}
+		} else {
+			role = domain.RoleAdmin
+			org, err = scanOrg(tx.QueryRow(ctx, `
+				INSERT INTO organizations (name, default_region, billing_country)
+				VALUES ($1, $2, $3)
+				RETURNING id, name, default_region, billing_country, created_at, updated_at;
+			`, req.OrgName, region, country))
+			if err != nil {
+				return fmt.Errorf("create organization: %w", err)
+			}
+		}
+
+		if _, err := tx.Exec(ctx, `INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, $3);`, user.ID, org.ID, role); err != nil {
 			return fmt.Errorf("create membership: %w", err)
 		}
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, errEmailTaken) {
+		var invite inviteError
+		switch {
+		case errors.Is(err, errEmailTaken):
 			httpx.WriteProblemFields(w, http.StatusConflict, "An account with this email already exists",
 				map[string]string{"email": "Already registered — sign in instead"})
-			return
+		case errors.Is(err, errOwnerClaimed), errors.As(err, &invite):
+			a.refuseSignup(w, err)
+		default:
+			a.log.Error("signup failed", "err", err)
+			writeError(w, http.StatusInternalServerError, "Could not create the account")
 		}
-		a.log.Error("signup failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "Could not create the account")
 		return
 	}
+	if asOwner {
+		a.log.Info("the installation has its owner", "user", user.ID)
+	}
 
-	a.issueSession(w, http.StatusCreated, user, org, domain.RoleAdmin)
+	a.issueSession(w, http.StatusCreated, user, org, role)
+}
+
+// refuseSignup answers a sign-up that is not allowed, in words the person can
+// act on.
+func (a *API) refuseSignup(w http.ResponseWriter, err error) {
+	var invite inviteError
+	switch {
+	case errors.As(err, &invite):
+		writeError(w, http.StatusForbidden, invite.reason)
+	case errors.Is(err, errOwnerCode):
+		writeError(w, http.StatusForbidden, "That owner code is not right. It is in the installation's private.env file.")
+	case errors.Is(err, errOwnerClaimed):
+		writeError(w, http.StatusForbidden, "This installation already has its owner. Ask them for an invitation.")
+	case errors.Is(err, errSignupClosed):
+		writeError(w, http.StatusForbidden, "This network is not taking new accounts.")
+	default:
+		writeError(w, http.StatusForbidden, "Accounts on this network are by invitation. Ask the person who runs it for a link.")
+	}
 }
 
 var errEmailTaken = errors.New("email already registered")
@@ -233,18 +337,30 @@ func (a *API) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		limitKey = *ip + "|" + limitKey
 	}
 
+	// The limit is checked before any password work. Once it is reached even
+	// the right password is refused until the window passes: otherwise the
+	// limit would stop nothing, since a guesser only needs one attempt to land.
+	if a.loginLimiter.blocked(limitKey) {
+		platform.AuthFailuresTotal.WithLabelValues("control-api", "rate_limited").Inc()
+		writeError(w, http.StatusTooManyRequests, "Too many failed sign-in attempts. Wait 10 minutes, or reset your password.")
+		return
+	}
+
 	var user domain.User
 	var passwordHash *string
+	var disabled bool
 	err := a.db.Pool.QueryRow(ctx, `
-		SELECT id, email, password_hash, name, auth_provider, email_verified, created_at, updated_at
+		SELECT id, email, password_hash, name, auth_provider, email_verified, created_at, updated_at, disabled_at IS NOT NULL
 		FROM users WHERE email = $1 AND deleted_at IS NULL;
 	`, strings.ToLower(strings.TrimSpace(req.Email))).Scan(
-		&user.ID, &user.Email, &passwordHash, &user.Name, &user.AuthProvider, &user.EmailVerified, &user.CreatedAt, &user.UpdatedAt,
+		&user.ID, &user.Email, &passwordHash, &user.Name, &user.AuthProvider, &user.EmailVerified, &user.CreatedAt, &user.UpdatedAt, &disabled,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// Hash anyway so response time does not reveal which emails exist.
+			// Hash anyway so response time does not reveal which emails exist,
+			// and count it: guessing addresses is guessing too.
 			auth.DummyPasswordCheck()
+			a.loginLimiter.fail(limitKey)
 			writeError(w, http.StatusUnauthorized, "Invalid email or password")
 			return
 		}
@@ -252,14 +368,15 @@ func (a *API) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if passwordHash == nil || !auth.CheckPasswordHash(req.Password, *passwordHash) {
-		// Only failures count toward the limit, so a correct password always
-		// works until the limit is hit by guesses.
-		if !a.loginLimiter.allow(limitKey) {
-			writeError(w, http.StatusTooManyRequests, "Too many failed sign-in attempts. Wait 10 minutes or reset your password.")
-			return
-		}
+		a.loginLimiter.fail(limitKey)
 		platform.AuthFailuresTotal.WithLabelValues("control-api", "bad_password").Inc()
 		writeError(w, http.StatusUnauthorized, "Invalid email or password")
+		return
+	}
+	a.loginLimiter.reset(limitKey)
+	// Said only to someone who has just proved the password.
+	if disabled {
+		writeError(w, http.StatusForbidden, "This account has been disabled. Ask the person who runs this network.")
 		return
 	}
 
@@ -318,7 +435,7 @@ func (a *API) HandleRefresh(w http.ResponseWriter, r *http.Request) {
 	var role string
 	if err := a.db.Pool.QueryRow(ctx, `
 		SELECT m.role FROM memberships m JOIN users u ON u.id = m.user_id
-		WHERE m.user_id = $1 AND m.org_id = $2 AND u.deleted_at IS NULL;
+		WHERE m.user_id = $1 AND m.org_id = $2 AND u.deleted_at IS NULL AND u.disabled_at IS NULL;
 	`, claims.UserID, claims.OrgID).Scan(&role); err != nil {
 		writeError(w, http.StatusUnauthorized, "Membership is no longer valid")
 		return

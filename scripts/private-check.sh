@@ -4,10 +4,12 @@
 # It creates a scratch installation (its own secrets, database, backups, project
 # name and port), so a real one on this computer is never touched, then:
 #
-#   init → up → only one port is published → both smoke tests with no GPU →
-#   backup → the dump restores → replace the database from it → a damaged dump
-#   changes nothing → a simulated GPU is refused once the test switch is off →
-#   everything is removed
+#   init → up → only one port is published → nobody can sign up uninvited →
+#   the owner code makes one operator → both smoke tests with no GPU, each
+#   invited by the operator → backup → the dump restores → replace the database
+#   from it → a damaged dump changes nothing → a locked-out operator gets back
+#   in → a simulated GPU is refused once the test switch is off → everything is
+#   removed
 #
 #   scripts/private-check.sh
 #   KEEP=1 scripts/private-check.sh      # leave the stack running to look at
@@ -69,21 +71,54 @@ esac
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/metrics")" = 404 ] || fail "/metrics is served on the public port"
 pass "only the gateway is published; the database, Redis and internal services are not"
 
-# 4. The whole product path, with no GPU.
-export BASE
-COORD_DIRECT="$BASE" scripts/smoke-fake.sh || fail "smoke tests failed against the private stack"
+# 4. The door. Accounts are by invitation, and the first one needs the owner code.
+PW="Private-Check-2026"
+OWNER_EMAIL="owner@private-check.example.com"
+post() { curl -sS -o "$AYEUSANN_PLATFORM_DIR/last.json" -w '%{http_code}' -X POST "$BASE$1" -H 'Content-Type: application/json' ${3:+-H "Authorization: Bearer $3"} -d "$2"; }
+field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$AYEUSANN_PLATFORM_DIR/last.json" "$1"; }
+account() { printf '{"email":"%s","password":"%s","name":"Check","country":"IN"%s}' "$1" "${3:-$PW}" "${2:+,$2}"; }
+# JSON bodies are built here rather than inline: bash 3.2 (macOS) brace-expands
+# a literal {a,b} written inside "$(...)".
+pair() { printf '{"%s":"%s","%s":"%s"}' "$1" "$2" "$3" "$4"; }
+# op: a fresh operator session (they last 15 minutes).
+op() {
+  local body
+  body=$(pair email "$OWNER_EMAIL" password "${OWNER_PW:-$PW}")
+  [ "$(post /v1/auth/login "$body")" = 200 ] || fail "the operator could not sign in"
+  field access_token
+}
+# invited EMAIL: create an account the way a friend gets one. Prints the status.
+invited() {
+  [ "$(post /v1/admin/invites '{"note":"private-check"}' "$(op)")" = 201 ] || { echo 000; return; }
+  post /v1/auth/signup "$(account "$1" "\"invite\":\"$(field token)\"")"
+}
 
-# 5. Backups: one is taken on its own, one on request, and it restores.
+[ "$(post /v1/auth/signup "$(account stranger@private-check.example.com)")" = 403 ] || fail "someone signed up without an invitation"
+[ "$(post /v1/auth/signup "$(account guesser@private-check.example.com '"owner_code":"0000-not-the-code"')")" = 403 ] || fail "a wrong owner code was accepted"
+OWNER_LINK=$(scripts/private.sh status | sed -n 's/.*\(http[^ ]*signup?owner=[^ ]*\).*/\1/p')
+[ -n "$OWNER_LINK" ] || fail "status does not show the owner how to create the first account"
+OWNER_CODE="${OWNER_LINK##*owner=}"
+[ "$(post /v1/auth/signup "$(account "$OWNER_EMAIL" "\"owner_code\":\"$OWNER_CODE\"")")" = 201 ] || fail "the owner code did not create the first account: $(cat "$AYEUSANN_PLATFORM_DIR/last.json")"
+[ "$(post /v1/auth/signup "$(account second@private-check.example.com "\"owner_code\":\"$OWNER_CODE\"")")" = 403 ] || fail "the owner code worked twice"
+case "$(scripts/private.sh status)" in *"signup?owner="*) fail "status still prints the owner code after it was used" ;; esac
+ME=$(curl -sS "$BASE/v1/auth/me" -H "Authorization: Bearer $(op)")
+case "$ME" in *'"is_platform_admin":true'*) ;; *) fail "the owner is not the operator: $ME" ;; esac
+pass "nobody signs up uninvited; the owner code made exactly one operator and is spent"
+
+# 5. The whole product path, with no GPU. Each test is invited by the operator.
+export BASE
+OPERATOR_TOKEN="$(op)" COORD_DIRECT="$BASE" scripts/smoke-fake.sh || fail "smoke tests failed against the private stack"
+
+# 6. Backups: one is taken on its own, one on request, and it restores.
 BACKUPS="$AYEUSANN_PLATFORM_DIR/backups"
 ls "$BACKUPS"/daily/*.dump >/dev/null 2>&1 || fail "no dump was taken after the first start"
 [ -f "$BACKUPS/private.env" ] || fail "the secrets file was not copied beside the backups"
-signup() { curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/auth/signup" -H 'Content-Type: application/json' -d "{\"email\":\"$1\",\"password\":\"Restore-Test-2026\",\"name\":\"Restore\",\"country\":\"IN\"}"; }
-login()  { curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/auth/login" -H 'Content-Type: application/json' -d "{\"email\":\"$1\",\"password\":\"Restore-Test-2026\"}"; }
-[ "$(signup before@restore.example.com)" = 201 ] || fail "could not create the account that should survive a restore"
+login()  { post /v1/auth/login "$(pair email "$1" password "$PW")"; }
+[ "$(invited before@restore.example.com)" = 201 ] || fail "could not create the account that should survive a restore"
 sleep 1   # dumps are named to the second
 scripts/private.sh backup >/dev/null || fail "backup failed"
 DUMP=$(ls -1t "$BACKUPS"/daily/*.dump | head -1)
-[ "$(signup after@restore.example.com)" = 201 ] || fail "could not create the account that should not survive a restore"
+[ "$(invited after@restore.example.com)" = 201 ] || fail "could not create the account that should not survive a restore"
 pass "a dump is taken after the first start and on request"
 
 OUT=$(scripts/private.sh restore "$DUMP" 2>&1) || { echo "$OUT"; fail "the dump did not restore into a scratch database"; }
@@ -104,10 +139,20 @@ fi
 [ "$(login before@restore.example.com)" = 200 ] || fail "a damaged dump damaged the live database, or the services did not come back"
 pass "a damaged dump is refused, the database is kept and the services come back"
 
-# 6. Without the test switch, a simulated GPU cannot join.
+# 7. An operator who forgot their password gets back in from this computer.
+LINK=$(scripts/private.sh reset-link "$OWNER_EMAIL" | sed -n 's/.*reset?token=\([0-9a-f]*\).*/\1/p')
+[ -n "$LINK" ] || fail "reset-link printed no link"
+OWNER_PW="Recovered-Check-2027"
+RESET=$(pair token "$LINK" password "$OWNER_PW")
+[ "$(post /v1/auth/password/reset "$RESET")" = 200 ] || fail "the reset link did not work"
+op >/dev/null
+if scripts/private.sh reset-link nobody@private-check.example.com >/dev/null 2>&1; then fail "a reset link was made for an account that does not exist"; fi
+pass "a locked-out operator gets a reset link from this computer"
+
+# 8. Without the test switch, a simulated GPU cannot join.
 scripts/private.sh up >/dev/null 2>&1 || fail "restart without ALLOW_FAKE_GPU failed"
-TOKEN=$(curl -sS -X POST "$BASE/v1/auth/login" -H 'Content-Type: application/json' \
-  -d '{"email":"before@restore.example.com","password":"Restore-Test-2026"}' | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+[ "$(login before@restore.example.com)" = 200 ] || fail "a member could not sign in"
+TOKEN=$(field access_token)
 REG=$(curl -sS -X POST "$BASE/v1/hosts/register-token" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"tier":"t3"}' \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['registration_token'])")
 LOG="$AYEUSANN_PLATFORM_DIR/simulated.log"

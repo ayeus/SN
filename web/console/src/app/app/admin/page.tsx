@@ -7,6 +7,7 @@ import { useData } from "@/lib/hooks";
 import { ago, dateTime } from "@/lib/format";
 import type { Host, Tier } from "@/lib/types";
 import { Button, Confirm, Notice, PageHeader, Panel, Select, StateBadge, TierBadge } from "@/components/ui";
+import { InvitesPanel, PeoplePanel } from "@/components/AccessPanels";
 
 type FleetRow = { host: Host; online: boolean; owner_email?: string; gpus: number; active_jobs: number };
 type Incident = { id: string; host_name: string; kind: string; severity: string; action?: string; resolved: boolean; created_at: string };
@@ -34,7 +35,9 @@ export default function AdminPage() {
   const rows = fleet.data?.hosts ?? [];
   return (
     <>
-      <PageHeader title="Operations" description="Every host on the network. Actions here are written to the audit log." />
+      <PageHeader title="Operations" description="Who can join, who has, and every machine on the network. Actions here are written to the audit log." />
+      <InvitesPanel myWorkspace={me.organization.name} />
+      <PeoplePanel myEmail={me.user.email} />
       {msg && <Notice tone={msg.tone} className="mb-6">{msg.text}</Notice>}
 
       <Panel title={`Fleet: ${rows.filter((r) => r.online).length} of ${rows.length} online`} flush className="mb-6">

@@ -155,7 +155,10 @@ services:
     command: control-api
     environment:
       <<: *env
-      PLATFORM_ADMIN_EMAILS: ${PLATFORM_ADMIN_EMAILS:-}
+      # Accounts are created from invitations. The first account proves it is
+      # the owner with this code and becomes the operator.
+      SIGNUP_MODE: ${SIGNUP_MODE:-invite}
+      OWNER_CODE: ${OWNER_CODE:?run make private-init}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}

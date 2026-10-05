@@ -175,6 +175,11 @@ function Wizard() {
               </label>
             </Field>
           </div>
+          <p className="mt-5 max-w-[78ch] text-[13px] text-muted">
+            The model runs on a machine that belongs to someone else. Its owner is never shown your requests, but they are
+            processed on that machine, so a determined owner could read them. Send only what you would trust the people on this
+            network with.
+          </p>
           {cap && cap.eligible_hosts === 0 && cap.message && (
             <Notice tone="warn" className="mt-5">
               {cap.message} You can still deploy; it starts as soon as a matching host comes online.

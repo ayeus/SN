@@ -64,11 +64,16 @@ The first start builds the images, which takes a few minutes. It ends with:
 
 ```
   Running    http://192.168.1.4:8090   (on this computer: http://localhost:8090)
+  Owner      Not set up yet. Create your account, the first one, here:
+             http://localhost:8090/signup?owner=3f9c1e0a77b2-5d1048c2e6aa
   Backups    last at 2026-10-05T15:36:47Z, in /Users/you/.ayeusann-platform/backups
 ```
 
-Open that address, sign up, and you are in. `make private-status` prints the
-same summary at any time.
+Open the owner link and create your account. The code in it works once: the
+account it creates is the **operator**, the person who invites everyone else
+and sees every machine. After that the line disappears.
+
+`make private-status` prints the same summary at any time.
 
 Publish the agent for each kind of machine that will join, as in
 [connect-a-gpu.md](connect-a-gpu.md#2-publish-the-agent-for-the-hosts-operating-system):
@@ -77,12 +82,39 @@ Publish the agent for each kind of machine that will join, as in
 On macOS the firewall may ask whether Docker may accept incoming connections.
 Allow it, or other machines cannot reach the platform.
 
-> Until invitations are added (the next milestone), anyone who can reach the
-> address can create an account. Keep it on your own network or a private VPN,
-> and do not forward the port from your router or expose it through a public
-> tunnel yet.
+## 3. Invite people
 
-## 3. Connect machines
+Nobody can create an account by finding the address. Accounts come from
+invitation links, and only you make those: in the console, open **Operations**
+and use **Invitations**.
+
+- Each link works once and lasts three days. Send it yourself, in whatever way
+  you already talk to the person.
+- **A workspace of their own** is the usual choice: their deployments, keys and
+  usage are theirs. **A seat in your workspace** shares yours.
+- Naming an email address means only that address can use the link.
+- A link you regret can be withdrawn until it is used.
+
+The same page lists everyone with an account. For each person you can:
+
+- **Create a reset link.** A computer at home has no mail server, so "Forgot
+  your password?" cannot email anyone. You make the link and pass it on; it
+  works once, for 24 hours.
+- **Disable the account.** They are signed out at once and cannot sign in until
+  you enable it again. If nobody else can sign in to their workspace, its API
+  keys stop working for good. Their machines are not touched; drain or ban those
+  in the fleet list on the same page.
+
+If it is you who forgot the password, this computer is the way back in:
+
+```bash
+scripts/private.sh reset-link you@example.com
+```
+
+Sign-in is limited to ten wrong attempts in ten minutes per address and email.
+Once reached, even the right password waits out the ten minutes.
+
+## 4. Connect machines
 
 Exactly as in [connect-a-gpu.md](connect-a-gpu.md#3-connect-the-host), using
 this installation's address: open the console, go to Machines > Add a machine,
@@ -107,7 +139,7 @@ working, so pick one that does not change.
 |---|---|---|
 | **A private VPN** such as [Tailscale](https://tailscale.com) on every machine | Friends in different places. Private: nobody outside the VPN can reach the sign-in page. The address never changes. | Everyone installs the VPN. |
 | **Your computer's address on the local network** (the default) | Machines in the same home or lab. | The address can change when the router restarts. Reserve it for this computer in the router's settings. |
-| **A name you own**, pointing at a public address or tunnel | People who cannot install anything. | The sign-in page is on the internet. Wait for invitations before doing this. |
+| **A name you own**, pointing at a public address or tunnel | People who cannot install anything. | The sign-in page is on the internet and traffic to it is not encrypted unless the tunnel does it. |
 
 ### Moving to a new address
 
@@ -208,14 +240,16 @@ applied.
 | A database shell | `scripts/private.sh compose exec postgres psql -U ayeusann ayeusann` |
 
 Settings live in `~/.ayeusann-platform/private.env`; `make private-up` applies
-a change. `PLATFORM_ADMIN_EMAILS` lists the accounts that see the operations
-console.
+a change. `SIGNUP_MODE` is `invite` by default; `closed` stops new accounts
+altogether, and `open` lets anyone who can reach the address sign up.
 
 To remove the installation entirely, including its database:
 `scripts/private.sh compose down -v`, then delete `~/.ayeusann-platform`.
 
 ## What is and is not protected
 
+- Only people you invited have accounts, and only your account can invite,
+  disable accounts or see everyone's machines.
 - The database, Redis and the internal services are not reachable from your
   network, only from inside the stack. One port is open: the gateway's.
 - Traffic is **not encrypted** between machines and the platform. On a home
@@ -235,15 +269,18 @@ make private-check
 
 creates a throwaway installation next to yours (its own secrets, database,
 project name and port 8091), starts it, runs both end-to-end tests with no GPU,
-takes a backup, restores it, replaces the database from it, feeds it a damaged
-dump, checks that only one port is published and that a simulated GPU is
-refused, and removes everything again. CI runs it on every push.
+checks that nobody can sign up uninvited and that the owner code makes exactly
+one operator, takes a backup, restores it, replaces the database from it, feeds
+it a damaged dump, checks that only one port is published and that a simulated
+GPU is refused, and removes everything again. CI runs it on every push.
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
 | "No installation found" | Run `make private-init` first. |
+| "Accounts on this network are by invitation" | Sign-up needs an invitation link from the operator. The very first account uses the owner link that `make private-status` prints. |
+| "This installation already has its owner" | The owner code was already used. Ask that person for an invitation, or see `scripts/private.sh reset-link` if it was you. |
 | "Docker is not running" | Start Docker Desktop. |
 | Other machines cannot open the address | A firewall on this computer is blocking port 8090, the machines are on different networks, or the address changed. `make private-status` shows the address in use. |
 | "this agent is reporting a simulated GPU" | The agent was started with `--fake-gpu` or `SN_FAKE_GPU`. That is for development only. |

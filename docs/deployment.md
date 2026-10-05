@@ -32,7 +32,7 @@ Fill in `.env.prod`:
 | `ACME_EMAIL` | Where Let's Encrypt sends expiry notices |
 | `JWT_SECRET`, `INTERNAL_SERVICE_SECRET`, `POSTGRES_PASSWORD` | `openssl rand -hex 32`, a different one for each |
 | `MANIFEST_SIGNING_KEY` | `openssl rand -base64 32` |
-| `PLATFORM_ADMIN_EMAILS` | Accounts that may open the operations console |
+| `OWNER_CODE` | `openssl rand -hex 12`. The first account presents it and becomes the operator |
 | `SMTP_*` | A mail relay. Without one, password reset emails cannot be sent |
 
 Then:
@@ -42,8 +42,10 @@ make prod-up        # build images, migrate, start, wait until healthy
 make prod-status
 ```
 
-Open `https://<APP_DOMAIN>` and sign up with an address listed in
-`PLATFORM_ADMIN_EMAILS`.
+Open `https://<APP_DOMAIN>/signup?owner=<OWNER_CODE>` and create your account. It
+becomes the operator: the account that invites everyone else (Operations >
+Invitations) and sees the operations console. The code works once. Sign-up is
+by invitation unless `SIGNUP_MODE=open` is set.
 
 **Back up `MANIFEST_SIGNING_KEY`.** Hosts pin it when they enrol. If it changes,
 every enrolled host refuses jobs until it enrols again.

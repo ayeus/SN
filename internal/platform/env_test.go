@@ -119,3 +119,27 @@ func TestRequirePublicURL(t *testing.T) {
 		}
 	}
 }
+
+// Sign-up is open only where nothing is at stake. A real installation is by
+// invitation unless it says otherwise, and a value it cannot read is not "open".
+func TestSignupMode(t *testing.T) {
+	cases := []struct{ env, setting, want string }{
+		{"dev", "", "open"},
+		{"test", "", "open"},
+		{"dev", "invite", "invite"},
+		{"private", "", "invite"},
+		{"production", "", "invite"},
+		{"private", "open", "open"}, // an explicit choice is respected
+		{"private", "closed", "closed"},
+		{"private", " Closed ", "closed"},
+		{"private", "opne", "invite"},
+		{"dev", "opne", "invite"},
+	}
+	for _, tc := range cases {
+		t.Setenv("SN_ENV", tc.env)
+		t.Setenv("SIGNUP_MODE", tc.setting)
+		if got := SignupMode(); got != tc.want {
+			t.Errorf("SN_ENV=%s SIGNUP_MODE=%q: %s, want %s", tc.env, tc.setting, got, tc.want)
+		}
+	}
+}

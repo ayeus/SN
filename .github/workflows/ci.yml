@@ -191,4 +191,5 @@ jobs:
           INTERNAL_SERVICE_SECRET: ci
           POSTGRES_PASSWORD: ci
           MANIFEST_SIGNING_KEY: ci
+          OWNER_CODE: ci
 

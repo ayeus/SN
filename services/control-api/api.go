@@ -32,10 +32,13 @@ type API struct {
 	platformAdmins       map[string]bool
 	// personalHostsOnly: machines join as Tier 3 unless an operator enrols them.
 	personalHostsOnly bool
+	signupMode        string // SignupOpen, SignupInvite or SignupClosed
+	ownerCode         string // one-time code that makes the first account the operator
 
 	mailer       Mailer          // nil when email cannot be sent
 	loginLimiter *attemptLimiter // failed sign-ins per address+email
 	resetLimiter *attemptLimiter // reset emails per address / per email
+	ownerLimiter *attemptLimiter // owner-code attempts per address
 }
 
 // Config is the environment-derived part of API.
@@ -50,6 +53,11 @@ type Config struct {
 	// PersonalHostsOnly is set on a private network, where every machine is
 	// somebody's own computer: only an operator may enrol a higher tier.
 	PersonalHostsOnly bool
+	// SignupMode is who may create an account; empty means open.
+	SignupMode string
+	// OwnerCode, when set, lets the first account that presents it become the
+	// operator. Empty disables that path.
+	OwnerCode string
 }
 
 // NewAPI wires the control plane.
@@ -60,6 +68,9 @@ func NewAPI(database *db.Client, tm *auth.TokenManager, rev auth.RevocationStore
 	}
 	if cfg.HeartbeatTimeout <= 0 {
 		cfg.HeartbeatTimeout = 15 * time.Second
+	}
+	if cfg.SignupMode == "" {
+		cfg.SignupMode = SignupOpen
 	}
 	api := &API{
 		db:                   database,
@@ -73,6 +84,9 @@ func NewAPI(database *db.Client, tm *auth.TokenManager, rev auth.RevocationStore
 		heartbeatTimeout:     cfg.HeartbeatTimeout,
 		platformAdmins:       admins,
 		personalHostsOnly:    cfg.PersonalHostsOnly,
+		signupMode:           cfg.SignupMode,
+		ownerCode:            strings.TrimSpace(cfg.OwnerCode),
+		ownerLimiter:         newAttemptLimiter(10, 10*time.Minute),
 		loginLimiter:         newAttemptLimiter(10, 10*time.Minute),
 		resetLimiter:         newAttemptLimiter(5, time.Hour),
 	}
@@ -99,15 +113,22 @@ func isUniqueViolation(err error) bool {
 
 // isPlatformAdmin reports whether the caller operates the platform (the ops
 // persona in PRD §4, P8). Org admins are not platform admins.
+//
+// An operator is an account marked as one: the installation's owner, who
+// proved it with the owner code. The email list is a development convenience
+// and is empty on a real installation.
 func (a *API) isPlatformAdmin(ctx context.Context, userID string) bool {
-	if len(a.platformAdmins) == 0 || userID == "" {
+	if userID == "" {
 		return false
 	}
 	var email string
-	if err := a.db.Pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1 AND deleted_at IS NULL;`, userID).Scan(&email); err != nil {
+	var operator bool
+	if err := a.db.Pool.QueryRow(ctx, `
+		SELECT email, is_operator FROM users WHERE id = $1 AND deleted_at IS NULL AND disabled_at IS NULL;
+	`, userID).Scan(&email, &operator); err != nil {
 		return false
 	}
-	return a.platformAdmins[strings.ToLower(email)]
+	return operator || a.platformAdmins[strings.ToLower(email)]
 }
 
 // requirePlatformAdmin guards the ops console routes (SRS FR-83).

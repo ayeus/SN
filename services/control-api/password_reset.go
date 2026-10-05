@@ -104,6 +104,52 @@ func (l *attemptLimiter) allow(key string) bool {
 	return true
 }
 
+// blocked reports whether key has used up its attempts, without recording one.
+func (l *attemptLimiter) blocked(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for _, t := range l.hits[key] {
+		if now.Sub(t) < l.window {
+			n++
+		}
+	}
+	return n >= l.max
+}
+
+// fail records a failed attempt. Unlike allow it always records, so attempts
+// made while blocked keep the block in place.
+func (l *attemptLimiter) fail(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	kept := l.hits[key][:0]
+	for _, t := range l.hits[key] {
+		if now.Sub(t) < l.window {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) > l.max { // enough to stay blocked; no need to grow without bound
+		kept = kept[len(kept)-l.max:]
+	}
+	l.hits[key] = append(kept, now)
+	if len(l.hits) > 50_000 {
+		for k, v := range l.hits {
+			if len(v) == 0 || now.Sub(v[len(v)-1]) > l.window {
+				delete(l.hits, k)
+			}
+		}
+	}
+}
+
+// reset forgets key's attempts, after a success.
+func (l *attemptLimiter) reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.hits, key)
+}
+
 func hashToken(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
@@ -125,7 +171,7 @@ func (a *API) HandleForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.mailer == nil {
-		writeError(w, http.StatusServiceUnavailable, "Password reset email is not configured on this installation. Contact support.")
+		writeError(w, http.StatusServiceUnavailable, "This installation cannot send email. Ask the person who runs it for a reset link.")
 		return
 	}
 	ip := "unknown"
@@ -139,7 +185,7 @@ func (a *API) HandleForgotPassword(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	var userID string
-	err := a.db.Pool.QueryRow(ctx, `SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL AND password_hash IS NOT NULL;`, email).Scan(&userID)
+	err := a.db.Pool.QueryRow(ctx, `SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL AND disabled_at IS NULL AND password_hash IS NOT NULL;`, email).Scan(&userID)
 	if err == nil {
 		raw := make([]byte, 32)
 		if _, err := rand.Read(raw); err != nil {

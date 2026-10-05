@@ -43,9 +43,15 @@ docker info >/dev/null 2>&1 || fail "Docker is not running"
 ARCH=$(docker info --format '{{.Architecture}}' | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 [ -f "dist/agent/ayeusann-agent-linux-$ARCH" ] || fail "no Linux agent published; run: make dist-agent-linux ARCH=$ARCH"
 
-# 1. The install command must be usable on another machine.
+# 1. The install command must be usable on another machine. (OPERATOR_TOKEN:
+# see smoke.sh.)
+INVITE=""
+if [ -n "${OPERATOR_TOKEN:-}" ]; then
+  INVITE=$(curl -sS -X POST "$BASE/v1/admin/invites" -H "Authorization: Bearer $OPERATOR_TOKEN" -H 'Content-Type: application/json' \
+      -d '{"note":"remote smoke test"}' | json "['token']") || fail "could not create an invitation with OPERATOR_TOKEN"
+fi
 R=$(curl -sS -X POST "$BASE/v1/auth/signup" -H 'Content-Type: application/json' \
-    -d "{\"email\":\"remote@$(uuidgen | tr A-Z a-z | cut -c1-8).example.com\",\"password\":\"Remote-Host-2026\",\"name\":\"Remote Host Test\",\"country\":\"IN\"}")
+    -d "{\"email\":\"remote@$(uuidgen | tr A-Z a-z | cut -c1-8).example.com\",\"password\":\"Remote-Host-2026\",\"name\":\"Remote Host Test\",\"country\":\"IN\",\"invite\":\"$INVITE\"}")
 TOKEN=$(echo "$R" | json "['access_token']") || fail "signup: $R"
 T=$(api POST /v1/hosts/register-token -d '{"tier":"t3","region":"IN-SOUTH"}')
 CMD=$(echo "$T" | json "['commands']['linux_macos']")

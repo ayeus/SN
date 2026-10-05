@@ -10,6 +10,7 @@
 #   scripts/private.sh restore FILE                      check that a dump restores
 #   scripts/private.sh restore FILE --replace            replace the database with it
 #   scripts/private.sh address URL                       move to a new address
+#   scripts/private.sh reset-link EMAIL                  a password-reset link, when the operator is locked out
 #
 # Everything that must survive lives outside this repository, in
 # ~/.ayeusann-platform: the secrets file (private.env) and the backups.
@@ -129,11 +130,12 @@ INTERNAL_SERVICE_SECRET=$(openssl rand -hex 32)
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 # Signs every job sent to a host. Hosts pin it when they enrol.
 MANIFEST_SIGNING_KEY=$(openssl rand -base64 32)
-# Entered once, by the first account, which becomes the operator.
-OWNER_CODE=$(openssl rand -hex 4)-$(openssl rand -hex 4)
-
-# Accounts that see the operations console (comma-separated emails).
-PLATFORM_ADMIN_EMAILS=
+# Entered once, by the first account, which becomes the operator: the person
+# who invites everyone else. 'make private-status' prints the link to use.
+OWNER_CODE=$(openssl rand -hex 6)-$(openssl rand -hex 6)
+# Accounts are created from the operator's invitation links. "open" lets
+# anyone who can reach the address sign up; "closed" lets nobody.
+SIGNUP_MODE=invite
 
 # Where database dumps are written. Somewhere a cloud-sync or Time Machine
 # covers is a good choice.
@@ -166,6 +168,13 @@ status() {
   echo
   if curl -sf -m 3 "http://localhost:$port/readyz" >/dev/null 2>&1; then
     echo "  Running    $url   (on this computer: http://localhost:$port)"
+    # Until someone has claimed it, say how.
+    case "$(curl -s -m 3 "http://localhost:$port/v1/auth/signup-info" 2>/dev/null)" in
+      *'"owner_needed":true'*)
+        echo "  Owner      Not set up yet. Create your account, the first one, here:"
+        echo "             http://localhost:$port/signup?owner=$(setting OWNER_CODE)"
+        ;;
+    esac
   else
     echo "  Not answering on port $port. Start it with: make private-up"
   fi
@@ -306,6 +315,31 @@ ones use $new.
 EOF
 }
 
+# A way back in for an operator who has forgotten their password. Everyone else
+# gets a reset link from the operator, in the console. This one goes straight
+# to the database, so it needs this computer rather than an account.
+reset_link() {
+  need_env
+  local email="${1:-}" token hash made
+  [ -n "$email" ] || die "usage: scripts/private.sh reset-link EMAIL"
+  case "$email" in
+    *[!A-Za-z0-9._%+@-]*|*@*@*|@*|*@) die "\"$email\" does not look like an email address." ;;
+    *@*) ;;
+    *) die "\"$email\" does not look like an email address." ;;
+  esac
+  email="$(printf '%s' "$email" | tr 'A-Z' 'a-z')"
+  token="$(openssl rand -hex 32)"
+  hash="$(printf '%s' "$token" | openssl dgst -sha256 | awk '{print $NF}')"
+  made="$(quiet exec -T postgres psql -U ayeusann -d ayeusann -At -v ON_ERROR_STOP=1 -c "
+    INSERT INTO auth_tokens (user_id, kind, token_hash, expires_at)
+    SELECT id, 'password_reset', '$hash', NOW() + INTERVAL '1 hour'
+    FROM users WHERE email = '$email' AND deleted_at IS NULL
+    RETURNING 'made';" | grep -c '^made$' || true)"
+  [ "$made" = 1 ] || die "There is no account for $email."
+  echo "Open this within the hour to set a new password for $email:"
+  echo "  $(setting PUBLIC_URL)/reset?token=$token"
+}
+
 case "${1:-}" in
   init) shift; init "$@" ;;
   up) up ;;
@@ -315,6 +349,7 @@ case "${1:-}" in
   backup) backup ;;
   restore) shift; restore "$@" ;;
   address) shift; address "$@" ;;
+  reset-link) shift; reset_link "$@" ;;
   compose) shift; compose "$@" ;;
-  *) sed -n '2,15p' "$0"; exit 2 ;;
+  *) sed -n '2,16p' "$0"; exit 2 ;;
 esac

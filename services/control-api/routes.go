@@ -32,6 +32,7 @@ func (a *API) Routes() http.Handler {
 
 	// ── Public ───────────────────────────────────────────────
 	mux.HandleFunc("POST /v1/auth/signup", a.HandleSignup)
+	mux.HandleFunc("GET /v1/auth/signup-info", a.HandleSignupInfo)
 	mux.HandleFunc("POST /v1/auth/login", a.HandleLogin)
 	mux.HandleFunc("POST /v1/auth/refresh", a.HandleRefresh)
 	mux.HandleFunc("POST /v1/auth/password/forgot", a.HandleForgotPassword)
@@ -86,6 +87,15 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("POST /v1/admin/hosts/{id}/ban", admin(a.HandleAdminBanHost))
 	mux.Handle("POST /v1/admin/hosts/{id}/tier", admin(a.HandleAdminSetHostTier))
 	mux.Handle("POST /v1/admin/deployments/{id}/kill", admin(a.HandleAdminKillDeployment))
+
+	// ── Access: who may join, and who has (operator) ─────────
+	mux.Handle("POST /v1/admin/invites", admin(a.HandleCreateInvite))
+	mux.Handle("GET /v1/admin/invites", admin(a.HandleListInvites))
+	mux.Handle("DELETE /v1/admin/invites/{id}", admin(a.HandleRevokeInvite))
+	mux.Handle("GET /v1/admin/people", admin(a.HandleListPeople))
+	mux.Handle("POST /v1/admin/people/{id}/reset-link", admin(a.HandlePersonResetLink))
+	mux.Handle("POST /v1/admin/people/{id}/disable", admin(a.HandleDisablePerson))
+	mux.Handle("POST /v1/admin/people/{id}/enable", admin(a.HandleEnablePerson))
 
 	return platformMetrics(mux)
 }
