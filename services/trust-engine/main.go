@@ -71,7 +71,7 @@ func main() {
 		}
 	}()
 
-	srv, err := platform.NewServer(platform.ServiceConfig{Name: "trust-engine", Version: "0.3.0", Port: port})
+	srv, err := platform.NewServer(platform.ServiceConfig{Name: "trust-engine", Version: platform.Version, Port: port})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}

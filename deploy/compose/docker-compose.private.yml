@@ -188,6 +188,12 @@ services:
       HOST_PROBATION_DAYS: ${HOST_PROBATION_DAYS:-0}
       # Simulated GPUs are for the end-to-end tests of this stack, nothing else.
       ALLOW_FAKE_GPU: ${ALLOW_FAKE_GPU:-false}
+      # The public half of the key that signs agent releases (scripts/private.sh
+      # release-key). The private half never comes near this stack.
+      RELEASE_PUBLIC_KEY: ${RELEASE_PUBLIC_KEY:-}
+    volumes:
+      # The published release, to check and pass on to agents.
+      - ../../dist/agent:/app/downloads:ro
     healthcheck:
       <<: *health
       test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8083/readyz"]

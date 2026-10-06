@@ -187,20 +187,22 @@ type ModelArtifact struct {
 // ─── 7. Host & GPU ────────────────────────────────────────────
 
 type Host struct {
-	ID              string     `json:"id"`
-	UserID          *string    `json:"user_id,omitempty"`
-	Name            string     `json:"name"`
-	Hostname        *string    `json:"hostname,omitempty"`
-	Tier            string     `json:"tier"`
-	Region          string     `json:"region"`
-	OverlayIP       *net.IP    `json:"overlay_ip,omitempty"`
-	KycStatus       string     `json:"kyc_status"`
-	Reputation      int        `json:"reputation"`
-	Status          string     `json:"status"`
-	HwFingerprint   *string    `json:"hw_fingerprint,omitempty"`
-	PanEnc          []byte     `json:"-"` // Column-encrypted
-	BankEnc         []byte     `json:"-"` // Column-encrypted
-	AgentVersion    *string    `json:"agent_version,omitempty"`
+	ID            string  `json:"id"`
+	UserID        *string `json:"user_id,omitempty"`
+	Name          string  `json:"name"`
+	Hostname      *string `json:"hostname,omitempty"`
+	Tier          string  `json:"tier"`
+	Region        string  `json:"region"`
+	OverlayIP     *net.IP `json:"overlay_ip,omitempty"`
+	KycStatus     string  `json:"kyc_status"`
+	Reputation    int     `json:"reputation"`
+	Status        string  `json:"status"`
+	HwFingerprint *string `json:"hw_fingerprint,omitempty"`
+	PanEnc        []byte  `json:"-"` // Column-encrypted
+	BankEnc       []byte  `json:"-"` // Column-encrypted
+	AgentVersion  *string `json:"agent_version,omitempty"`
+	// AgentOutdated: the agent is below the minimum version and gets no work.
+	AgentOutdated   bool       `json:"agent_outdated"`
 	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
 	OS              *string    `json:"os,omitempty"`
 	Runtime         *string    `json:"runtime,omitempty"`

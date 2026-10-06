@@ -66,9 +66,24 @@ mkdir -p "$INSTALL_DIR"
 
 # 1. The agent binary: a prebuilt download, else a source build.
 if [ -n "$SERVER" ] && curl -fsSL -o "$BIN.tmp" "$SERVER/downloads/ayeusann-agent-$OS-$ARCH" 2>/dev/null; then
+    # When the platform publishes a release manifest, the download must be the
+    # file it lists. This catches a download that was cut short or damaged;
+    # the release's signature is checked by the agent itself before it ever
+    # installs an update.
+    WANT=$(curl -fsSL "$SERVER/downloads/release.json" 2>/dev/null \
+        | awk -v f="\"ayeusann-agent-$OS-$ARCH\"" 'index($0, "\"file\"") && index($0, f) { hit = 1 } hit && index($0, "\"sha256\"") { gsub(/[", ]/, ""); sub(/^sha256:/, ""); print; exit }')
+    if [ -n "$WANT" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then GOT=$(sha256sum "$BIN.tmp" | cut -d' ' -f1)
+        elif command -v shasum >/dev/null 2>&1; then GOT=$(shasum -a 256 "$BIN.tmp" | cut -d' ' -f1)
+        else GOT=""; WANT=""; fi   # nothing to check with, so nothing is claimed
+        if [ "$GOT" != "$WANT" ]; then
+            rm -f "$BIN.tmp"
+            fail "the agent downloaded from $SERVER is not the published one (checksum mismatch). Try again; if it keeps happening, tell the person who runs the platform."
+        fi
+    fi
     mv "$BIN.tmp" "$BIN"
     chmod +x "$BIN"
-    say "downloaded agent from $SERVER"
+    say "downloaded agent from $SERVER${WANT:+ (download intact: checksum matches the published release)}"
 elif [ -f "./agent/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
     rm -f "$BIN.tmp"
     say "no prebuilt agent for $OS/$ARCH; building from source (a few minutes the first time)"

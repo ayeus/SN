@@ -170,6 +170,11 @@ services:
       <<: *env
       MANIFEST_SIGNING_KEY: ${MANIFEST_SIGNING_KEY:?set MANIFEST_SIGNING_KEY in .env.prod}
       HOST_PROBATION_DAYS: ${HOST_PROBATION_DAYS:-7}
+      # Public half of the key that signs agent releases; the private half
+      # stays with whoever publishes them, off this machine.
+      RELEASE_PUBLIC_KEY: ${RELEASE_PUBLIC_KEY:-}
+    volumes:
+      - ../../dist/agent:/app/downloads:ro
     healthcheck:
       <<: *health
       test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8083/readyz"]

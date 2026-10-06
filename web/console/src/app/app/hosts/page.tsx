@@ -74,6 +74,7 @@ export default function MachinesPage() {
                     <td>
                       {h.online ? <StateBadge state={h.paused ? "paused" : h.status} /> : <StateBadge state="offline" />}
                       {h.online && !h.runtime_healthy && <div className="text-[12px] text-danger">Runtime not reachable</div>}
+                      {h.agent_outdated && <div className="text-[12px] text-danger">Agent out of date</div>}
                     </td>
                     <td>
                       <TierBadge tier={h.tier} />

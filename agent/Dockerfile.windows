@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-pc-windows-gnu
 WORKDIR /src
+COPY VERSION ./VERSION
 COPY proto ./proto
 COPY agent ./agent
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/agent/target \

@@ -79,7 +79,7 @@ func main() {
 		}
 	}()
 
-	srv, err := platform.NewServer(platform.ServiceConfig{Name: "scheduler", Version: "0.3.0", Port: port})
+	srv, err := platform.NewServer(platform.ServiceConfig{Name: "scheduler", Version: platform.Version, Port: port})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}

@@ -108,6 +108,7 @@ export default function HostPage() {
             <TierBadge tier={h.tier} long />
             <span>{h.region}</span>
             {h.runtime && <span>{h.runtime}{h.runtime_healthy ? "" : " (not reachable)"}</span>}
+            {h.agent_version && <span>agent {h.agent_version}</span>}
           </span>
         }
         actions={
@@ -137,6 +138,14 @@ export default function HostPage() {
         <Notice className="mb-6">
           On probation until {dateTime(h.probation_until)}. During probation the machine takes interruptible work only; it moves up once
           its uptime and reputation hold.
+        </Notice>
+      )}
+      {h.agent_outdated && (
+        <Notice tone="warn" className="mb-6">
+          This machine&apos;s agent ({h.agent_version ?? "unknown version"}) is older than the network accepts, so it is not given any work.
+          {online
+            ? " It updates itself when it can; if this message stays, run the install command on the machine again."
+            : " It updates itself the next time it connects."}
         </Notice>
       )}
       {online && !h.runtime_healthy && (

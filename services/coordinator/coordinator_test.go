@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ayeus/ayeusann/internal/placement"
+	"github.com/ayeus/ayeusann/internal/release"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1496,5 +1498,78 @@ func TestTunnelRefusesBeforeTheFirstByteSoTheGatewayCanRetry(t *testing.T) {
 	}()
 	if code := call(f.infer(rep, false)); code != http.StatusBadGateway {
 		t.Fatalf("host disconnect: status %d, want 502", code)
+	}
+}
+
+// An agent below the minimum version is not turned away (it could then never
+// update). It is marked, offered the release, and given no work.
+func TestAnOutdatedAgentConnectsButGetsNoWork(t *testing.T) {
+	f := setup(t)
+	dir := t.TempDir()
+	seed, pubB64, _ := release.GenerateKey()
+	pub, _ := release.PublicKey(pubB64)
+	publish(t, dir, seed, "0.4.0", "0.4.0")
+	f.s.releases = newReleases(dir, pub, "", f.s.log)
+
+	old := f.register("t3", "sha256:outdated", 8)
+	old.AgentVersion, old.Capabilities = "0.3.0", []string{capReplicaReport, capSelfUpdate}
+	st, hostID, credential, done := f.start(t, old)
+	if string(st.messages()[0].GetRegisterResponse().GetReleasePublicKey()) != string(pub) {
+		t.Fatal("the agent was not given the release key to pin")
+	}
+	if f.str(`SELECT agent_outdated::TEXT FROM hosts WHERE id = $1`, hostID) != "true" {
+		t.Fatal("an agent below the minimum version was not marked out of date")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var offered string
+		for _, m := range st.messages() {
+			if u := m.GetUpdate(); u != nil {
+				offered = u.GetVersion()
+			}
+		}
+		if offered == "0.4.0" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the outdated agent was not offered the release")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Placement leaves it alone.
+	f.exec(`UPDATE hosts SET status = 'active', runtime_healthy = TRUE, runtime = 'ollama' WHERE id = $1`, hostID)
+	cands, err := placement.LoadCandidates(f.ctx, testDB.Pool, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cands {
+		if c.HostID == hostID {
+			t.Fatal("an out-of-date host is a placement candidate")
+		}
+	}
+
+	// It updates and comes back: the mark is cleared and it is a candidate.
+	f.s.sessions.drop(hostID)
+	ended(t, done, "the host was dropped")
+	current := reporting()
+	current.HostCredential, current.HardwareFingerprint, current.Gpus, current.Runtime = credential, "sha256:outdated", gpu(8), "ollama"
+	current.AgentVersion, current.Capabilities = "0.4.0", []string{capReplicaReport, capSelfUpdate}
+	st2, _, _, _ := f.start(t, current)
+	if f.str(`SELECT agent_outdated::TEXT FROM hosts WHERE id = $1`, hostID) != "false" {
+		t.Fatal("the mark outlived the update")
+	}
+	time.Sleep(100 * time.Millisecond)
+	for _, m := range st2.messages() {
+		if m.GetUpdate() != nil {
+			t.Fatal("a current agent was offered an update")
+		}
+	}
+	cands, _ = placement.LoadCandidates(f.ctx, testDB.Pool, time.Minute)
+	found := false
+	for _, c := range cands {
+		found = found || c.HostID == hostID
+	}
+	if !found {
+		t.Fatal("the updated host is still not a placement candidate")
 	}
 }

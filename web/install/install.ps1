@@ -56,9 +56,25 @@ if ($Server) {
         # The progress bar slows Invoke-WebRequest down by an order of magnitude.
         $ProgressPreference = "SilentlyContinue"
         Invoke-WebRequest -UseBasicParsing -Uri "$Server/downloads/ayeusann-agent-windows-amd64.exe" -OutFile $Tmp
+        # When the platform publishes a release manifest, the download must be
+        # the file it lists (the agent checks the release's signature itself
+        # before installing any update).
+        $Verified = ""
+        try {
+            $Release = Invoke-RestMethod -UseBasicParsing -Uri "$Server/downloads/release.json"
+            $Want = ($Release.artifacts | Where-Object { $_.file -eq "ayeusann-agent-windows-amd64.exe" }).sha256
+        } catch { $Want = $null }
+        if ($Want) {
+            $Got = (Get-FileHash -Algorithm SHA256 $Tmp).Hash.ToLower()
+            if ($Got -ne $Want.ToLower()) {
+                Remove-Item -Force -ErrorAction SilentlyContinue $Tmp
+                Fail "the agent downloaded from $Server is not the published one (checksum mismatch). Try again; if it keeps happening, tell the person who runs the platform."
+            }
+            $Verified = " (download intact: checksum matches the published release)"
+        }
         Move-Item -Force $Tmp $Bin
         $Downloaded = $true
-        Say "downloaded agent from $Server"
+        Say "downloaded agent from $Server$Verified"
     } catch {
         Remove-Item -Force -ErrorAction SilentlyContinue $Tmp
     }

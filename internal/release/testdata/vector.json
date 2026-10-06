@@ -1,0 +1,7 @@
+{
+  "comment": "Shared by the Go and Rust tests: both must accept this signature and reject any change to the manifest. The seed is bytes 1..32; it signs nothing real.",
+  "manifest": "{\n  \"version\": \"1.2.3\",\n  \"min_version\": \"1.0.0\",\n  \"published_at\": \"2026-10-06T12:00:00Z\",\n  \"artifacts\": [\n    {\n      \"os\": \"linux\",\n      \"arch\": \"amd64\",\n      \"file\": \"ayeusann-agent-linux-amd64\",\n      \"size\": 11,\n      \"sha256\": \"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9\"\n    }\n  ]\n}\n",
+  "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+  "seed": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+  "signature": "douptRz29NaF7FjPScRo2/9sUKFnHyWEGEjtsYtPuK3aUrZkN6NbDLRXXkBQwtU/Q7JYeWGrH3ydCIOT4oaeAg=="
+}

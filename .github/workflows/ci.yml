@@ -139,6 +139,10 @@ jobs:
         run: make smoke-fake
         env:
           REQUIRE_SDK: "1"
+      # One version enrols, the next is published, and the host must be
+      # running it within a minute; bad releases must be refused.
+      - name: Self-update
+        run: make update-check
       - name: Keep the logs when it fails
         if: failure()
         uses: actions/upload-artifact@v4

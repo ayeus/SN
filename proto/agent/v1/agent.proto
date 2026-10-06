@@ -208,6 +208,11 @@ message RegisterResponse {
   // to a new address without anyone touching the hosts. Empty when only one
   // address exists.
   repeated string coordinator_urls = 11;
+
+  // Ed25519 public key that signs agent releases. Pinned by the agent on
+  // first sight, like the manifest key; it then accepts updates signed by
+  // this key and no other. Empty when the installation publishes no updates.
+  bytes release_public_key = 12;
 }
 
 message ManifestDispatch {
@@ -272,12 +277,21 @@ message DrainRequest {
   int32 grace_period_seconds = 2;
 }
 
+// A newer agent has been published. The agent trusts none of this message's
+// plain fields: it verifies `signature` over `manifest` with the release key
+// it pinned at enrolment, and takes the version, file name, size and checksum
+// from the manifest alone.
 message UpdateAvailable {
   string version = 1;
+  // Base address of the published binaries, e.g. https://host/downloads.
+  // Empty means "the address you are connected to, under /downloads".
   string download_url = 2;
-  string checksum = 3;
+  string checksum = 3;  // unused; the manifest carries one per platform
+  // Base64 Ed25519 signature over the exact bytes of `manifest`.
   bytes signature = 4;
   bool mandatory = 5;
+  // release.json exactly as published (internal/release.Manifest).
+  bytes manifest = 6;
 }
 
 // ─── Enums ───────────────────────────────────────────────────

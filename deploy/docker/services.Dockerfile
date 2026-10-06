@@ -7,13 +7,15 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY VERSION ./VERSION
 COPY gen ./gen
 COPY internal ./internal
 COPY services ./services
 ARG TARGETOS TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     for svc in gateway control-api scheduler coordinator inference-gateway trust-engine; do \
-      CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/$svc ./services/$svc || exit 1; \
+      CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+        -ldflags="-s -w -X github.com/ayeus/ayeusann/internal/platform.Version=$(cat VERSION)" -o /out/$svc ./services/$svc || exit 1; \
     done
 
 FROM alpine:3.20 AS migrate

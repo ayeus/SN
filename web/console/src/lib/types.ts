@@ -114,6 +114,8 @@ export type Host = {
   status: string;
   kyc_status: string;
   agent_version?: string;
+  // Below the platform's minimum version: connected, but given no work.
+  agent_outdated?: boolean;
   last_heartbeat_at?: string;
   os?: string;
   runtime?: string;

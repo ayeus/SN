@@ -228,6 +228,67 @@ make private-up
 database's structure, a dump is taken to `before-upgrade/` before anything is
 applied.
 
+## Updating the agents on other people's machines
+
+Once a machine is enrolled you cannot reach into it, so the agent updates
+itself. You publish a release; each machine downloads it, checks that it is
+yours, and switches over.
+
+**Once, before you invite anyone:**
+
+```bash
+scripts/private.sh release-key
+make private-up
+```
+
+This creates `~/.ayeusann-platform/release.key` and tells the platform its
+public half. **Copy `release.key` somewhere off this computer** (a password
+manager, a USB stick). Machines pin its public half when they enrol and accept
+updates signed by that key and no other. If the key is lost, no update can
+reach them; each would have to be enrolled again. The platform itself never
+holds the key, so someone who broke into the platform could stop updates but
+could not push software to your friends' machines.
+
+**Each time you want to roll out a new version:**
+
+```bash
+git pull
+make dist-agent dist-agent-linux dist-agent-windows    # the builds you publish
+scripts/private.sh release
+```
+
+Connected machines update within a minute or so; the rest when they next
+connect. Operations shows each machine's agent version.
+
+What a machine does with a release:
+
+1. Checks the release's signature against the key it pinned. Anything else is
+   refused.
+2. Downloads the build for its platform and checks its size and checksum.
+3. Runs the new build once to see that it starts and is the version it claims.
+4. Waits for answers in progress to finish, swaps the files (the old build is
+   kept beside the new one) and starts the new one. Models stay loaded.
+5. If the new build keeps failing to connect for ten minutes, or keeps
+   crashing at start, the old one is put back. That version is left alone for
+   a day and then tried again, in case the platform was the problem. Nothing
+   older than a version the machine has already installed is ever accepted.
+
+To stop giving work to machines on old versions, name the oldest you accept:
+
+```bash
+scripts/private.sh release 0.4.0
+```
+
+Older agents are not turned away, because then they could never update. They
+stay connected, show as "out of date", and are given no new work until they
+have updated. What they are already serving carries on, so a machine in the
+middle of updating does not drop its models.
+
+A machine pins the release key when it enrols, and never takes one from the
+platform afterwards. A machine that enrolled before you ran `release-key` will
+say so in its log and ignore updates; run its install command again, or start
+its agent once with `--release-key <the public key>`.
+
 ## Operating
 
 | Task | Command |
@@ -282,6 +343,7 @@ GPU is refused, and removes everything again. CI runs it on every push.
 | Symptom | Cause and fix |
 |---|---|
 | "No installation found" | Run `make private-init` first. |
+| A machine shows "Agent out of date" and stays that way | It could not update itself (see `ayeusann-agent service status` and its log on that machine). Running the install command on it again installs the current build. |
 | "Accounts on this network are by invitation" | Sign-up needs an invitation link from the operator. The very first account uses the owner link that `make private-status` prints. |
 | "This installation already has its owner" | The owner code was already used. Ask that person for an invitation, or see `scripts/private.sh reset-link` if it was you. |
 | "Docker is not running" | Start Docker Desktop. |

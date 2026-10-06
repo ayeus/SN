@@ -1571,8 +1571,12 @@ type RegisterResponse struct {
 	// to a new address without anyone touching the hosts. Empty when only one
 	// address exists.
 	CoordinatorUrls []string `protobuf:"bytes,11,rep,name=coordinator_urls,json=coordinatorUrls,proto3" json:"coordinator_urls,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Ed25519 public key that signs agent releases. Pinned by the agent on
+	// first sight, like the manifest key; it then accepts updates signed by
+	// this key and no other. Empty when the installation publishes no updates.
+	ReleasePublicKey []byte `protobuf:"bytes,12,opt,name=release_public_key,json=releasePublicKey,proto3" json:"release_public_key,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RegisterResponse) Reset() {
@@ -1678,6 +1682,13 @@ func (x *RegisterResponse) GetManifestPublicKey() []byte {
 func (x *RegisterResponse) GetCoordinatorUrls() []string {
 	if x != nil {
 		return x.CoordinatorUrls
+	}
+	return nil
+}
+
+func (x *RegisterResponse) GetReleasePublicKey() []byte {
+	if x != nil {
+		return x.ReleasePublicKey
 	}
 	return nil
 }
@@ -2121,13 +2132,22 @@ func (x *DrainRequest) GetGracePeriodSeconds() int32 {
 	return 0
 }
 
+// A newer agent has been published. The agent trusts none of this message's
+// plain fields: it verifies `signature` over `manifest` with the release key
+// it pinned at enrolment, and takes the version, file name, size and checksum
+// from the manifest alone.
 type UpdateAvailable struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Version       string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
-	DownloadUrl   string                 `protobuf:"bytes,2,opt,name=download_url,json=downloadUrl,proto3" json:"download_url,omitempty"`
-	Checksum      string                 `protobuf:"bytes,3,opt,name=checksum,proto3" json:"checksum,omitempty"`
-	Signature     []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
-	Mandatory     bool                   `protobuf:"varint,5,opt,name=mandatory,proto3" json:"mandatory,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Version string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
+	// Base address of the published binaries, e.g. https://host/downloads.
+	// Empty means "the address you are connected to, under /downloads".
+	DownloadUrl string `protobuf:"bytes,2,opt,name=download_url,json=downloadUrl,proto3" json:"download_url,omitempty"`
+	Checksum    string `protobuf:"bytes,3,opt,name=checksum,proto3" json:"checksum,omitempty"` // unused; the manifest carries one per platform
+	// Base64 Ed25519 signature over the exact bytes of `manifest`.
+	Signature []byte `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
+	Mandatory bool   `protobuf:"varint,5,opt,name=mandatory,proto3" json:"mandatory,omitempty"`
+	// release.json exactly as published (internal/release.Manifest).
+	Manifest      []byte `protobuf:"bytes,6,opt,name=manifest,proto3" json:"manifest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2195,6 +2215,13 @@ func (x *UpdateAvailable) GetMandatory() bool {
 		return x.Mandatory
 	}
 	return false
+}
+
+func (x *UpdateAvailable) GetManifest() []byte {
+	if x != nil {
+		return x.Manifest
+	}
+	return nil
 }
 
 var File_agent_v1_agent_proto protoreflect.FileDescriptor
@@ -2328,7 +2355,7 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x11inference_request\x18\x05 \x01(\v2#.ayeusann.agent.v1.InferenceRequestH\x00R\x10inferenceRequest\x12O\n" +
 	"\x10inference_cancel\x18\x06 \x01(\v2\".ayeusann.agent.v1.InferenceCancelH\x00R\x0finferenceCancel\x12C\n" +
 	"\fstop_replica\x18\a \x01(\v2\x1e.ayeusann.agent.v1.StopReplicaH\x00R\vstopReplicaB\t\n" +
-	"\apayload\"\x86\x03\n" +
+	"\apayload\"\xb4\x03\n" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x1d\n" +
@@ -2343,7 +2370,8 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x06status\x18\t \x01(\tR\x06status\x12.\n" +
 	"\x13manifest_public_key\x18\n" +
 	" \x01(\fR\x11manifestPublicKey\x12)\n" +
-	"\x10coordinator_urls\x18\v \x03(\tR\x0fcoordinatorUrls\"\xff\x05\n" +
+	"\x10coordinator_urls\x18\v \x03(\tR\x0fcoordinatorUrls\x12,\n" +
+	"\x12release_public_key\x18\f \x01(\fR\x10releasePublicKey\"\xff\x05\n" +
 	"\x10ManifestDispatch\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1d\n" +
 	"\n" +
@@ -2391,13 +2419,14 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"request_id\x18\x01 \x01(\tR\trequestId\"X\n" +
 	"\fDrainRequest\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x120\n" +
-	"\x14grace_period_seconds\x18\x02 \x01(\x05R\x12gracePeriodSeconds\"\xa6\x01\n" +
+	"\x14grace_period_seconds\x18\x02 \x01(\x05R\x12gracePeriodSeconds\"\xc2\x01\n" +
 	"\x0fUpdateAvailable\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12!\n" +
 	"\fdownload_url\x18\x02 \x01(\tR\vdownloadUrl\x12\x1a\n" +
 	"\bchecksum\x18\x03 \x01(\tR\bchecksum\x12\x1c\n" +
 	"\tsignature\x18\x04 \x01(\fR\tsignature\x12\x1c\n" +
-	"\tmandatory\x18\x05 \x01(\bR\tmandatory*\xa1\x02\n" +
+	"\tmandatory\x18\x05 \x01(\bR\tmandatory\x12\x1a\n" +
+	"\bmanifest\x18\x06 \x01(\fR\bmanifest*\xa1\x02\n" +
 	"\fReplicaState\x12\x1d\n" +
 	"\x19REPLICA_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15REPLICA_STATE_PENDING\x10\x01\x12\x19\n" +

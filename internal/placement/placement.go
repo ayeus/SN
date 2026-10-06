@@ -252,6 +252,7 @@ func LoadCandidates(ctx context.Context, q db.Querier, heartbeatWindow time.Dura
 		WHERE h.deleted_at IS NULL
 		  AND h.status IN ('active', 'probation')
 		  AND NOT h.paused
+		  AND NOT h.agent_outdated
 		  AND h.runtime_healthy
 		  AND h.last_heartbeat_at >= NOW() - ($1 * INTERVAL '1 second')
 		  AND g.status = 'available'

@@ -228,11 +228,25 @@ func NewHandler(u Upstreams) http.Handler {
 	mux.HandleFunc("GET /install.ps1", serveFile(u.InstallDir, "install.ps1", "text/plain; charset=utf-8"))
 	mux.HandleFunc("GET /downloads/{file}", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("file")
-		if !strings.HasPrefix(name, "ayeusann-agent-") || strings.ContainsAny(name, `/\`) {
+		// The agent binaries and the signed description of the release they
+		// belong to. Nothing else in the folder is served.
+		manifest := name == "release.json" || name == "release.json.sig"
+		if !(manifest || strings.HasPrefix(name, "ayeusann-agent-")) || strings.ContainsAny(name, `/\`) {
 			http.NotFound(w, r)
 			return
 		}
 		path := filepath.Join(u.DownloadsDir, name)
+		if manifest {
+			if _, err := os.Stat(path); err != nil {
+				httpx.WriteProblem(w, http.StatusNotFound, "No release is published")
+				return
+			}
+			// Always fetched fresh: a cached manifest would hide a new release.
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Type", "application/json")
+			http.ServeFile(w, r, path)
+			return
+		}
 		if _, err := os.Stat(path); err != nil {
 			httpx.WriteProblem(w, http.StatusNotFound, "No prebuilt agent for this platform; the installer will build from source")
 			return
@@ -284,7 +298,7 @@ func main() {
 	port := platform.EnvInt("GATEWAY_PORT", 8080)
 	// The only public port: it also accepts HTTP/2 without TLS for agent
 	// sessions, and keeps its metrics off it.
-	srv, err := platform.NewServer(platform.ServiceConfig{Name: "gateway", Version: "0.3.0", Port: port, H2C: true, PrivateMetrics: true})
+	srv, err := platform.NewServer(platform.ServiceConfig{Name: "gateway", Version: platform.Version, Port: port, H2C: true, PrivateMetrics: true})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}

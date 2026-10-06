@@ -11,6 +11,8 @@
 #   scripts/private.sh restore FILE --replace            replace the database with it
 #   scripts/private.sh address URL                       move to a new address
 #   scripts/private.sh reset-link EMAIL                  a password-reset link, when the operator is locked out
+#   scripts/private.sh release-key                       create the key that signs agent updates (once)
+#   scripts/private.sh release [MIN_VERSION]             sign the agents in dist/agent and publish them as an update
 #
 # Everything that must survive lives outside this repository, in
 # ~/.ayeusann-platform: the secrets file (private.env) and the backups.
@@ -340,6 +342,43 @@ reset_link() {
   echo "  $(setting PUBLIC_URL)/reset?token=$token"
 }
 
+# The release key signs the agent every enrolled machine runs and updates to.
+# It is kept beside the secrets file but is not one of them: no service is
+# ever given it, only its public half.
+release_key() {
+  need_env
+  local key="$PLATFORM_DIR/release.key" pub
+  if [ -f "$key" ]; then
+    pub="$(go run ./cmd/release-sign public -key "$key")"
+    echo "The release key already exists: $key (left untouched)."
+  else
+    pub="$(go run ./cmd/release-sign keygen -out "$key")"
+    chmod 600 "$key"
+    echo "Created $key"
+    echo
+    echo "KEEP A COPY OF THIS FILE SOMEWHERE ELSE, off this computer. Machines pin"
+    echo "its public half when they enrol. If it is lost, no update can ever be"
+    echo "published to them; they would each have to be enrolled again."
+  fi
+  if [ "$(setting RELEASE_PUBLIC_KEY)" != "$pub" ]; then
+    put RELEASE_PUBLIC_KEY "$pub"
+    echo "Recorded its public half in $ENV_FILE. Apply it with: make private-up"
+  fi
+}
+
+# Signs whatever agents are in dist/agent as the current VERSION. The running
+# platform notices within seconds and offers it to every connected machine.
+release() {
+  need_env
+  local key="$PLATFORM_DIR/release.key"
+  [ -f "$key" ] || die "No release key yet. Create it once with: scripts/private.sh release-key"
+  [ -n "$(setting RELEASE_PUBLIC_KEY)" ] || die "The platform does not know the release key. Run: scripts/private.sh release-key, then make private-up"
+  go run ./cmd/release-sign sign -dir dist/agent -version "$(cat VERSION)" -min-version "${1:-0.0.0}" -key "$key"
+  echo
+  echo "Published. Connected machines update themselves within a minute or so;"
+  echo "the rest do when they next connect. Operations > Fleet shows each one's version."
+}
+
 case "${1:-}" in
   init) shift; init "$@" ;;
   up) up ;;
@@ -350,6 +389,8 @@ case "${1:-}" in
   restore) shift; restore "$@" ;;
   address) shift; address "$@" ;;
   reset-link) shift; reset_link "$@" ;;
+  release-key) release_key ;;
+  release) shift; release "$@" ;;
   compose) shift; compose "$@" ;;
-  *) sed -n '2,16p' "$0"; exit 2 ;;
+  *) sed -n '2,18p' "$0"; exit 2 ;;
 esac

@@ -245,6 +245,16 @@ pub fn status(spec: &Spec) -> i32 {
         "  Host id              {}",
         st.host_id.as_deref().unwrap_or("not enrolled")
     );
+    println!("  Version              {}", crate::update::VERSION);
+    if let Some(u) = &st.update {
+        println!(
+            "  Update               {} installed, waiting to connect",
+            u.to
+        );
+    }
+    if let Some(v) = &st.skip_version {
+        println!("  Update               {v} was tried and put back");
+    }
     if let Some(c) = &st.coordinator_url {
         println!("  Platform address     {c}");
     }

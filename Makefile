@@ -3,6 +3,7 @@
 .PHONY: help dev db services web down status build build-go build-agent build-web dist-agent \
         dist-agent-linux dist-agent-windows images prod-up prod-down prod-logs prod-status \
         private-init private-up private-down private-status private-logs private-backup private-restore private-check \
+        release-agent update-check \
         test test-go test-agent test-web smoke-fake lint lint-go lint-agent lint-proto proto fmt migrate migrate-down clean
 
 GO_SERVICES := gateway control-api scheduler coordinator inference-gateway trust-engine
@@ -44,7 +45,7 @@ build: build-go build-agent build-web ## Build everything
 
 build-go: ## Build Go services into ./bin
 	@mkdir -p bin
-	@for svc in $(GO_SERVICES); do echo "building $$svc"; CGO_ENABLED=0 go build -o bin/$$svc ./services/$$svc/; done
+	@for svc in $(GO_SERVICES); do echo "building $$svc"; CGO_ENABLED=0 go build -ldflags "-X github.com/ayeus/ayeusann/internal/platform.Version=$$(cat VERSION)" -o bin/$$svc ./services/$$svc/; done
 
 build-agent: ## Build the host agent (release)
 	cd agent && cargo build --release
@@ -52,10 +53,13 @@ build-agent: ## Build the host agent (release)
 build-web: ## Production build of the web console
 	cd web/console && npm ci --no-audit --no-fund && npm run build
 
+# Copied to a new file and renamed: macOS kills a signed binary that was
+# overwritten in place.
 dist-agent: build-agent ## Publish this machine's agent build for /downloads
 	@mkdir -p dist/agent
 	@os=$$(uname -s | tr A-Z a-z); arch=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
-	 cp agent/target/release/ayeusann-agent dist/agent/ayeusann-agent-$$os-$$arch && \
+	 cp agent/target/release/ayeusann-agent dist/agent/.ayeusann-agent-$$os-$$arch.tmp && \
+	 mv dist/agent/.ayeusann-agent-$$os-$$arch.tmp dist/agent/ayeusann-agent-$$os-$$arch && \
 	 echo "published dist/agent/ayeusann-agent-$$os-$$arch"
 
 dist-agent-linux: ## Build the Linux agent in Docker for /downloads (ARCH=amd64|arm64)
@@ -64,6 +68,17 @@ dist-agent-linux: ## Build the Linux agent in Docker for /downloads (ARCH=amd64|
 dist-agent-windows: ## Cross-compile the Windows agent in Docker for /downloads
 	@mkdir -p dist/agent
 	docker build -f agent/Dockerfile.windows --output type=local,dest=dist/agent .
+
+# The release key signs what every enrolled machine will run. It lives outside
+# the repository and is never given to a running service.
+RELEASE_KEY ?= $(HOME)/.ayeusann-platform/release.key
+
+release-agent: ## Sign the agents in dist/agent as release VERSION (MIN_VERSION=x.y.z to stop giving older agents work)
+	@test -f "$(RELEASE_KEY)" || { echo "No release key at $(RELEASE_KEY). Create it once with: scripts/private.sh release-key"; exit 1; }
+	go run ./cmd/release-sign sign -dir dist/agent -version "$$(cat VERSION)" -min-version "$(or $(MIN_VERSION),0.0.0)" -key "$(RELEASE_KEY)"
+
+update-check: ## End-to-end test of the agent's self-update (needs the dev stack running)
+	scripts/update-check.sh
 
 # ─── Private network (this computer, for you and people you know) ───
 # docs/private-network.md

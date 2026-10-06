@@ -44,8 +44,14 @@ export HOST_PROBATION_DAYS="${HOST_PROBATION_DAYS:-0}"     # dev hosts take work
 export REPUTATION_INTERVAL_SEC="${REPUTATION_INTERVAL_SEC:-300}"
 export PLATFORM_ADMIN_EMAILS="${PLATFORM_ADMIN_EMAILS:-}"
 export INSTALL_DIR="$ROOT/web/install"
-export DOWNLOADS_DIR="$ROOT/dist/agent"
+DOWNLOADS_DIR_GIVEN="${DOWNLOADS_DIR:-}"
+export DOWNLOADS_DIR="${DOWNLOADS_DIR:-$ROOT/dist/agent}"
+# .env supplies defaults; what the caller set for this run wins over it.
+# (scripts/update-check.sh points the stack at its own downloads and key.)
+_given_downloads="${DOWNLOADS_DIR_GIVEN:-}"; _given_key="${RELEASE_PUBLIC_KEY-__unset__}"
 [ -f .env ] && set -a && . ./.env && set +a
+[ -z "$_given_downloads" ] || export DOWNLOADS_DIR="$_given_downloads"
+[ "$_given_key" = "__unset__" ] || export RELEASE_PUBLIC_KEY="$_given_key"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing dependency: $1 ($2)" >&2; exit 1; }; }
 
@@ -115,7 +121,7 @@ services() {
   stop_pids
   for s in "${SERVICES[@]}"; do
     echo "building $s"
-    CGO_ENABLED=0 go build -o "bin/$s" "./services/$s"
+    CGO_ENABLED=0 go build -ldflags "-X github.com/ayeus/ayeusann/internal/platform.Version=$(cat VERSION)" -o "bin/$s" "./services/$s"
   done
   for s in "${SERVICES[@]}"; do
     "./bin/$s" > "$LOGS/$s.log" 2>&1 &

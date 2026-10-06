@@ -76,6 +76,7 @@ make test-agent
 make test-web       # type-check
 scripts/smoke.sh    # end to end against a running `make dev` and Ollama
 make smoke-fake     # the same, plus the second-machine test, with no GPU and no Ollama
+make update-check   # the agent's self-update: install, refuse bad releases, roll back
 ```
 
 `scripts/smoke.sh` signs up, enrols two hosts, deploys, streams a chat, checks

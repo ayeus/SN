@@ -136,13 +136,14 @@ type HostSummary struct {
 const hostColumns = `
 	h.id, h.user_id, h.name, h.hostname, h.tier, h.region, h.overlay_ip, h.kyc_status, h.reputation, h.status,
 	h.hw_fingerprint, h.agent_version, h.last_heartbeat_at, h.os, h.runtime, h.runtime_healthy, h.cached_models,
-	h.paused, h.probation_until, h.created_at, h.updated_at`
+	h.paused, h.probation_until, h.created_at, h.updated_at, h.agent_outdated`
 
 func scanHost(row pgx.Row, extra ...any) (domain.Host, error) {
 	var h domain.Host
 	dest := append([]any{&h.ID, &h.UserID, &h.Name, &h.Hostname, &h.Tier, &h.Region, &h.OverlayIP, &h.KycStatus,
 		&h.Reputation, &h.Status, &h.HwFingerprint, &h.AgentVersion, &h.LastHeartbeatAt, &h.OS, &h.Runtime,
-		&h.RuntimeHealthy, &h.CachedModels, &h.Paused, &h.ProbationUntil, &h.CreatedAt, &h.UpdatedAt}, extra...)
+		&h.RuntimeHealthy, &h.CachedModels, &h.Paused, &h.ProbationUntil, &h.CreatedAt, &h.UpdatedAt,
+		&h.AgentOutdated}, extra...)
 	err := row.Scan(dest...)
 	return h, err
 }

@@ -6,6 +6,7 @@
 FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+COPY VERSION ./VERSION
 COPY proto ./proto
 COPY agent ./agent
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/agent/target \

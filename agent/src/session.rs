@@ -48,6 +48,10 @@ struct Replica {
     serving: bool,
 }
 
+/// Tells the coordinator this agent can replace its own binary from a signed
+/// release.
+pub const CAP_SELF_UPDATE: &str = "self-update";
+
 /// How long the coordinator has to answer a new session.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -124,6 +128,11 @@ impl Shared {
     }
 
     /// Whether this agent holds anything in the runtime for the platform.
+    /// Requests being answered right now.
+    pub fn busy(&self) -> usize {
+        self.inflight.lock().unwrap().len()
+    }
+
     pub fn has_replicas(&self) -> bool {
         !self.replicas.lock().unwrap().is_empty() || !self.loose.lock().unwrap().is_empty()
     }
@@ -188,6 +197,8 @@ pub struct Session<'a> {
     pub heartbeat: Duration,
     pub shared: Arc<Shared>,
     pub fake_gpu: bool,
+    /// Where update offers go. None when this agent does not update itself.
+    pub updates: Option<tokio::sync::mpsc::Sender<crate::update::Offer>>,
 }
 
 async fn channel(url: &str) -> Result<Channel> {
@@ -281,13 +292,19 @@ impl Session<'_> {
             kernel: self.facts.kernel.clone(),
             region: self.facts.region.clone(),
             gpus: self.facts.gpus.iter().map(to_proto_gpu).collect(),
-            agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            agent_version: crate::update::VERSION.to_string(),
             hardware_fingerprint: self.facts.fingerprint.clone(),
             wg_public_key: self.facts.wg_public_key.clone(),
             runtime: self.runtime.kind.name().to_string(),
             cached_models: cached,
             replicas: held,
-            capabilities: vec![CAP_REPLICA_REPORT.to_string()],
+            capabilities: {
+                let mut caps = vec![CAP_REPLICA_REPORT.to_string()];
+                if self.updates.is_some() {
+                    caps.push(CAP_SELF_UPDATE.to_string());
+                }
+                caps
+            },
             legacy_fingerprints: self.facts.legacy_fingerprints.clone(),
         };
 
@@ -341,7 +358,7 @@ impl Session<'_> {
                     | tonic::Code::FailedPrecondition
                     | tonic::Code::InvalidArgument => {
                         if credential.is_some() && status.code() == tonic::Code::Unauthenticated {
-                            state::clear(&self.data_dir);
+                            state::clear_enrolment(&self.data_dir);
                         }
                         Outcome::Rejected(reason)
                     }
@@ -367,6 +384,39 @@ impl Session<'_> {
                 ));
             }
             _ => st.manifest_public_key = Some(offered),
+        }
+        // The release key is pinned at enrolment and only then. Enrolling is
+        // something the machine's owner does, with a token; a reconnect is
+        // not. If any later session could fill in a missing key, whoever
+        // controlled the platform could name their own and sign this
+        // machine's software from then on. So enrolment records what the
+        // platform named, including "nothing", and afterwards the record is
+        // only ever changed from this machine (--release-key, or enrolling
+        // again).
+        let offered = if resp.release_public_key.is_empty() {
+            String::new()
+        } else {
+            base64::engine::general_purpose::STANDARD.encode(&resp.release_public_key)
+        };
+        if credential.is_none() {
+            st.release_public_key = Some(offered);
+        } else if !offered.is_empty() {
+            match st.release_public_key.as_deref() {
+                Some(pinned) if pinned == offered => {}
+                Some("") | None => warn!("the platform publishes signed updates, but this machine was enrolled before it named a release key, so it will not accept them. To accept them, run the install command again, or start the agent once with --release-key <key>."),
+                Some(_) => warn!("the platform now names a different release key; keeping the one pinned at enrolment, so its updates will be refused. Enrol again to accept the new key."),
+            }
+        }
+        // Connected: an update that was waiting to prove itself has.
+        if st
+            .update
+            .as_ref()
+            .is_some_and(|u| u.to == crate::update::VERSION)
+        {
+            info!(version = crate::update::VERSION, "update confirmed");
+            st.update = None;
+            st.skip_version = None;
+            st.skip_until = None;
         }
         if !resp.host_credential.is_empty() {
             st.host_credential = Some(resp.host_credential.clone());
@@ -440,7 +490,16 @@ impl Session<'_> {
                     warn!(reason = %d.reason, "coordinator requested drain");
                 }
                 Some(coordinator_message::Payload::Update(u)) => {
-                    info!(version = %u.version, "agent update available");
+                    info!(version = %u.version, "a newer agent is published");
+                    if let Some(updates) = &self.updates {
+                        // Handed to the updater; never waited on here.
+                        let _ = updates.try_send(crate::update::Offer {
+                            manifest: u.manifest,
+                            signature: u.signature,
+                            download_url: u.download_url,
+                            connected_via: self.coordinator_url.to_string(),
+                        });
+                    }
                 }
                 _ => {}
             }

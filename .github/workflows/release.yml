@@ -26,6 +26,10 @@ jobs:
           - { name: windows-amd64, runner: ubuntu-22.04, target: x86_64-pc-windows-gnu, ext: .exe }
     steps:
       - uses: actions/checkout@v4
+      - name: The tag is the version
+        shell: bash
+        run: |
+          [ "v$(cat VERSION)" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} does not match VERSION $(cat VERSION)"; exit 1; }
       - uses: dtolnay/rust-toolchain@stable
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'

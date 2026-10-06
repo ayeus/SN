@@ -33,6 +33,11 @@ cleanup() {
     scripts/private.sh compose logs --no-color --tail=300 > logs/private-stack.log 2>&1 || true
     echo "The stack's logs were saved to logs/private-stack.log" >&2
   fi
+  if [ -n "${PUBLISHED_HERE:-}" ]; then
+    # The release signed with this run's throwaway key must not stay behind.
+    rm -f dist/agent/release.json dist/agent/release.json.sig
+    mv "$AYEUSANN_PLATFORM_DIR"/own-release/release.json* dist/agent/ 2>/dev/null || true
+  fi
   if [ "${KEEP:-0}" = 1 ]; then
     echo "Left running at $BASE (files in $AYEUSANN_PLATFORM_DIR). Remove with:"
     echo "  AYEUSANN_PLATFORM_DIR=$AYEUSANN_PLATFORM_DIR PRIVATE_PROJECT=$PRIVATE_PROJECT scripts/private.sh compose down -v"
@@ -143,7 +148,28 @@ fi
 [ "$(login before@restore.example.com)" = 200 ] || fail "a damaged dump damaged the live database, or the services did not come back"
 pass "a damaged dump is refused, the database is kept and the services come back"
 
-# 7. An operator who forgot their password gets back in from this computer.
+# 7. Agent releases: a key is made once, its public half reaches the platform,
+# and a signed release is published where machines download it.
+RELEASED="$AYEUSANN_PLATFORM_DIR/released"
+scripts/private.sh release-key >/dev/null || fail "release-key failed"
+[ -f "$AYEUSANN_PLATFORM_DIR/release.key" ] || fail "no release key was written"
+KEY_BEFORE=$(cksum < "$AYEUSANN_PLATFORM_DIR/release.key")
+scripts/private.sh release-key >/dev/null
+[ "$(cksum < "$AYEUSANN_PLATFORM_DIR/release.key")" = "$KEY_BEFORE" ] || fail "a second release-key replaced the key"
+ALLOW_FAKE_GPU=true scripts/private.sh up >/dev/null 2>&1 || fail "restart with the release key failed"
+# A release already published from this checkout is set aside and put back.
+mkdir -p "$AYEUSANN_PLATFORM_DIR/own-release"
+mv dist/agent/release.json dist/agent/release.json.sig "$AYEUSANN_PLATFORM_DIR/own-release/" 2>/dev/null || true
+PUBLISHED_HERE=1
+scripts/private.sh release > "$RELEASED" 2>&1 || { cat "$RELEASED"; fail "publishing a release failed"; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/downloads/release.json")" = 200 ] || fail "the release manifest is not served"
+for _ in $(seq 1 40); do
+  scripts/private.sh compose logs --no-color coordinator 2>/dev/null | grep -q "agent release loaded" && break; sleep 1
+done
+scripts/private.sh compose logs --no-color coordinator 2>/dev/null | grep -q "agent release loaded" || fail "the coordinator did not pick up the signed release"
+pass "a release key is created once, and a signed release is published and picked up"
+
+# 8. An operator who forgot their password gets back in from this computer.
 LINK=$(scripts/private.sh reset-link "$OWNER_EMAIL" | sed -n 's/.*reset?token=\([0-9a-f]*\).*/\1/p')
 [ -n "$LINK" ] || fail "reset-link printed no link"
 OWNER_PW="Recovered-Check-2027"
@@ -153,7 +179,7 @@ op >/dev/null
 if scripts/private.sh reset-link nobody@private-check.example.com >/dev/null 2>&1; then fail "a reset link was made for an account that does not exist"; fi
 pass "a locked-out operator gets a reset link from this computer"
 
-# 8. Without the test switch, a simulated GPU cannot join.
+# 9. Without the test switch, a simulated GPU cannot join.
 scripts/private.sh up >/dev/null 2>&1 || fail "restart without ALLOW_FAKE_GPU failed"
 [ "$(login before@restore.example.com)" = 200 ] || fail "a member could not sign in"
 TOKEN=$(field access_token)

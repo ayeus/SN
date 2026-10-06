@@ -68,6 +68,15 @@ Tagged releases also attach binaries for Linux and Apple-silicon macOS (see
 New files are served immediately; no restart is needed. A platform without a
 binary falls back to building from source on the host.
 
+## Agent updates
+
+Enrolled machines update themselves from releases you sign. Create the release
+key once, away from the server (`go run ./cmd/release-sign keygen -out
+release.key` prints the public half), put the public half in
+`RELEASE_PUBLIC_KEY`, and publish with `make release-agent RELEASE_KEY=release.key`
+after building the agents. The server never holds the private key. The full
+description is in [private-network.md](private-network.md#updating-the-agents-on-other-peoples-machines).
+
 ## Updating
 
 ```bash

@@ -18,6 +18,9 @@ var errSessionClosed = errors.New("host disconnected")
 type session struct {
 	hostID string
 	stream agentv1.AgentService_SessionServer
+	// What the agent said about itself when it registered.
+	agentVersion string
+	capabilities []string
 
 	sendMu sync.Mutex
 
@@ -178,6 +181,17 @@ func (r *registry) remove(s *session) bool {
 	delete(r.byHost, s.hostID)
 	platform.HostsConnected.Set(float64(len(r.byHost)))
 	return true
+}
+
+// all returns the current sessions.
+func (r *registry) all() []*session {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*session, 0, len(r.byHost))
+	for _, s := range r.byHost {
+		out = append(out, s)
+	}
+	return out
 }
 
 func (r *registry) connected() []string {

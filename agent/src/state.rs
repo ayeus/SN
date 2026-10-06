@@ -36,6 +36,27 @@ pub struct State {
     pub pending_token: Option<String>,
     /// Why the coordinator last refused this machine, if it did.
     pub last_error: Option<String>,
+
+    /// Base64 Ed25519 public key that signs agent releases, pinned the first
+    /// time the platform names one. Updates signed by any other key are
+    /// refused.
+    #[serde(default)]
+    pub release_public_key: Option<String>,
+    /// An update that has been installed and has not yet connected.
+    #[serde(default)]
+    pub update: Option<crate::update::Pending>,
+    /// A version that was tried and put back. It is left alone until
+    /// `skip_until` (Unix seconds): the build may have been at fault, or the
+    /// platform may simply have been away, and only time tells which.
+    #[serde(default)]
+    pub skip_version: Option<String>,
+    #[serde(default)]
+    pub skip_until: Option<i64>,
+    /// The newest version this machine has installed. Nothing older is ever
+    /// accepted afterwards, so a rollback cannot be used to walk a machine
+    /// back to an old release that happens to carry a valid signature.
+    #[serde(default)]
+    pub highest_version: Option<String>,
 }
 
 pub fn path(data_dir: &Path) -> PathBuf {
@@ -67,6 +88,24 @@ pub fn save(data_dir: &Path, state: &State) -> Result<()> {
 
 pub fn clear(data_dir: &Path) {
     let _ = std::fs::remove_file(path(data_dir));
+}
+
+/// Forgets the enrolment (the platform no longer recognises the credential)
+/// but keeps what the machine knows about its own software: an update waiting
+/// to prove itself still has to be put back if it cannot connect.
+pub fn clear_enrolment(data_dir: &Path) {
+    let old = load(data_dir);
+    let kept = State {
+        update: old.update,
+        skip_version: old.skip_version,
+        skip_until: old.skip_until,
+        highest_version: old.highest_version,
+        ..State::default()
+    };
+    clear(data_dir);
+    if kept.update.is_some() || kept.skip_version.is_some() || kept.highest_version.is_some() {
+        let _ = save(data_dir, &kept);
+    }
 }
 
 /// The addresses to try, in order: the one that worked last, the one this

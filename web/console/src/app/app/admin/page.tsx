@@ -60,7 +60,11 @@ export default function AdminPage() {
                 <tr key={r.host.id}>
                   <td>
                     <div className="font-medium">{r.host.name}</div>
-                    <div className="font-mono text-[12px] text-muted">{r.host.id.slice(0, 8)}</div>
+                    <div className="font-mono text-[12px] text-muted">
+                      {r.host.id.slice(0, 8)}
+                      {r.host.agent_version ? ` · agent ${r.host.agent_version}` : ""}
+                      {r.host.agent_outdated && <span className="text-danger"> (out of date)</span>}
+                    </div>
                   </td>
                   <td className="text-[13px]">{r.owner_email ?? "-"}</td>
                   <td>{r.online ? <StateBadge state={r.host.status} /> : <StateBadge state="offline" />}</td>

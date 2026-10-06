@@ -7,11 +7,13 @@ package main
 
 import (
 	"context"
+	"github.com/ayeus/ayeusann/internal/release"
 	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	agentv1 "github.com/ayeus/ayeusann/gen/go/agent/v1"
@@ -77,6 +79,22 @@ func main() {
 		coordinatorURLs: platform.CoordinatorURLs(),
 		allowFakeGPU:    platform.AllowsFakeGPU(),
 	}
+	// Agent updates: the coordinator checks what is published against the
+	// release key's public half and passes it on. It never holds the private
+	// half, so it cannot make an update, only relay one.
+	if pubB64 := platform.Env("RELEASE_PUBLIC_KEY", ""); pubB64 != "" {
+		pub, err := release.PublicKey(pubB64)
+		if err != nil {
+			log.Fatalf("configuration error: RELEASE_PUBLIC_KEY: %v", err)
+		}
+		downloads := ""
+		if base := platform.PublicURL(); base != "" && platform.IsProduction() {
+			downloads = strings.TrimRight(base, "/") + "/downloads"
+		}
+		agentServer.releases = newReleases(platform.Env("DOWNLOADS_DIR", "dist/agent"), pub, downloads, logger)
+	} else {
+		logger.Info("no RELEASE_PUBLIC_KEY: agents will not be offered updates")
+	}
 
 	// gRPC: keepalives detect dead NAT mappings on home/campus networks long
 	// before TCP would; TLS is used whenever a certificate is configured.
@@ -128,8 +146,9 @@ func main() {
 	}()
 
 	go agentServer.runLoops(ctx, platform.HeartbeatTimeout())
+	go agentServer.watchReleases(ctx, 15*time.Second)
 
-	srv, err := platform.NewServer(platform.ServiceConfig{Name: "coordinator", Version: "0.3.0", Port: port})
+	srv, err := platform.NewServer(platform.ServiceConfig{Name: "coordinator", Version: platform.Version, Port: port})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}

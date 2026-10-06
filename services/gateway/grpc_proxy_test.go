@@ -6,9 +6,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -240,6 +242,29 @@ func TestGatewayStillServesOrdinaryRequestsOnTheSamePort(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || resp.ProtoMajor != 1 || string(body) != "#!/bin/sh\necho install\n" {
 		t.Fatalf("GET /install.sh over HTTP/1 = %d %s %q", resp.StatusCode, resp.Proto, body)
+	}
+
+	// Downloads: the agent binaries and the release manifest, nothing else.
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"ayeusann-agent-linux-amd64": "binary", "release.json": `{"version":"1.0.0"}`, "release.json.sig": "sig", "release.key": "SECRET",
+	} {
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644)
+	}
+	elsewhere, _ := url.Parse("http://127.0.0.1:1")
+	dl := NewHandler(Upstreams{ControlAPI: elsewhere, Inference: elsewhere, Trust: elsewhere, CoordinatorGRPC: elsewhere, InstallDir: dir, DownloadsDir: dir})
+	for path, want := range map[string]int{
+		"/downloads/ayeusann-agent-linux-amd64": 200, "/downloads/release.json": 200, "/downloads/release.json.sig": 200,
+		"/downloads/release.key": 404, "/downloads/ayeusann-agent-windows-amd64.exe": 404, "/downloads/..%2Frelease.key": 404,
+	} {
+		rec := httptest.NewRecorder()
+		dl.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != want {
+			t.Errorf("GET %s = %d, want %d", path, rec.Code, want)
+		}
+		if strings.Contains(rec.Body.String(), "SECRET") {
+			t.Fatalf("GET %s served a file that is not a download", path)
+		}
 	}
 
 	// A browser or script that stumbles on the agent address gets a plain answer.

@@ -50,6 +50,9 @@ type AgentServer struct {
 	// end-to-end tests only).
 	allowFakeGPU bool
 
+	// releases is the published agent release; nil when none is configured.
+	releases *releases
+
 	// Liveness bookkeeping, touched only by the control loop (loops.go).
 	clock      func() time.Time // wall clock; replaced in tests
 	lastTick   time.Time        // when the loop last completed a pass
@@ -120,6 +123,7 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 				Status:            en.status,
 				ManifestPublicKey: s.signer.PublicKey(),
 				CoordinatorUrls:   s.coordinatorURLs,
+				ReleasePublicKey:  s.releases.publicKey(),
 			},
 		},
 	}); err != nil {
@@ -142,8 +146,18 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 	}
 
 	sess := newSession(en.hostID, stream)
+	sess.agentVersion, sess.capabilities = reg.GetAgentVersion(), reg.GetCapabilities()
 	if old := s.sessions.put(sess); old != nil {
 		old.close()
+	}
+
+	// An agent below the minimum version is not turned away: it could then
+	// never update. It is marked, given no new work, and offered the release.
+	// Judged after the session is installed, so a release published at this
+	// very moment either sees this session or is seen here.
+	outdated := s.releases.outdated(reg.GetAgentVersion())
+	if _, err := s.db.Pool.Exec(ctx, `UPDATE hosts SET agent_outdated = $2 WHERE id = $1 AND agent_outdated <> $2;`, en.hostID, outdated); err != nil {
+		s.log.Error("could not record a host's version status", "host_id", en.hostID, "err", err)
 	}
 	s.log.Info("agent connected", "host_id", en.hostID, "tier", en.tier, "status", en.status,
 		"runtime", reg.GetRuntime(), "still_serving", len(reg.GetReplicas()), "to_stop", len(orphans))
@@ -154,6 +168,13 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 			s.log.Info("agent disconnected", "host_id", en.hostID)
 		}
 	}()
+
+	if msg := s.releases.offer(sess.agentVersion, sess.capabilities); msg != nil {
+		s.log.Info("offering an agent the current release", "host_id", en.hostID, "has", sess.agentVersion, "outdated", outdated)
+		if err := sess.send(msg); err != nil {
+			return err
+		}
+	}
 
 	// The agent is holding models the platform no longer wants there.
 	for _, id := range orphans {

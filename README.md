@@ -74,6 +74,8 @@ To verify the whole flow automatically, run `scripts/smoke.sh`. It signs up, enr
 | `make dist-agent-windows` | Cross-compile the Windows agent in Docker for the installer |
 | `make private-up` | Start a private installation on this computer ([guide](docs/private-network.md)) |
 | `make private-check` | Prove the private installation works, on a throwaway copy |
+| `make release-agent` | Sign the agents in `dist/agent` as a release that enrolled machines update to |
+| `make update-check` | End-to-end test of the agent's self-update (needs `make dev` running) |
 | `make prod-up` | Build, migrate and start the production stack ([guide](docs/deployment.md)) |
 
 Logs are written to `logs/<service>.log`.
@@ -126,6 +128,8 @@ _archive/         Superseded code kept for reference (old frontends, standalone 
 - Failover
 - Host onboarding from other machines: one-line installers for macOS, Linux and Windows, over one address and one port
 - A private installation on one computer, with generated secrets and checked backups
+- Sessions that survive reconnects, platform restarts and a sleeping platform without reloading models
+- Signed agent releases: enrolled machines update themselves, verify the signature, and roll back a version that cannot connect
 - Reputation scoring
 - Ops console
 
