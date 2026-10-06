@@ -53,7 +53,9 @@ infra() {
   need docker "https://docs.docker.com/get-docker/"
   docker compose -f "$COMPOSE" up -d postgres redis
   printf "waiting for Postgres"
-  until docker exec ann-postgres pg_isready -U ayeusann >/dev/null 2>&1; do printf "."; sleep 1; done
+  # Over TCP, not the socket: on first boot the image runs a temporary server
+  # on the socket alone, then restarts. "Ready" on the socket can be that one.
+  until docker exec ann-postgres pg_isready -h 127.0.0.1 -U ayeusann >/dev/null 2>&1; do printf "."; sleep 1; done
   echo " ready"
 }
 
