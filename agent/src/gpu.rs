@@ -102,8 +102,9 @@ impl GpuDetector {
                     }
                 }
 
-                // Deterministic SHA-256 fingerprint from immutable hardware identity
-                let fp_input = format!("{}:{}:{}", uuid, driver_version, vram_gb);
+                // Identifies the card, not its software: the driver version is
+                // reported separately and changes with every update.
+                let fp_input = format!("{}:{}", uuid, vram_gb);
                 let fingerprint = sha256_hex(fp_input.as_bytes());
 
                 info!(
@@ -260,6 +261,22 @@ impl GpuDetector {
             fingerprint,
         })
     }
+}
+
+/// The per-GPU fingerprint agents up to 0.3 computed, kept only to recognise
+/// machines they enrolled (see `legacy_fingerprint` in main.rs). For NVIDIA it
+/// included the driver version; Apple's is unchanged.
+pub fn legacy_fingerprint(g: &GpuInfo, instance: Option<&str>) -> String {
+    if g.uuid.starts_with("apple-soc-") {
+        return g.fingerprint.clone();
+    }
+    // --instance appends to the id after detection; 0.3 hashed it before.
+    let suffix = instance.map(|i| format!("-instance-{i}"));
+    let uuid = suffix
+        .as_deref()
+        .and_then(|s| g.uuid.strip_suffix(s))
+        .unwrap_or(&g.uuid);
+    sha256_hex(format!("{}:{}:{}", uuid, g.driver_version, g.vram_gb).as_bytes())
 }
 
 /// Computes a standard hex SHA-256 string prefixed with "sha256:"

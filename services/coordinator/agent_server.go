@@ -19,6 +19,7 @@ import (
 	"github.com/ayeus/ayeusann/internal/lifecycle"
 	"github.com/ayeus/ayeusann/internal/manifest"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -133,7 +134,11 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 	// loop can see the new session and send it anything.
 	orphans, err := s.reconcileOnRegister(ctx, en.hostID, reg)
 	if err != nil {
+		// Without the handshake nothing guarantees the two sides agree, and a
+		// session installed anyway could leave replicas stranded. Ending the
+		// stream makes the agent come back and try again.
 		s.log.Error("failed to reconcile replicas on reconnect", "host_id", en.hostID, "err", err)
+		return status.Error(codes.Unavailable, "the platform could not complete the handshake; reconnect")
 	}
 
 	sess := newSession(en.hostID, stream)
@@ -239,20 +244,47 @@ func (s *AgentServer) resume(ctx context.Context, reg *agentv1.RegisterRequest) 
 	if en.status == domain.HostStatusBanned {
 		return nil, codes.PermissionDenied, "this host has been banned from the network"
 	}
-	// UML §5: OFFLINE → ACTIVE requires re-verification. Different hardware
-	// behind the same credential is not the machine that was benchmarked.
-	if fingerprint != nil && reg.GetHardwareFingerprint() != "" && *fingerprint != reg.GetHardwareFingerprint() {
-		return nil, codes.PermissionDenied, "hardware fingerprint changed since enrolment; re-enrol this machine with a new registration token"
-	}
 	if reason := s.refuseGPUs(reg.GetGpus()); reason != "" {
 		return nil, codes.FailedPrecondition, reason
 	}
 
+	// The credential is what proves which host this is. The fingerprint is a
+	// description of the machine, and descriptions change: older agents built
+	// it from the GPU and its driver version, so a routine driver update made
+	// a machine look like a different one and locked it out for good. A valid
+	// credential with a new fingerprint is therefore accepted and the record
+	// brought up to date.
+	//
+	// The one case where the record is not updated is a fingerprint another
+	// host already has. Two machines built from the same disk image share a
+	// machine id, and a fingerprint is a string the agent chooses, so this
+	// can be innocent or not; either way the host is not refused (that would
+	// lock a machine out again, or let one host shut another out by claiming
+	// its fingerprint first) and it keeps the fingerprint it had.
+	newFP := reg.GetHardwareFingerprint()
+	changed := newFP != "" && (fingerprint == nil || *fingerprint != newFP)
+	if changed {
+		var other string
+		err := s.db.Pool.QueryRow(ctx, `
+			SELECT id FROM hosts WHERE hw_fingerprint = $1 AND id <> $2 AND deleted_at IS NULL;
+		`, newFP, en.hostID).Scan(&other)
+		switch {
+		case err == nil:
+			s.log.Warn("two hosts report the same machine fingerprint (machines cloned from one image, or a copied data folder); keeping the stored one",
+				"host_id", en.hostID, "other_host", other)
+			newFP, changed = "", false
+		case !errors.Is(err, pgx.ErrNoRows):
+			return nil, codes.Internal, "failed to check the machine's identity"
+		}
+	}
+
+	var lost []string
 	err = s.db.ExecTx(ctx, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
 			UPDATE hosts
 			SET hostname = $2, agent_version = $3, os = $4, runtime = NULLIF($5, ''),
 			    cached_models = $6, last_heartbeat_at = NOW(), updated_at = NOW(),
+			    hw_fingerprint = COALESCE(NULLIF($7, ''), hw_fingerprint),
 			    status = CASE
 			        WHEN status = 'offline' AND probation_until IS NOT NULL AND probation_until > NOW() THEN 'probation'
 			        WHEN status = 'offline' THEN 'active'
@@ -260,14 +292,27 @@ func (s *AgentServer) resume(ctx context.Context, reg *agentv1.RegisterRequest) 
 			WHERE id = $1
 			RETURNING status;
 		`, en.hostID, reg.GetHostname(), reg.GetAgentVersion(), reg.GetOs(), reg.GetRuntime(),
-			nonNil(reg.GetCachedModels())).Scan(&en.status); err != nil {
+			nonNil(reg.GetCachedModels()), newFP).Scan(&en.status); err != nil {
 			return err
 		}
-		return upsertGPUs(ctx, tx, en.hostID, reg.GetGpus())
+		var err error
+		lost, err = syncGPUs(ctx, tx, en.hostID, reg.GetGpus())
+		return err
 	})
 	if err != nil {
+		if isUniqueViolation(err) {
+			// Another host took that fingerprint between the check and the
+			// update. The agent retries, and the check then sees it.
+			return nil, codes.Unavailable, "the platform is busy; reconnect"
+		}
 		s.log.Error("host resume failed", "host_id", en.hostID, "err", err)
 		return nil, codes.Internal, "failed to resume host session"
+	}
+	if changed && fingerprint != nil {
+		s.log.Info("a host's machine fingerprint changed and was updated", "host_id", en.hostID)
+	}
+	if len(lost) > 0 {
+		s.log.Warn("GPUs are no longer present on a host", "host_id", en.hostID, "gpus", lost)
 	}
 	return &en, codes.OK, ""
 }
@@ -304,11 +349,17 @@ func (s *AgentServer) enrol(ctx context.Context, reg *agentv1.RegisterRequest) (
 	}
 
 	// A machine belongs to one account. Re-enrolling it under the same account
-	// rotates its credential; under another account it is refused.
+	// rotates its credential; under another account it is refused. The machine
+	// is recognised by its fingerprint, or by one an older agent computed for
+	// it, so upgrading the agent and enrolling again does not make a second
+	// host out of the same computer.
+	known := append([]string{reg.GetHardwareFingerprint()}, reg.GetLegacyFingerprints()...)
 	var existingID, existingUser *string
 	err = s.db.Pool.QueryRow(ctx, `
-		SELECT id::TEXT, user_id::TEXT FROM hosts WHERE hw_fingerprint = $1 AND deleted_at IS NULL;
-	`, reg.GetHardwareFingerprint()).Scan(&existingID, &existingUser)
+		SELECT id::TEXT, user_id::TEXT FROM hosts
+		WHERE hw_fingerprint = ANY($1) AND deleted_at IS NULL
+		ORDER BY (user_id::TEXT = $3) DESC, (hw_fingerprint = $2) DESC, created_at ASC LIMIT 1;
+	`, known, reg.GetHardwareFingerprint(), claims.UserID).Scan(&existingID, &existingUser)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, codes.Internal, "failed to check existing enrolment"
 	}
@@ -343,28 +394,56 @@ func (s *AgentServer) enrol(ctx context.Context, reg *agentv1.RegisterRequest) (
 	}
 
 	err = s.db.ExecTx(ctx, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `
-			INSERT INTO hosts (user_id, org_id, name, hostname, tier, region, kyc_status, reputation, status,
-			                   hw_fingerprint, agent_version, os, runtime, cached_models, credential_hash, last_heartbeat_at)
-			VALUES ($1, NULLIF($2, '')::UUID, $3, $3, $4, $5, 'pending', 50, 'benchmarking',
-			        $6, $7, $8, NULLIF($9, ''), $10, $11, NOW())
-			ON CONFLICT (hw_fingerprint) WHERE hw_fingerprint IS NOT NULL DO UPDATE SET
-			    tier = EXCLUDED.tier,
-			    region = EXCLUDED.region,
-			    hostname = EXCLUDED.hostname,
-			    status = CASE WHEN hosts.status = 'banned' THEN 'banned' ELSE 'benchmarking' END,
-			    agent_version = EXCLUDED.agent_version,
-			    os = EXCLUDED.os,
-			    runtime = EXCLUDED.runtime,
-			    cached_models = EXCLUDED.cached_models,
-			    credential_hash = EXCLUDED.credential_hash,
-			    last_heartbeat_at = NOW(),
-			    updated_at = NOW()
-			RETURNING id, status;
-		`, claims.UserID, claims.OrgID, name, tier, region,
-			reg.GetHardwareFingerprint(), reg.GetAgentVersion(), reg.GetOs(), reg.GetRuntime(),
-			nonNil(reg.GetCachedModels()), hash,
-		).Scan(&en.hostID, &en.status)
+		var err error
+		if existingID != nil {
+			// The account's own record of this machine: rotate its credential
+			// and bring it up to date. Its fingerprint moves to the current
+			// one unless another host already has that (see resume).
+			err = tx.QueryRow(ctx, `
+				UPDATE hosts h SET
+				    tier = $2, region = $3, hostname = $4,
+				    status = CASE WHEN h.status = 'banned' THEN 'banned' ELSE 'benchmarking' END,
+				    hw_fingerprint = CASE WHEN EXISTS (
+				            SELECT 1 FROM hosts o WHERE o.hw_fingerprint = $5 AND o.id <> h.id)
+				        THEN h.hw_fingerprint ELSE $5 END,
+				    agent_version = $6, os = $7, runtime = NULLIF($8, ''), cached_models = $9,
+				    credential_hash = $10, last_heartbeat_at = NOW(), updated_at = NOW()
+				WHERE h.id = $1::UUID
+				RETURNING h.id, h.status;
+			`, *existingID, tier, region, name, reg.GetHardwareFingerprint(), reg.GetAgentVersion(), reg.GetOs(),
+				reg.GetRuntime(), nonNil(reg.GetCachedModels()), hash,
+			).Scan(&en.hostID, &en.status)
+		} else {
+			// A new machine. The conflict clause is only for two enrolments of
+			// the same machine racing each other, and it never reaches into
+			// another account's record.
+			err = tx.QueryRow(ctx, `
+				INSERT INTO hosts (user_id, org_id, name, hostname, tier, region, kyc_status, reputation, status,
+				                   hw_fingerprint, agent_version, os, runtime, cached_models, credential_hash, last_heartbeat_at)
+				VALUES ($1, NULLIF($2, '')::UUID, $3, $3, $4, $5, 'pending', 50, 'benchmarking',
+				        $6, $7, $8, NULLIF($9, ''), $10, $11, NOW())
+				ON CONFLICT (hw_fingerprint) WHERE hw_fingerprint IS NOT NULL DO UPDATE SET
+				    tier = EXCLUDED.tier,
+				    region = EXCLUDED.region,
+				    hostname = EXCLUDED.hostname,
+				    status = CASE WHEN hosts.status = 'banned' THEN 'banned' ELSE 'benchmarking' END,
+				    agent_version = EXCLUDED.agent_version,
+				    os = EXCLUDED.os,
+				    runtime = EXCLUDED.runtime,
+				    cached_models = EXCLUDED.cached_models,
+				    credential_hash = EXCLUDED.credential_hash,
+				    last_heartbeat_at = NOW(),
+				    updated_at = NOW()
+				WHERE hosts.user_id = EXCLUDED.user_id
+				RETURNING id, status;
+			`, claims.UserID, claims.OrgID, name, tier, region,
+				reg.GetHardwareFingerprint(), reg.GetAgentVersion(), reg.GetOs(), reg.GetRuntime(),
+				nonNil(reg.GetCachedModels()), hash,
+			).Scan(&en.hostID, &en.status)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errOtherAccount
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("register host: %w", err)
 		}
@@ -385,11 +464,15 @@ func (s *AgentServer) enrol(ctx context.Context, reg *agentv1.RegisterRequest) (
 		`, en.hostID, claims.TokenID()); err != nil {
 			return fmt.Errorf("record token consumption: %w", err)
 		}
-		return upsertGPUs(ctx, tx, en.hostID, reg.GetGpus())
+		_, err = syncGPUs(ctx, tx, en.hostID, reg.GetGpus())
+		return err
 	})
 	if err != nil {
 		if errors.Is(err, errBanned) {
 			return nil, codes.PermissionDenied, "this machine has been banned from the network"
+		}
+		if errors.Is(err, errOtherAccount) {
+			return nil, codes.PermissionDenied, "this machine is already enrolled to another account"
 		}
 		s.log.Error("host enrolment failed", "err", err)
 		return nil, codes.Internal, "failed to register host"
@@ -397,10 +480,26 @@ func (s *AgentServer) enrol(ctx context.Context, reg *agentv1.RegisterRequest) (
 	return &en, codes.OK, ""
 }
 
-var errBanned = errors.New("host is banned")
+var (
+	errBanned       = errors.New("host is banned")
+	errOtherAccount = errors.New("machine is enrolled to another account")
+)
 
-func upsertGPUs(ctx context.Context, tx pgx.Tx, hostID string, gpus []*agentv1.GpuInfo) error {
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// syncGPUs makes the host's GPU records match what the agent reports now.
+// GPUs are attributes of a machine, refreshed at every connection: a driver
+// update changes a row, a new card adds one, and a card that is gone is marked
+// unavailable so nothing is placed on it. A replica that was running on a card
+// that is gone is failed, so the scheduler places it somewhere real. It
+// returns the UUIDs of the GPUs that went missing.
+func syncGPUs(ctx context.Context, tx pgx.Tx, hostID string, gpus []*agentv1.GpuInfo) ([]string, error) {
+	present := make([]string, 0, len(gpus))
 	for _, g := range gpus {
+		present = append(present, g.GetUuid())
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO gpus (host_id, model, vram_gb, driver_version, cuda_version, uuid, fingerprint, status)
 			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7, 'available')
@@ -409,12 +508,71 @@ func upsertGPUs(ctx context.Context, tx pgx.Tx, hostID string, gpus []*agentv1.G
 			    vram_gb = EXCLUDED.vram_gb,
 			    driver_version = EXCLUDED.driver_version,
 			    cuda_version = EXCLUDED.cuda_version,
-			    fingerprint = EXCLUDED.fingerprint;
+			    fingerprint = EXCLUDED.fingerprint,
+			    status = CASE WHEN gpus.status = 'unavailable' THEN 'available' ELSE gpus.status END;
 		`, hostID, g.GetModel(), g.GetVramGb(), g.GetDriverVersion(), g.GetCudaVersion(), g.GetUuid(), g.GetFingerprint()); err != nil {
-			return fmt.Errorf("register GPU %s: %w", g.GetUuid(), err)
+			return nil, fmt.Errorf("register GPU %s: %w", g.GetUuid(), err)
 		}
 	}
-	return nil
+
+	rows, err := tx.Query(ctx, `
+		SELECT g.id, g.uuid, r.id
+		FROM gpus g
+		LEFT JOIN replicas r ON r.gpu_id = g.id AND r.state NOT IN ('stopped', 'failed')
+		WHERE g.host_id = $1 AND g.uuid <> ALL($2) AND (g.status <> 'unavailable' OR r.id IS NOT NULL);
+	`, hostID, present)
+	if err != nil {
+		return nil, err
+	}
+	type gone struct {
+		id, uuid string
+		replica  *string
+	}
+	var missing []gone
+	for rows.Next() {
+		var g gone
+		if err := rows.Scan(&g.id, &g.uuid, &g.replica); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		missing = append(missing, g)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var lost []string
+	deps := map[string]bool{}
+	seen := map[string]bool{}
+	for _, g := range missing {
+		if g.replica != nil {
+			depID, _, err := lifecycle.SetReplicaState(ctx, tx, *g.replica, lifecycle.Failed, "",
+				"the GPU this replica ran on is no longer present on the host")
+			if err != nil {
+				return nil, err
+			}
+			if depID != "" {
+				deps[depID] = true
+			}
+		}
+		if seen[g.id] {
+			continue
+		}
+		seen[g.id] = true
+		// After the replica is failed: failing it releases the GPU, and this
+		// has to be the last word on the GPU's status.
+		if _, err := tx.Exec(ctx, `UPDATE gpus SET status = 'unavailable', replica_id = NULL WHERE id = $1;`, g.id); err != nil {
+			return nil, err
+		}
+		lost = append(lost, g.uuid)
+	}
+	for depID := range deps {
+		if _, _, err := lifecycle.Recompute(ctx, tx, depID); err != nil {
+			return nil, err
+		}
+	}
+	return lost, nil
 }
 
 // validateGPUs enforces the agent-side refusals of SRS FR-50 on the server too:
@@ -674,7 +832,14 @@ func (s *AgentServer) reconcileOnRegister(ctx context.Context, hostID string, re
 			switch {
 			case r.state == lifecycle.Stopping:
 				// The stop may have gone to the old connection; send it again.
+				// If the agent still holds the replica it is also told now, as
+				// an orphan: the control loop can close a stopping replica out
+				// in the instant this host has no session, and would then
+				// never send the stop.
 				_, err = tx.Exec(ctx, `UPDATE replicas SET stop_sent_at = NULL WHERE id = $1;`, r.id)
+				if err == nil && held[r.id] {
+					continue
+				}
 			case held[r.id] && r.state == lifecycle.Serving:
 				// Both sides agree. Nothing to do, and nothing is done.
 			case held[r.id]:

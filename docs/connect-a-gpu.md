@@ -186,6 +186,8 @@ production stack, which adds TLS: see [deployment.md](deployment.md).
 | The machine is online but shows "Runtime not reachable" | Ollama is not running on the host. Start it. |
 | "no supported GPU found" | The NVIDIA driver is missing or `nvidia-smi` is not on the PATH. |
 | "The coordinator refused this machine" | The token was already used or is older than 24 hours. Create a new command. |
+| The NVIDIA driver was updated, or a GPU was added, replaced or removed | Nothing to do. A machine is identified by its operating system's machine id, not by its GPUs; the platform reads the GPUs again each time the agent connects. A model that was running on a card that is gone is moved to another machine. |
+| Two machines built from the same disk image show up as one, taking turns | They share a machine id and the same enrolment. Enrol each with its own install command; if they still collide, give one a new machine id (on Linux: `sudo rm /etc/machine-id && sudo systemd-machine-id-setup`) and enrol it again. |
 | The machine went offline and nothing is on screen | The agent runs in the background. `ayeusann-agent service status` says whether it is running and why it was last refused; `~/.ayeusann/agent.log` has the detail. |
 | The deployment stays in "Waiting for capacity" | No free GPU qualifies. The deployment page says why: usually the model needs more GPU memory than the host has, or the host is paused. |
 

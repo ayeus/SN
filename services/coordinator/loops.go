@@ -66,8 +66,17 @@ func (s *AgentServer) tick(ctx context.Context, heartbeatTimeout time.Duration) 
 			step{"give-up", s.failUnreturned},
 		)
 	}
+	started := s.now()
 	failed := false
-	for _, st := range steps {
+	for i, st := range steps {
+		// A stall can land in the middle of a pass (the computer goes to sleep
+		// between two steps). The steps that judge silence must not then run
+		// on waking against heartbeats that are all stale; the next pass sees
+		// the gap and opens a grace window.
+		if i >= 2 && s.now().Sub(started) > stallAfter {
+			s.log.Warn("the control loop stalled in the middle of a pass; skipping the rest of it")
+			return
+		}
 		if err := st.fn(ctx); err != nil && ctx.Err() == nil {
 			failed = true
 			s.log.Error("coordinator loop step failed", "step", st.name, "err", err)
@@ -188,7 +197,7 @@ func (s *AgentServer) dispatchPending(ctx context.Context) error {
 			// A stream that cannot be written to is finished. Dropping the
 			// session makes the agent reconnect, and the job is sent then.
 			s.log.Warn("manifest send failed; dropping the session", "replica_id", p.id, "host_id", p.hostID, "err", err)
-			s.sessions.drop(p.hostID)
+			s.sessions.dropIf(sess)
 			_, _ = s.db.Pool.Exec(ctx, `UPDATE replicas SET dispatched_at = NULL WHERE id = $1;`, p.id)
 			continue
 		}
@@ -282,7 +291,7 @@ func (s *AgentServer) sendStops(ctx context.Context) error {
 				// The stream is finished; the next pass finds no session and
 				// closes the replica out.
 				s.log.Warn("stop send failed; dropping the session", "replica_id", x.id, "host_id", x.hostID, "err", err)
-				s.sessions.drop(x.hostID)
+				s.sessions.dropIf(sess)
 			}
 		}
 	}
@@ -319,14 +328,27 @@ func (s *AgentServer) sweepOffline(ctx context.Context, timeout time.Duration) e
 	}
 	rows.Close()
 
+	// The sessions these hosts had when they were judged silent. A host that
+	// reconnects while this loop works through the list gets a new session,
+	// and that one is left alone.
+	stale := map[string]*session{}
+	for _, hostID := range hosts {
+		stale[hostID] = s.sessions.get(hostID)
+	}
+
 	for _, hostID := range hosts {
 		s.log.Warn("host missed heartbeats; marking offline", "host_id", hostID)
 		// End its connection, if it still has one: an agent that is alive but
 		// was not heard will see the stream close and reconnect.
-		s.sessions.drop(hostID)
+		if sess := stale[hostID]; sess != nil {
+			s.sessions.dropIf(sess)
+		}
+		// It may have come back already (its registration sets it active
+		// again). Its replicas are then its handshake's business, not ours.
 		reps, err := s.db.Pool.Query(ctx, `
-			SELECT id, state FROM replicas
-			WHERE host_id = $1 AND state IN ('pending', 'pulling', 'loading', 'warming', 'serving');
+			SELECT r.id, r.state FROM replicas r JOIN hosts h ON h.id = r.host_id
+			WHERE r.host_id = $1 AND h.status = 'offline'
+			  AND r.state IN ('pending', 'pulling', 'loading', 'warming', 'serving');
 		`, hostID)
 		if err != nil {
 			return err
@@ -354,7 +376,51 @@ func (s *AgentServer) sweepOffline(ctx context.Context, timeout time.Duration) e
 
 // failUnreturned gives up on replicas whose host went offline and did not
 // come back within returnGrace, so the scheduler replaces them.
+//
+// It is also the way out for a replica left degraded on a host that did come
+// back: a race between the sweep and a reconnect, or a handshake that failed
+// half way, can leave one there, and nothing else would ever move it. Such a
+// replica is sent to its host again; an agent that still has the model loaded
+// answers at once that it is serving.
 func (s *AgentServer) failUnreturned(ctx context.Context) error {
+	stuck, err := s.db.Pool.Query(ctx, `
+		SELECT r.id FROM replicas r JOIN hosts h ON h.id = r.host_id
+		WHERE r.state = 'degraded' AND h.status <> 'offline'
+		  AND r.updated_at < NOW() - ($1 * INTERVAL '1 second');
+	`, int(returnGrace.Seconds()))
+	if err != nil {
+		return err
+	}
+	var again []string
+	for stuck.Next() {
+		var id string
+		if err := stuck.Scan(&id); err != nil {
+			stuck.Close()
+			return err
+		}
+		again = append(again, id)
+	}
+	stuck.Close()
+	if err := stuck.Err(); err != nil {
+		return err
+	}
+	for _, id := range again {
+		err := s.db.ExecTx(ctx, func(tx pgx.Tx) error {
+			depID, _, err := lifecycle.SetReplicaState(ctx, tx, id, lifecycle.Pending, "host is back; re-sending job", "")
+			if err != nil || depID == "" {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE replicas SET dispatched_at = NULL WHERE id = $1 AND state = 'pending';`, id); err != nil {
+				return err
+			}
+			_, _, err = lifecycle.Recompute(ctx, tx, depID)
+			return err
+		})
+		if err != nil {
+			s.log.Error("could not re-send a degraded replica", "replica_id", id, "err", err)
+		}
+	}
+
 	rows, err := s.db.Pool.Query(ctx, `
 		SELECT r.id FROM replicas r JOIN hosts h ON h.id = r.host_id
 		WHERE r.state = 'degraded' AND h.status = 'offline'

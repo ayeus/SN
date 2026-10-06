@@ -11,7 +11,7 @@ mod state;
 mod telemetry;
 
 // Generated code: tonic returns `Status` by value, which newer clippy flags.
-#[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err, clippy::large_enum_variant)]
 pub mod proto {
     tonic::include_proto!("ayeusann.agent.v1");
 }
@@ -142,7 +142,7 @@ extern "system" {
     fn FreeConsole() -> i32;
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn command_output(cmd: &str, args: &[&str]) -> String {
     std::process::Command::new(cmd)
         .args(args)
@@ -176,8 +176,9 @@ fn os_name() -> String {
     }
 }
 
-/// The operating system's own identifier for this installation, where it has
-/// one that can be read without elevated rights.
+/// The operating system's own identifier for this installation: stable across
+/// reboots, driver updates and hardware changes, and readable without
+/// elevated rights.
 #[cfg(windows)]
 fn machine_id() -> Option<String> {
     // HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid, set at install time.
@@ -196,30 +197,99 @@ fn machine_id() -> Option<String> {
     .map(str::to_string)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn machine_id() -> Option<String> {
-    std::fs::read_to_string("/etc/machine-id")
-        .ok()
+    parse_ioreg_uuid(&command_output(
+        "ioreg",
+        &["-rd1", "-c", "IOPlatformExpertDevice"],
+    ))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn machine_id() -> Option<String> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
         .map(|id| id.trim().to_string())
         .filter(|id| !id.is_empty())
 }
 
+/// Picks `"IOPlatformUUID" = "…"` out of `ioreg` output.
+#[cfg(any(target_os = "macos", test))]
+fn parse_ioreg_uuid(out: &str) -> Option<String> {
+    out.lines()
+        .find(|l| l.contains("IOPlatformUUID"))
+        .and_then(|l| l.split('"').nth(3))
+        .map(str::to_string)
+        .filter(|id| !id.is_empty())
+}
+
+/// What agents up to 0.3 used as the machine id: the same on Windows and
+/// Linux, and nothing on macOS, where they fell back to the host name.
+fn legacy_machine_id() -> Option<String> {
+    if cfg!(target_os = "macos") {
+        None
+    } else if cfg!(windows) {
+        machine_id()
+    } else {
+        std::fs::read_to_string("/etc/machine-id")
+            .ok()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+    }
+}
+
+fn salted(base: String, fake: bool, instance: Option<&str>) -> String {
+    match (fake, instance) {
+        (_, Some(i)) => format!("{base}|instance:{i}|fake:{fake}"),
+        (true, None) => format!("{base}|fake"),
+        (false, None) => base,
+    }
+}
+
 /// A stable identity for this machine. Two agents on one machine are the same
 /// host unless --instance says otherwise (development only).
-fn fingerprint(gpus: &[gpu::GpuInfo], fake: bool, instance: Option<&str>) -> String {
+///
+/// It is built from the operating system's machine id, not from the GPUs: a
+/// driver update, a new card or a different slot order must not turn a
+/// machine into a stranger. Only when the system has no machine id at all
+/// does it fall back to the set of GPU ids, and then to the host name.
+fn fingerprint(
+    machine: Option<&str>,
+    gpus: &[gpu::GpuInfo],
+    fake: bool,
+    instance: Option<&str>,
+) -> String {
+    let base = match machine {
+        Some(id) => format!("v2|machine:{id}"),
+        None if !fake && !gpus.is_empty() => {
+            let mut ids: Vec<&str> = gpus.iter().map(|g| g.uuid.as_str()).collect();
+            ids.sort_unstable();
+            format!("v2|gpus:{}", ids.join(","))
+        }
+        None => format!("v2|hostname:{}", hostname()),
+    };
+    gpu::sha256_hex(salted(base, fake, instance).as_bytes())
+}
+
+/// The identity agents up to 0.3 computed for this machine, so a machine they
+/// enrolled is recognised when it enrols again. It took the first GPU's
+/// fingerprint, which for NVIDIA included the driver version: that is the
+/// defect the current identity fixes, and it is reproduced here on purpose.
+fn legacy_fingerprint(
+    legacy_machine: Option<&str>,
+    gpus: &[gpu::GpuInfo],
+    fake: bool,
+    instance: Option<&str>,
+) -> String {
     let base = if let (false, Some(g)) = (fake, gpus.first()) {
-        format!("host:{}", g.fingerprint)
-    } else if let Some(id) = machine_id() {
+        format!("host:{}", gpu::legacy_fingerprint(g, instance))
+    } else if let Some(id) = legacy_machine {
         format!("machine:{id}")
     } else {
         format!("hostname:{}", hostname())
     };
-    let salted = match (fake, instance) {
-        (_, Some(i)) => format!("{base}|instance:{i}|fake:{fake}"),
-        (true, None) => format!("{base}|fake"),
-        (false, None) => base,
-    };
-    gpu::sha256_hex(salted.as_bytes())
+    gpu::sha256_hex(salted(base, fake, instance).as_bytes())
 }
 
 /// Refuses configurations the platform will not accept, with a clear fix
@@ -370,7 +440,22 @@ async fn main() -> Result<()> {
         );
     }
 
-    let fp = fingerprint(&gpus, fake_gpu, args.instance.as_deref());
+    let machine = machine_id();
+    if machine.is_none() {
+        warn!("this system has no machine id; identifying the machine by its GPUs instead");
+    }
+    let fp = fingerprint(
+        machine.as_deref(),
+        &gpus,
+        fake_gpu,
+        args.instance.as_deref(),
+    );
+    let legacy_fp = legacy_fingerprint(
+        legacy_machine_id().as_deref(),
+        &gpus,
+        fake_gpu,
+        args.instance.as_deref(),
+    );
     let bench = BenchmarkSuite::new(fake_gpu, &coordinator, &fp).run_all();
     let (_wg_private, wg_public) = MeshManager::generate_keypair();
 
@@ -382,6 +467,7 @@ async fn main() -> Result<()> {
         region,
         gpus,
         fingerprint: fp,
+        legacy_fingerprints: vec![legacy_fp],
         wg_public_key: wg_public,
         benchmark: bench,
     };
@@ -430,6 +516,11 @@ async fn main() -> Result<()> {
                     let mut st = state::load(&data_dir);
                     st.last_error = Some(reason);
                     let _ = state::save(&data_dir, &st);
+                    // A platform that has refused this machine will not use
+                    // what it has loaded; the GPU's memory goes back now.
+                    if shared.has_replicas() {
+                        shared.unload_all(&rt).await;
+                    }
                     if !args.background {
                         return 1;
                     }
@@ -504,10 +595,134 @@ mod tests {
     #[test]
     fn instances_get_distinct_fingerprints() {
         let g = vec![nvidia("550.1")];
-        let a = fingerprint(&g, true, Some("a"));
-        let b = fingerprint(&g, true, Some("b"));
+        let m = Some("machine-1");
+        let a = fingerprint(m, &g, true, Some("a"));
+        let b = fingerprint(m, &g, true, Some("b"));
         assert_ne!(a, b);
-        assert_eq!(a, fingerprint(&g, true, Some("a")));
-        assert_ne!(fingerprint(&g, true, None), fingerprint(&g, false, None));
+        assert_eq!(a, fingerprint(m, &g, true, Some("a")));
+        assert_ne!(
+            fingerprint(m, &g, true, None),
+            fingerprint(m, &g, false, None)
+        );
+    }
+
+    fn card(uuid: &str, driver: &str) -> gpu::GpuInfo {
+        let mut g = nvidia(driver);
+        g.uuid = uuid.into();
+        g
+    }
+
+    /// The defect this replaces: a routine driver update changed the machine's
+    /// identity and locked it out of the network for good.
+    #[test]
+    fn a_machine_keeps_its_identity_through_driver_and_hardware_changes() {
+        let m = Some("4c4c4544-0042-3510-8052-b7c04f334433");
+        let before = fingerprint(m, &[card("GPU-a", "550.54.14")], false, None);
+
+        let driver_update = fingerprint(m, &[card("GPU-a", "560.35.03")], false, None);
+        let second_card = fingerprint(
+            m,
+            &[card("GPU-a", "560.35.03"), card("GPU-b", "560.35.03")],
+            false,
+            None,
+        );
+        let swapped_order = fingerprint(
+            m,
+            &[card("GPU-b", "560.35.03"), card("GPU-a", "560.35.03")],
+            false,
+            None,
+        );
+        let new_card = fingerprint(m, &[card("GPU-z", "560.35.03")], false, None);
+        for (what, fp) in [
+            ("a driver update", &driver_update),
+            ("a second card", &second_card),
+            ("a different slot order", &swapped_order),
+            ("a replaced card", &new_card),
+        ] {
+            assert_eq!(&before, fp, "{what} changed the machine's identity");
+        }
+
+        // Another machine is another machine.
+        assert_ne!(
+            before,
+            fingerprint(Some("other"), &[card("GPU-a", "550.54.14")], false, None)
+        );
+        assert!(before.starts_with("sha256:"));
+    }
+
+    /// Without a machine id the GPUs identify the machine: by their ids alone,
+    /// in any order, whatever the driver.
+    #[test]
+    fn without_a_machine_id_the_gpu_ids_identify_the_machine() {
+        let a = fingerprint(
+            None,
+            &[card("GPU-a", "550.1"), card("GPU-b", "550.1")],
+            false,
+            None,
+        );
+        let b = fingerprint(
+            None,
+            &[card("GPU-b", "560.2"), card("GPU-a", "560.2")],
+            false,
+            None,
+        );
+        assert_eq!(a, b);
+        assert_ne!(a, fingerprint(None, &[card("GPU-a", "550.1")], false, None));
+    }
+
+    /// The old identity is still computed, exactly as 0.3 computed it, so a
+    /// machine enrolled by an older agent is recognised.
+    #[test]
+    fn the_legacy_identity_is_what_older_agents_sent() {
+        let g = card("GPU-a", "550.54.14");
+        let old_gpu_fp = gpu::sha256_hex(b"GPU-a:550.54.14:24");
+        let expected = gpu::sha256_hex(format!("host:{old_gpu_fp}").as_bytes());
+        assert_eq!(
+            legacy_fingerprint(Some("machine-1"), std::slice::from_ref(&g), false, None),
+            expected
+        );
+        // It did depend on the driver, which is why it is only a legacy match.
+        assert_ne!(
+            legacy_fingerprint(
+                Some("machine-1"),
+                &[card("GPU-a", "560.35.03")],
+                false,
+                None
+            ),
+            expected
+        );
+        // Simulated hardware was identified by the machine and the instance.
+        assert_eq!(
+            legacy_fingerprint(Some("machine-1"), &[g], true, Some("a")),
+            gpu::sha256_hex(b"machine:machine-1|instance:a|fake:true")
+        );
+        // With --instance the GPU's id carries a suffix by the time this runs;
+        // 0.3 hashed the id as detected, before the suffix.
+        let mut suffixed = card("GPU-a", "550.54.14");
+        suffixed.uuid = "GPU-a-instance-dev".into();
+        assert_eq!(
+            legacy_fingerprint(Some("machine-1"), &[suffixed], false, Some("dev")),
+            gpu::sha256_hex(format!("host:{old_gpu_fp}|instance:dev|fake:false").as_bytes())
+        );
+        // And never equals the current identity.
+        assert_ne!(
+            legacy_fingerprint(Some("machine-1"), &[card("GPU-a", "1")], false, None),
+            fingerprint(Some("machine-1"), &[card("GPU-a", "1")], false, None)
+        );
+    }
+
+    #[test]
+    fn reads_the_platform_uuid_from_ioreg() {
+        let out = r#"+-o J314sAP  <class IOPlatformExpertDevice, id 0x100000252, registered, matched, active, busy 0 (0 ms), retain 40>
+    {
+      "IOPlatformSerialNumber" = "XXXXXXXXXX"
+      "IOPlatformUUID" = "A1B2C3D4-0000-1111-2222-333344445555"
+      "manufacturer" = <"Apple Inc.">
+    }"#;
+        assert_eq!(
+            parse_ioreg_uuid(out).as_deref(),
+            Some("A1B2C3D4-0000-1111-2222-333344445555")
+        );
+        assert_eq!(parse_ioreg_uuid("nothing useful"), None);
     }
 }

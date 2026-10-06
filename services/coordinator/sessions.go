@@ -76,6 +76,9 @@ func (s *session) deliver(c *agentv1.InferenceChunk, done <-chan struct{}) {
 	select {
 	case ch <- c:
 	case <-done:
+	case <-s.done:
+		// The session was closed while a slow reader held this up. Giving up
+		// lets the stream's handler see the close and end the stream.
 	}
 }
 
@@ -133,6 +136,20 @@ func (r *registry) drop(hostID string) {
 	if s != nil {
 		s.close()
 	}
+}
+
+// dropIf closes a session and takes it out of the registry, but only while it
+// is still the host's current one. A caller holding a session it fetched a
+// moment ago must not throw out the newer session of a host that has
+// reconnected since.
+func (r *registry) dropIf(s *session) {
+	r.mu.Lock()
+	if r.byHost[s.hostID] == s {
+		delete(r.byHost, s.hostID)
+		platform.HostsConnected.Set(float64(len(r.byHost)))
+	}
+	r.mu.Unlock()
+	s.close()
 }
 
 // closeAll ends every session, for shutdown.

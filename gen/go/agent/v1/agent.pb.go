@@ -315,17 +315,19 @@ type RegisterRequest struct {
 	// (every reconnect after that) must be set. Registration tokens are single
 	// use; the credential returned in RegisterResponse is what keeps a host
 	// enrolled across restarts.
-	RegistrationToken   string     `protobuf:"bytes,1,opt,name=registration_token,json=registrationToken,proto3" json:"registration_token,omitempty"`
-	Hostname            string     `protobuf:"bytes,2,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	Os                  string     `protobuf:"bytes,3,opt,name=os,proto3" json:"os,omitempty"`
-	OsVersion           string     `protobuf:"bytes,4,opt,name=os_version,json=osVersion,proto3" json:"os_version,omitempty"`
-	Kernel              string     `protobuf:"bytes,5,opt,name=kernel,proto3" json:"kernel,omitempty"`
-	Region              string     `protobuf:"bytes,6,opt,name=region,proto3" json:"region,omitempty"`
-	Gpus                []*GpuInfo `protobuf:"bytes,7,rep,name=gpus,proto3" json:"gpus,omitempty"`
-	AgentVersion        string     `protobuf:"bytes,8,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	HardwareFingerprint string     `protobuf:"bytes,9,opt,name=hardware_fingerprint,json=hardwareFingerprint,proto3" json:"hardware_fingerprint,omitempty"`
-	WgPublicKey         string     `protobuf:"bytes,10,opt,name=wg_public_key,json=wgPublicKey,proto3" json:"wg_public_key,omitempty"`
-	HostCredential      string     `protobuf:"bytes,11,opt,name=host_credential,json=hostCredential,proto3" json:"host_credential,omitempty"`
+	RegistrationToken string     `protobuf:"bytes,1,opt,name=registration_token,json=registrationToken,proto3" json:"registration_token,omitempty"`
+	Hostname          string     `protobuf:"bytes,2,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	Os                string     `protobuf:"bytes,3,opt,name=os,proto3" json:"os,omitempty"`
+	OsVersion         string     `protobuf:"bytes,4,opt,name=os_version,json=osVersion,proto3" json:"os_version,omitempty"`
+	Kernel            string     `protobuf:"bytes,5,opt,name=kernel,proto3" json:"kernel,omitempty"`
+	Region            string     `protobuf:"bytes,6,opt,name=region,proto3" json:"region,omitempty"`
+	Gpus              []*GpuInfo `protobuf:"bytes,7,rep,name=gpus,proto3" json:"gpus,omitempty"`
+	AgentVersion      string     `protobuf:"bytes,8,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	// Identifies the machine. Derived from the operating system's own machine
+	// id, so it survives driver updates and changes of GPU.
+	HardwareFingerprint string `protobuf:"bytes,9,opt,name=hardware_fingerprint,json=hardwareFingerprint,proto3" json:"hardware_fingerprint,omitempty"`
+	WgPublicKey         string `protobuf:"bytes,10,opt,name=wg_public_key,json=wgPublicKey,proto3" json:"wg_public_key,omitempty"`
+	HostCredential      string `protobuf:"bytes,11,opt,name=host_credential,json=hostCredential,proto3" json:"host_credential,omitempty"`
 	// Local serving runtime the agent drives: "ollama" or "vllm".
 	Runtime string `protobuf:"bytes,12,opt,name=runtime,proto3" json:"runtime,omitempty"`
 	// Model identifiers already present in the runtime's local cache.
@@ -338,9 +340,13 @@ type RegisterRequest struct {
 	Replicas []*HeldReplica `protobuf:"bytes,14,rep,name=replicas,proto3" json:"replicas,omitempty"`
 	// Optional protocol features this agent understands. An agent that lists
 	// none gets the original behaviour, so old agents keep working.
-	Capabilities  []string `protobuf:"bytes,15,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Capabilities []string `protobuf:"bytes,15,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	// The fingerprints earlier agent versions computed for this same machine.
+	// A machine enrolled by an older agent is recognised by one of these when
+	// it enrols again, and stays one machine instead of becoming two.
+	LegacyFingerprints []string `protobuf:"bytes,16,rep,name=legacy_fingerprints,json=legacyFingerprints,proto3" json:"legacy_fingerprints,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RegisterRequest) Reset() {
@@ -474,6 +480,13 @@ func (x *RegisterRequest) GetReplicas() []*HeldReplica {
 func (x *RegisterRequest) GetCapabilities() []string {
 	if x != nil {
 		return x.Capabilities
+	}
+	return nil
+}
+
+func (x *RegisterRequest) GetLegacyFingerprints() []string {
+	if x != nil {
+		return x.LegacyFingerprints
 	}
 	return nil
 }
@@ -2199,7 +2212,7 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"usageBatch\x12:\n" +
 	"\tdrain_ack\x18\x06 \x01(\v2\x1b.ayeusann.agent.v1.DrainAckH\x00R\bdrainAck\x12L\n" +
 	"\x0finference_chunk\x18\a \x01(\v2!.ayeusann.agent.v1.InferenceChunkH\x00R\x0einferenceChunkB\t\n" +
-	"\apayload\"\xaf\x04\n" +
+	"\apayload\"\xe0\x04\n" +
 	"\x0fRegisterRequest\x12-\n" +
 	"\x12registration_token\x18\x01 \x01(\tR\x11registrationToken\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x0e\n" +
@@ -2217,7 +2230,8 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\aruntime\x18\f \x01(\tR\aruntime\x12#\n" +
 	"\rcached_models\x18\r \x03(\tR\fcachedModels\x12:\n" +
 	"\breplicas\x18\x0e \x03(\v2\x1e.ayeusann.agent.v1.HeldReplicaR\breplicas\x12\"\n" +
-	"\fcapabilities\x18\x0f \x03(\tR\fcapabilities\"Q\n" +
+	"\fcapabilities\x18\x0f \x03(\tR\fcapabilities\x12/\n" +
+	"\x13legacy_fingerprints\x18\x10 \x03(\tR\x12legacyFingerprints\"Q\n" +
 	"\vHeldReplica\x12\x1d\n" +
 	"\n" +
 	"replica_id\x18\x01 \x01(\tR\treplicaId\x12#\n" +

@@ -48,6 +48,8 @@ message RegisterRequest {
   string region = 6;
   repeated GpuInfo gpus = 7;
   string agent_version = 8;
+  // Identifies the machine. Derived from the operating system's own machine
+  // id, so it survives driver updates and changes of GPU.
   string hardware_fingerprint = 9;
   string wg_public_key = 10;
   string host_credential = 11;
@@ -65,6 +67,10 @@ message RegisterRequest {
   // Optional protocol features this agent understands. An agent that lists
   // none gets the original behaviour, so old agents keep working.
   repeated string capabilities = 15;
+  // The fingerprints earlier agent versions computed for this same machine.
+  // A machine enrolled by an older agent is recognised by one of these when
+  // it enrols again, and stays one machine instead of becoming two.
+  repeated string legacy_fingerprints = 16;
 }
 
 message HeldReplica {

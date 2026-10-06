@@ -34,6 +34,8 @@ pub struct HostFacts {
     pub region: String,
     pub gpus: Vec<GpuInfo>,
     pub fingerprint: String,
+    /// What earlier agent versions called this machine.
+    pub legacy_fingerprints: Vec<String>,
     pub wg_public_key: String,
     pub benchmark: BenchmarkReport,
 }
@@ -46,6 +48,9 @@ struct Replica {
     serving: bool,
 }
 
+/// How long the coordinator has to answer a new session.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Tells the coordinator this agent lists the replicas it still serves when it
 /// registers, so a reconnect does not reload them.
 pub const CAP_REPLICA_REPORT: &str = "replica-report";
@@ -55,8 +60,13 @@ pub const CAP_REPLICA_REPORT: &str = "replica-report";
 #[derive(Default)]
 pub struct Shared {
     replicas: Mutex<HashMap<String, Replica>>,
-    starting: Mutex<HashMap<String, AbortHandle>>,
+    /// Replicas being started: the task, and the model it is loading.
+    starting: Mutex<HashMap<String, (AbortHandle, String)>>,
     inflight: Mutex<HashMap<String, AbortHandle>>,
+    /// Models a start may have loaded before it was cut short. Nothing is
+    /// serving them, so they are unloaded when the agent lets go of
+    /// everything, unless a later start takes them over.
+    loose: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Shared {
@@ -66,8 +76,11 @@ impl Shared {
     /// usefully, and the coordinator sends the job again on the new one.
     /// Replicas that are serving are not touched.
     pub fn end_session(&self) {
-        for (_, h) in self.starting.lock().unwrap().drain() {
+        for (_, (h, model)) in self.starting.lock().unwrap().drain() {
             h.abort();
+            // The job is normally sent again within seconds, so the model is
+            // left where it is; it is only remembered in case it is not.
+            self.loose.lock().unwrap().insert(model);
         }
         for (_, h) in self.inflight.lock().unwrap().drain() {
             h.abort();
@@ -110,8 +123,23 @@ impl Shared {
         held
     }
 
+    /// Whether this agent holds anything in the runtime for the platform.
     pub fn has_replicas(&self) -> bool {
-        !self.replicas.lock().unwrap().is_empty()
+        !self.replicas.lock().unwrap().is_empty() || !self.loose.lock().unwrap().is_empty()
+    }
+
+    fn in_use(&self, model: &str) -> bool {
+        self.replicas
+            .lock()
+            .unwrap()
+            .values()
+            .any(|r| r.runtime_model == model)
+            || self
+                .starting
+                .lock()
+                .unwrap()
+                .values()
+                .any(|(_, m)| m == model)
     }
 
     /// Frees everything this agent holds for the platform. Used when the
@@ -119,13 +147,14 @@ impl Shared {
     /// for it is no longer reasonable.
     pub async fn unload_all(&self, runtime: &Runtime) {
         self.end_session();
-        let models: std::collections::HashSet<String> = self
+        let mut models: std::collections::HashSet<String> = self
             .replicas
             .lock()
             .unwrap()
             .drain()
             .map(|(_, r)| r.runtime_model)
             .collect();
+        models.extend(self.loose.lock().unwrap().drain());
         for m in models {
             match runtime.unload(&m).await {
                 Ok(()) => info!(model = %m, "unloaded"),
@@ -259,6 +288,7 @@ impl Session<'_> {
             cached_models: cached,
             replicas: held,
             capabilities: vec![CAP_REPLICA_REPORT.to_string()],
+            legacy_fingerprints: self.facts.legacy_fingerprints.clone(),
         };
 
         let mut client = AgentServiceClient::new(
@@ -271,14 +301,29 @@ impl Session<'_> {
             payload: Some(agent_message::Payload::Register(reg)),
         })
         .await?;
-        let mut inbound = client
-            .session(tokio_stream::wrappers::ReceiverStream::new(rx))
-            .await
-            .context("opening session")?
-            .into_inner();
+        // A coordinator that accepts the connection and then says nothing (it
+        // is frozen, or the proxy in front of it is waiting on it) must not
+        // hold this attempt for ever: the loop that tries the next address,
+        // and the one that gives the GPU back after too long, only run
+        // between attempts.
+        let mut inbound = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            client.session(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        )
+        .await
+        .map_err(|_| anyhow!("the coordinator did not answer within {HANDSHAKE_TIMEOUT:?}"))?
+        .context("opening session")?
+        .into_inner();
 
         // ── Registration ─────────────────────────────────────
-        let resp = match inbound.message().await {
+        let first = tokio::time::timeout(HANDSHAKE_TIMEOUT, inbound.message())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "the coordinator did not register this machine within {HANDSHAKE_TIMEOUT:?}"
+                )
+            })?;
+        let resp = match first {
             Ok(Some(msg)) => match msg.payload {
                 Some(coordinator_message::Payload::RegisterResponse(r)) => r,
                 other => {
@@ -444,7 +489,7 @@ impl Session<'_> {
         }
         // A second manifest for a replica that is still starting replaces the
         // first attempt rather than racing it.
-        if let Some(h) = self.shared.starting.lock().unwrap().remove(&replica_id) {
+        if let Some((h, _)) = self.shared.starting.lock().unwrap().remove(&replica_id) {
             h.abort();
         }
         info!(replica_id = %replica_id, model = %m.model_name, runtime_model = %m.runtime_model, "manifest verified; starting replica");
@@ -452,6 +497,7 @@ impl Session<'_> {
         let runtime = self.runtime.clone();
         let shared = self.shared.clone();
         let tx = tx.clone();
+        let started_model = m.runtime_model.clone();
         let task = tokio::spawn(async move {
             let rid = m.replica_id.clone();
             let model = m.runtime_model.clone();
@@ -520,6 +566,7 @@ impl Session<'_> {
                 return;
             }
 
+            shared.loose.lock().unwrap().remove(&model);
             shared.replicas.lock().unwrap().insert(
                 rid.clone(),
                 Replica {
@@ -543,24 +590,24 @@ impl Session<'_> {
             .starting
             .lock()
             .unwrap()
-            .insert(replica_id, task.abort_handle());
+            .insert(replica_id, (task.abort_handle(), started_model));
     }
 
     async fn on_stop(&self, replica_id: String, tx: &Sender<AgentMessage>) {
-        if let Some(h) = self.shared.starting.lock().unwrap().remove(&replica_id) {
+        // The model to let go of: the one a start was loading when it was cut
+        // short, or the one the replica was serving.
+        let mut model = None;
+        if let Some((h, m)) = self.shared.starting.lock().unwrap().remove(&replica_id) {
             h.abort();
+            model = Some(m);
         }
-        let removed = self.shared.replicas.lock().unwrap().remove(&replica_id);
-        if let Some(r) = removed {
-            let still_used = self
-                .shared
-                .replicas
-                .lock()
-                .unwrap()
-                .values()
-                .any(|x| x.runtime_model == r.runtime_model);
-            if !still_used {
-                if let Err(e) = self.runtime.unload(&r.runtime_model).await {
+        if let Some(r) = self.shared.replicas.lock().unwrap().remove(&replica_id) {
+            model = Some(r.runtime_model);
+        }
+        if let Some(m) = model {
+            if !self.shared.in_use(&m) {
+                self.shared.loose.lock().unwrap().remove(&m);
+                if let Err(e) = self.runtime.unload(&m).await {
                     warn!(error = %e, "failed to unload model");
                 }
             }
@@ -642,8 +689,10 @@ async fn heartbeat_loop(
             cached = runtime.cached_models().await.unwrap_or_default();
         }
         // Keep serving models resident (~every 4 min at a 5 s heartbeat).
-        if healthy && n.is_multiple_of(48) {
-            let models: Vec<String> = shared
+        // Not on the first beat: registering has just checked and pinned
+        // every model, and a stop for one of them may be on its way.
+        if healthy && n > 0 && n.is_multiple_of(48) {
+            let models: std::collections::HashSet<String> = shared
                 .replicas
                 .lock()
                 .unwrap()
@@ -651,7 +700,20 @@ async fn heartbeat_loop(
                 .map(|r| r.runtime_model.clone())
                 .collect();
             for m in models {
-                let _ = runtime.pin(&m).await;
+                // Looked at again just before each pin: pinning a model that
+                // was stopped a moment ago would load it back for nobody.
+                if shared.in_use(&m) {
+                    let _ = runtime.pin(&m).await;
+                }
+            }
+            // A model left loaded by a start that was cut short, which no job
+            // has come back for in the minutes since, is let go.
+            let stray: Vec<String> = shared.loose.lock().unwrap().drain().collect();
+            for m in stray {
+                if !shared.in_use(&m) {
+                    info!(model = %m, "unloading a model no job came back for");
+                    let _ = runtime.unload(&m).await;
+                }
             }
         }
         n += 1;
@@ -838,11 +900,10 @@ mod tests {
         serving(&shared, "r-serving", "kept:1");
         let starting = tokio::spawn(tokio::time::sleep(Duration::from_secs(3600)));
         let request = tokio::spawn(tokio::time::sleep(Duration::from_secs(3600)));
-        shared
-            .starting
-            .lock()
-            .unwrap()
-            .insert("r-starting".into(), starting.abort_handle());
+        shared.starting.lock().unwrap().insert(
+            "r-starting".into(),
+            (starting.abort_handle(), "half:1".into()),
+        );
         shared
             .inflight
             .lock()
@@ -859,6 +920,9 @@ mod tests {
             shared.replicas.lock().unwrap().contains_key("r-serving"),
             "a serving replica must survive the end of a connection"
         );
+        // The model the cut-short start may have loaded is remembered.
+        assert!(shared.loose.lock().unwrap().contains("half:1"));
+        assert!(shared.has_replicas());
     }
 
     #[tokio::test]
@@ -908,7 +972,7 @@ mod tests {
             .starting
             .lock()
             .unwrap()
-            .insert("r-4".into(), starting.abort_handle());
+            .insert("r-4".into(), (starting.abort_handle(), "half:1".into()));
 
         shared.unload_all(&runtime).await;
 
@@ -916,8 +980,14 @@ mod tests {
         assert!(starting.await.unwrap_err().is_cancelled());
         let mut seen = seen.lock().unwrap().clone();
         seen.sort();
-        assert_eq!(seen.len(), 2, "one unload per distinct model: {seen:?}");
-        assert!(seen[0].contains("kept:1") && seen[0].contains("\"keep_alive\":0"));
-        assert!(seen[1].contains("other:2") && seen[1].contains("\"keep_alive\":0"));
+        // Including the model a cut-short start may have left loaded.
+        assert_eq!(seen.len(), 3, "one unload per distinct model: {seen:?}");
+        assert!(seen.iter().all(|b| b.contains("\"keep_alive\":0")));
+        for model in ["half:1", "kept:1", "other:2"] {
+            assert!(
+                seen.iter().any(|b| b.contains(model)),
+                "{model} not unloaded"
+            );
+        }
     }
 }

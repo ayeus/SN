@@ -362,9 +362,6 @@ func TestResumeRefusals(t *testing.T) {
 		return &agentv1.RegisterRequest{HostCredential: en.credential, HardwareFingerprint: fp, Gpus: gpu(8), Runtime: "ollama"}
 	}
 
-	if _, code, _ := f.s.resume(f.ctx, req("sha256:different-hardware")); code != codes.PermissionDenied {
-		t.Fatalf("a credential moved to different hardware was accepted (code %s)", code)
-	}
 	if _, code, _ := f.s.resume(f.ctx, &agentv1.RegisterRequest{HostCredential: "nonsense", Gpus: gpu(8)}); code != codes.Unauthenticated {
 		t.Fatalf("a malformed credential was accepted (code %s)", code)
 	}
@@ -378,6 +375,200 @@ func TestResumeRefusals(t *testing.T) {
 	}
 	if st := f.str(`SELECT status FROM hosts WHERE id = $1`, en.hostID); st != "banned" {
 		t.Fatalf("host status = %s after the refused attempts, want banned", st)
+	}
+}
+
+// The credential says which host this is; the fingerprint only describes the
+// machine, and descriptions change. A driver update must never lock a host out.
+func TestAChangedFingerprintIsAcceptedAndRecorded(t *testing.T) {
+	f := setup(t)
+	en, _, _ := f.s.enrol(f.ctx, f.register("t3", "sha256:before-the-driver-update", 8))
+	back := func(fp string) *agentv1.RegisterRequest {
+		return &agentv1.RegisterRequest{HostCredential: en.credential, HardwareFingerprint: fp, Gpus: gpu(8), Runtime: "ollama"}
+	}
+
+	again, code, reason := f.s.resume(f.ctx, back("sha256:after-the-driver-update"))
+	if code != codes.OK || again.hostID != en.hostID {
+		t.Fatalf("a host whose fingerprint changed was refused or became another host: %s %q", code, reason)
+	}
+	if fp := f.str(`SELECT hw_fingerprint FROM hosts WHERE id = $1`, en.hostID); fp != "sha256:after-the-driver-update" {
+		t.Fatalf("the record still says %s", fp)
+	}
+	var hosts int
+	f.scan(&hosts, `SELECT COUNT(*) FROM hosts`)
+	if hosts != 1 {
+		t.Fatalf("%d hosts after a fingerprint change, want the one", hosts)
+	}
+	// An agent that sends no fingerprint leaves the record alone.
+	if _, code, _ := f.s.resume(f.ctx, back("")); code != codes.OK {
+		t.Fatalf("resume without a fingerprint: %s", code)
+	}
+	if fp := f.str(`SELECT hw_fingerprint FROM hosts WHERE id = $1`, en.hostID); fp != "sha256:after-the-driver-update" {
+		t.Fatalf("an empty fingerprint overwrote the record: %s", fp)
+	}
+
+	// A fingerprint another host already has (two machines cloned from one
+	// image share a machine id) is not adopted, and does not lock this host
+	// out either: the credential is what identifies it.
+	other, _, _ := f.s.enrol(f.ctx, f.register("t3", "sha256:another-machine", 8))
+	same, code, reason := f.s.resume(f.ctx, back("sha256:another-machine"))
+	if code != codes.OK || same.hostID != en.hostID {
+		t.Fatalf("a host reporting a fingerprint another host has = %s %q, want it kept as itself", code, reason)
+	}
+	if fp := f.str(`SELECT hw_fingerprint FROM hosts WHERE id = $1`, en.hostID); fp != "sha256:after-the-driver-update" {
+		t.Fatalf("the record took a fingerprint that belongs to another host: %s", fp)
+	}
+	if fp := f.str(`SELECT hw_fingerprint FROM hosts WHERE id = $1`, other.hostID); fp != "sha256:another-machine" {
+		t.Fatalf("the other machine's record was changed: %s", fp)
+	}
+}
+
+// A machine enrolled by an older agent, then enrolled again by a newer one that
+// computes its identity differently, stays one machine.
+func TestReEnrolmentRecognisesAnOlderFingerprint(t *testing.T) {
+	f := setup(t)
+	first, code, reason := f.s.enrol(f.ctx, f.register("t3", "sha256:as-the-old-agent-saw-it", 8))
+	if code != codes.OK {
+		t.Fatal(reason)
+	}
+
+	upgraded := f.register("t3", "sha256:as-the-new-agent-sees-it", 8)
+	upgraded.LegacyFingerprints = []string{"sha256:something-else", "sha256:as-the-old-agent-saw-it"}
+	again, code, reason := f.s.enrol(f.ctx, upgraded)
+	if code != codes.OK {
+		t.Fatalf("re-enrolment with a legacy fingerprint: %s %q", code, reason)
+	}
+	if again.hostID != first.hostID {
+		t.Fatal("the same machine became a second host after an agent upgrade")
+	}
+	if fp := f.str(`SELECT hw_fingerprint FROM hosts WHERE id = $1`, first.hostID); fp != "sha256:as-the-new-agent-sees-it" {
+		t.Fatalf("the record was not moved to the current fingerprint: %s", fp)
+	}
+	var hosts int
+	f.scan(&hosts, `SELECT COUNT(*) FROM hosts`)
+	if hosts != 1 {
+		t.Fatalf("%d hosts, want 1", hosts)
+	}
+	if _, code, _ := f.s.resume(f.ctx, &agentv1.RegisterRequest{HostCredential: first.credential, Gpus: gpu(8)}); code != codes.Unauthenticated {
+		t.Fatalf("the credential from before re-enrolment still works (code %s)", code)
+	}
+
+	// Someone else's host that has claimed this machine's fingerprint (a
+	// fingerprint is only a string the agent sends) does not get in the way of
+	// the owner enrolling it again, and is not touched by it.
+	owner := f.user
+	f.scan(&f.user, `INSERT INTO users (email, name) VALUES ('squatter-' || gen_random_uuid() || '@example.com', 'Squatter') RETURNING id`)
+	squat, code, reason := f.s.enrol(f.ctx, f.register("t3", "sha256:squatter-own", 8))
+	if code != codes.OK {
+		t.Fatal(reason)
+	}
+	if _, code, _ := f.s.resume(f.ctx, &agentv1.RegisterRequest{HostCredential: squat.credential, HardwareFingerprint: "sha256:what-the-owner-will-be-next", Gpus: gpu(8)}); code != codes.OK {
+		t.Fatal("resume")
+	}
+	f.user = owner
+	next := f.register("t3", "sha256:what-the-owner-will-be-next", 8)
+	next.LegacyFingerprints = []string{"sha256:as-the-new-agent-sees-it"}
+	mine, code, reason := f.s.enrol(f.ctx, next)
+	if code != codes.OK || mine.hostID != first.hostID {
+		t.Fatalf("the owner could not enrol their own machine again once another host claimed its fingerprint: %s %q", code, reason)
+	}
+	if u := f.str(`SELECT user_id::TEXT FROM hosts WHERE id = $1`, squat.hostID); u == owner {
+		t.Fatal("enrolling took over another account's host")
+	}
+	if fp := f.str(`SELECT hw_fingerprint FROM hosts WHERE id = $1`, first.hostID); fp != "sha256:as-the-new-agent-sees-it" {
+		t.Fatalf("the owner's record changed fingerprint to one another host holds: %s", fp)
+	}
+
+	// A legacy fingerprint does not let another account take the machine.
+	f.scan(&f.user, `INSERT INTO users (email, name) VALUES ('other-' || gen_random_uuid() || '@example.com', 'Other') RETURNING id`)
+	theirs := f.register("t3", "sha256:a-third-description", 8)
+	theirs.LegacyFingerprints = []string{"sha256:as-the-new-agent-sees-it"}
+	if _, code, _ := f.s.enrol(f.ctx, theirs); code != codes.PermissionDenied {
+		t.Fatalf("another account enrolled the machine through a legacy fingerprint (code %s)", code)
+	}
+	// And a banned machine is still banned under its new description.
+	f.exec(`UPDATE hosts SET status = 'banned' WHERE id = $1`, first.hostID)
+	f.user = f.str(`SELECT user_id::TEXT FROM hosts WHERE id = $1`, first.hostID)
+	dodge := f.register("t3", "sha256:a-fourth-description", 8)
+	dodge.LegacyFingerprints = []string{"sha256:as-the-new-agent-sees-it"}
+	if _, code, _ := f.s.enrol(f.ctx, dodge); code != codes.PermissionDenied {
+		t.Fatalf("a banned machine re-enrolled under a new fingerprint (code %s)", code)
+	}
+}
+
+// GPUs are attributes of a machine, brought up to date every time it connects.
+func TestGPUsFollowWhatTheMachineReports(t *testing.T) {
+	f := setup(t)
+	card := func(uuid, driver string, vram int32) *agentv1.GpuInfo {
+		return &agentv1.GpuInfo{Model: "NVIDIA GeForce RTX 4090", VramGb: vram, Uuid: uuid, DriverVersion: driver}
+	}
+	reg := f.register("t3", "sha256:two-cards", 24)
+	reg.Gpus = []*agentv1.GpuInfo{card("GPU-a", "550.54", 24), card("GPU-b", "550.54", 24)}
+	en, code, reason := f.s.enrol(f.ctx, reg)
+	if code != codes.OK {
+		t.Fatal(reason)
+	}
+	status := func(uuid string) string {
+		return f.str(`SELECT status FROM gpus WHERE host_id = $1 AND uuid = $2`, en.hostID, uuid)
+	}
+	back := func(gpus ...*agentv1.GpuInfo) {
+		t.Helper()
+		if _, code, reason := f.s.resume(f.ctx, &agentv1.RegisterRequest{HostCredential: en.credential, HardwareFingerprint: "sha256:two-cards", Gpus: gpus, Runtime: "ollama"}); code != codes.OK {
+			t.Fatalf("resume: %s %q", code, reason)
+		}
+	}
+
+	// Replicas on both cards, one of them serving.
+	gpuA := f.str(`SELECT id FROM gpus WHERE host_id = $1 AND uuid = 'GPU-a'`, en.hostID)
+	gpuB := f.str(`SELECT id FROM gpus WHERE host_id = $1 AND uuid = 'GPU-b'`, en.hostID)
+	dep := f.deployment()
+	f.exec(`UPDATE deployments SET min_replicas = 2, max_replicas = 2, state = 'serving' WHERE id = $1`, dep)
+	onA := f.replica(dep, en.hostID, gpuA)
+	onB := f.replica(dep, en.hostID, gpuB)
+	f.exec(`UPDATE replicas SET state = 'serving' WHERE deployment_id = $1`, dep)
+
+	// A driver update: same cards, new driver. Nothing is disturbed.
+	back(card("GPU-a", "560.35", 24), card("GPU-b", "560.35", 24))
+	if d := f.str(`SELECT driver_version FROM gpus WHERE id = $1`, gpuA); d != "560.35" {
+		t.Fatalf("driver version on record is %s after an update", d)
+	}
+	if status("GPU-a") != "reserved" || status("GPU-b") != "reserved" || f.replicaState(onA) != "serving" || f.replicaState(onB) != "serving" {
+		t.Fatalf("a driver update disturbed the host: GPUs %s/%s, replicas %s/%s", status("GPU-a"), status("GPU-b"), f.replicaState(onA), f.replicaState(onB))
+	}
+
+	// Card B is taken out; card C is put in.
+	back(card("GPU-a", "560.35", 24), card("GPU-c", "560.35", 16))
+	if s := status("GPU-b"); s != "unavailable" {
+		t.Fatalf("a card that is gone is %s, want unavailable", s)
+	}
+	if s := f.replicaState(onB); s != "failed" {
+		t.Fatalf("the replica on the card that is gone is %s, want failed so it is placed elsewhere", s)
+	}
+	if owner := f.str(`SELECT COALESCE(replica_id::TEXT, '') FROM gpus WHERE id = $1`, gpuB); owner != "" {
+		t.Fatal("the missing card is still held by its replica")
+	}
+	if status("GPU-a") != "reserved" || f.replicaState(onA) != "serving" {
+		t.Fatalf("the card that stayed was disturbed: %s, replica %s", status("GPU-a"), f.replicaState(onA))
+	}
+	if s := status("GPU-c"); s != "available" {
+		t.Fatalf("the new card is %s, want available", s)
+	}
+	if s := f.str(`SELECT state FROM deployments WHERE id = $1`, dep); s != "degraded" {
+		t.Fatalf("deployment is %s with one of two replicas left, want degraded", s)
+	}
+
+	// Card B comes back: usable again, and the old replica stays failed.
+	back(card("GPU-a", "560.35", 24), card("GPU-b", "560.35", 24), card("GPU-c", "560.35", 16))
+	if s := status("GPU-b"); s != "available" {
+		t.Fatalf("a card that came back is %s, want available", s)
+	}
+	if s := f.replicaState(onB); s != "failed" {
+		t.Fatalf("a failed replica came back to life: %s", s)
+	}
+	var cards int
+	f.scan(&cards, `SELECT COUNT(*) FROM gpus WHERE host_id = $1`, en.hostID)
+	if cards != 3 {
+		t.Fatalf("%d GPU rows for three cards", cards)
 	}
 }
 
@@ -758,8 +949,9 @@ func TestReconnectReconcilesEveryCase(t *testing.T) {
 		t.Errorf("deployment is %s while its only replica reloads, want degraded", s)
 	}
 
-	// What the agent holds but should not: told to stop, never adopted.
-	want := map[string]bool{stopped: true, failed: true, elsewhere: true, unknown: true}
+	// What the agent holds but should not: told to stop, never adopted. That
+	// includes the replica being stopped, which it is told directly as well.
+	want := map[string]bool{stopping: true, stopped: true, failed: true, elsewhere: true, unknown: true}
 	if len(orphans) != len(want) {
 		t.Fatalf("orphans = %v, want %d of them", orphans, len(want))
 	}
@@ -1047,6 +1239,94 @@ func TestAFailedSendDropsTheSession(t *testing.T) {
 	}
 	if s := f.replicaState(rep); s != "stopped" {
 		t.Fatalf("replica is %s after its host's stream broke, want stopped rather than stopping for ever", s)
+	}
+}
+
+// A slow reader of an inference answer can hold up the handler that delivers
+// it. Closing the session has to get through anyway.
+func TestClosingASessionUnblocksADeliveryInProgress(t *testing.T) {
+	st := newStream()
+	t.Cleanup(st.cancel)
+	sess := newSession("host", st)
+	ch, _ := sess.open("req")
+	for range cap(ch) {
+		sess.deliver(&agentv1.InferenceChunk{RequestId: "req"}, st.ctx.Done())
+	}
+	blocked := make(chan struct{})
+	go func() {
+		sess.deliver(&agentv1.InferenceChunk{RequestId: "req"}, st.ctx.Done()) // the reader has stopped
+		close(blocked)
+	}()
+	select {
+	case <-blocked:
+		t.Fatal("delivery into a full channel did not wait")
+	case <-time.After(100 * time.Millisecond):
+	}
+	sess.close()
+	select {
+	case <-blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a delivery in progress outlived the session; its handler could never end the stream")
+	}
+}
+
+// A session fetched a moment ago may no longer be the host's current one.
+func TestDroppingAStaleSessionLeavesTheNewOne(t *testing.T) {
+	f := setup(t)
+	hostID, _ := f.host()
+	oldStream, newStream := f.connect(hostID), newStream()
+	t.Cleanup(newStream.cancel)
+	old := f.s.sessions.get(hostID)
+	_ = oldStream
+	fresh := newSession(hostID, newStream)
+	f.s.sessions.put(fresh).close() // the agent reconnected
+
+	f.s.sessions.dropIf(old)
+	if f.s.sessions.get(hostID) != fresh {
+		t.Fatal("dropping a stale session threw out the host's new one")
+	}
+	if err := fresh.send(&agentv1.CoordinatorMessage{}); err != nil {
+		t.Fatalf("the new session was closed: %v", err)
+	}
+	f.s.sessions.dropIf(fresh)
+	if f.s.sessions.get(hostID) != nil {
+		t.Fatal("the current session was not dropped")
+	}
+}
+
+// A replica must not be left degraded on a host that is back: nothing else
+// would ever move it. It is sent again, and an agent that still has the model
+// answers at once.
+func TestADegradedReplicaOnAReturnedHostIsSentAgain(t *testing.T) {
+	f := setup(t)
+	hostID, gpuID := f.host()
+	dep := f.deployment()
+	rep := f.replica(dep, hostID, gpuID)
+	f.exec(`UPDATE replicas SET state = 'degraded', dispatched_at = NOW() WHERE id = $1`, rep)
+	f.exec(`UPDATE deployments SET state = 'degraded' WHERE id = $1`, dep)
+
+	if err := f.s.failUnreturned(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.replicaState(rep); s != "degraded" {
+		t.Fatalf("a freshly degraded replica was touched: %s", s)
+	}
+	f.exec(`UPDATE replicas SET updated_at = NOW() - INTERVAL '2 minutes' WHERE id = $1`, rep)
+	if err := f.s.failUnreturned(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.replicaState(rep); s != "pending" {
+		t.Fatalf("replica is %s on a host that is back, want pending so it is sent again", s)
+	}
+	st := f.connect(hostID)
+	if err := f.s.dispatchPending(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if msgs := st.messages(); len(msgs) != 1 || msgs[0].GetManifest().GetReplicaId() != rep {
+		t.Fatal("the replica was not sent to its host again")
+	}
+	if s := f.str(`SELECT status FROM gpus WHERE id = $1`, gpuID); s != "reserved" {
+		t.Fatalf("its GPU is %s, want kept", s)
 	}
 }
 
