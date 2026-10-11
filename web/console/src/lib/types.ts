@@ -121,6 +121,9 @@ export type Host = {
   last_error_at?: string;
   // This machine's clock minus the platform's, in seconds.
   clock_skew_seconds?: number;
+  // The machine's owner needs it for now; it takes no work until that clears.
+  yielding?: boolean;
+  yield_reason?: string;
   last_heartbeat_at?: string;
   os?: string;
   runtime?: string;

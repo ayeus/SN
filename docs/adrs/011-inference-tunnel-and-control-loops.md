@@ -55,6 +55,10 @@ Deviation from UML §8: reservations live in Postgres (`gpus.replica_id`, claime
 - **Waiting for capacity is never a failure.** The old ten-minute scheduling timeout is gone: on a network of a few machines the GPU a deployment needs is often just switched off, and the deployment starts by itself when it returns.
 - **A dead runtime is not a dead host.** When heartbeats report the model runtime unreachable for 30 seconds, the coordinator fails the replicas on that host for the scheduler to replace and tells the agent to let go of them. The host stays connected and takes work again when its runtime is back.
 
+#### A host that yields to its owner
+
+The agent decides on the machine, from rules its owner set there (`agent/src/yielding.rs`: a pause, battery, another program on the GPU, keyboard activity, hours of the day), whether the GPU should be given back, and says so in the heartbeat (`yielding`, `yield_reason`). The platform cannot set or override the rules. On the change the coordinator records it on the host (`hosts.yielding`) and drains the host with `lifecycle.DrainHost`: its replicas go to `stopping`, which takes them out of routing at once; the agent lets requests in flight finish (20 s) before unloading; the scheduler places replacements, and leaves the host out of placement until the heartbeat says otherwise. Nothing is failed and nothing counts against the host. An agent that is still holding models 30 s after it began yielding unloads them itself.
+
 #### Losing the connection is not losing the host
 
 The stream between an agent and the coordinator drops for ordinary reasons: Wi-Fi, a coordinator restart, a laptop lid, the platform's own computer going to sleep. The models stay loaded through all of them, so a dropped connection must not be treated as a dead host.

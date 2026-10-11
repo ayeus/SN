@@ -98,6 +98,14 @@ message Heartbeat {
   bool host_user_active = 6;  // For pause-when-active
   repeated string cached_models = 7;
   bool runtime_healthy = 8;
+  // The machine's owner needs it: the agent is on battery, the GPU is busy
+  // with something of theirs, they paused it, or it is outside the hours
+  // they offer. The platform gives the machine no work and takes back what
+  // it is running until this clears. The rules live on the machine and the
+  // owner's choice always wins; the platform is only told.
+  bool yielding = 9;
+  // Why, in words the owner would recognise: "on battery".
+  string yield_reason = 10;
 }
 
 message GpuStatus {

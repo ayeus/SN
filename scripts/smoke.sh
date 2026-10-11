@@ -52,6 +52,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The agents below run on whatever machine this is, which may be a laptop on
+# its battery; only an explicit pause makes them give the GPU back.
+export SN_YIELD_RULES=off
+
 pass() { printf '  \033[32mpass\033[0m  %s\n' "$*"; }
 # The agents' logs live in a directory that is removed on exit, so a failure
 # copies them to logs/, where CI also picks them up.
@@ -169,6 +173,7 @@ ask() {
   curl -s -m 20 -o /dev/null -w '%{http_code}' "$BASE_URL/chat/completions" -H "Authorization: Bearer $KEY" \
     -H 'Content-Type: application/json' -d '{"model":"smoke","messages":[{"role":"user","content":"ping"}],"max_tokens":3}'
 }
+serving() { api GET "/v1/deployments/$DEP/replicas" | python3 -c "import json,sys; print(' '.join(sorted(r['id'] for r in json.load(sys.stdin)['replicas'] if r['state']=='serving')))"; }
 online() { api GET /v1/hosts | python3 -c "import json,sys; print(sum(1 for h in json.load(sys.stdin)['hosts'] if h['online'] and h['runtime_healthy']))"; }
 
 # 7b. When things go wrong, the request path says so. Only the stand-in
@@ -227,11 +232,34 @@ else
   echo "  skip  fault checks need the stand-in runtime (make smoke-fake)"
 fi
 
+# 7c. The owner of one machine takes it back, then offers it again. Nothing
+# has gone wrong, so nothing fails: its model is moved or waited for, callers
+# keep getting answers, and the machine returns by itself.
+AGENT_A=(agent/target/release/ayeusann-agent --data-dir "$WORK/a" --instance "smoke-$RUN-a")
+yielding() { api GET /v1/hosts | python3 -c "import json,sys; print(sum(1 for h in json.load(sys.stdin)['hosts'] if h.get('yielding')))"; }
+"${AGENT_A[@]}" pause --for 10m >/dev/null || fail "the pause command failed"
+T0=$(date +%s)
+for _ in $(seq 1 40); do
+  [ "$(yielding)" = 1 ] && [ "$(serving | wc -w | tr -d ' ')" = 1 ] && break; sleep 1
+done
+[ "$(yielding)" = 1 ] || fail "the platform does not show the paused machine as given back"
+[ "$(serving | wc -w | tr -d ' ')" = 1 ] || fail "the paused machine's replica was not taken off it: serving [$(serving)]"
+WHY=$(api GET /v1/hosts | python3 -c "import json,sys; print(next(h.get('yield_reason','') for h in json.load(sys.stdin)['hosts'] if h.get('yielding')))")
+C=$(ask); [ "$C" = 200 ] || fail "a request while one machine was paused returned $C"
+grep -q "unloaded\|replica stopped" "$WORK/agent-a.log" || fail "the paused agent did not let go of its model"
+pass "paused: the machine gave its GPU back in $(( $(date +%s) - T0 ))s ($WHY) and the other kept answering"
+"${AGENT_A[@]}" resume >/dev/null || fail "the resume command failed"
+T0=$(date +%s)
+for _ in $(seq 1 60); do
+  [ "$(yielding)" = 0 ] && [ "$(serving | wc -w | tr -d ' ')" = 2 ] && break; sleep 1
+done
+[ "$(serving | wc -w | tr -d ' ')" = 2 ] || fail "the machine did not take its work back after resume: serving [$(serving)], yielding $(yielding)"
+pass "resumed: two replicas serving again after $(( $(date +%s) - T0 ))s"
+
 # 8. The platform restarts, and then stalls the way a sleeping laptop does.
 # The hosts only lose their connection, so the models must stay loaded: the
 # same two replicas, nothing sent again, nothing reloaded, and answers again
 # within 30 s.
-serving() { api GET "/v1/deployments/$DEP/replicas" | python3 -c "import json,sys; print(' '.join(sorted(r['id'] for r in json.load(sys.stdin)['replicas'] if r['state']=='serving')))"; }
 last_event() { api GET "/v1/deployments/$DEP/logs" | python3 -c "import json,sys; e=json.load(sys.stdin)['events']; print(e[-1]['id'] if e else 0)"; }
 since() { api GET "/v1/deployments/$DEP/logs?after=$1" | python3 -c "import json,sys; print('; '.join(e['message'] for e in json.load(sys.stdin)['events']))"; }
 # survived WHAT: both hosts are back and serving the replicas they had before,

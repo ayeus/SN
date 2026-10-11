@@ -88,6 +88,9 @@ The agent lives in `~/.ayeusann` (on Windows, `%USERPROFILE%\.ayeusann`).
 | Start it in the background again | `~/.ayeusann/bin/ayeusann-agent service install` |
 | Run it in a terminal instead | `~/.ayeusann/bin/ayeusann-agent` |
 | Enrol again with a new token | `~/.ayeusann/bin/ayeusann-agent service install --token <token>` |
+| Take the GPU back for a while, or until you say | `~/.ayeusann/bin/ayeusann-agent pause --for 2h` or `pause` |
+| Offer it again | `~/.ayeusann/bin/ayeusann-agent resume` |
+| See or change when it gives the GPU back by itself | `~/.ayeusann/bin/ayeusann-agent yield` |
 
 Stopping the agent keeps the machine enrolled; starting it again brings the
 same machine back, with the coordinator address and settings it enrolled with.
@@ -95,8 +98,35 @@ A stopped agent unloads the models it had in memory, so the GPU is free the
 moment it stops. It only ever touches models it loaded or downloaded itself:
 with `--purge` the models it downloaded are deleted, and models the owner
 pulled for their own use are left alone.
+
 Pausing from the console (**Host > Machines > Pause**) is the lighter option
 when the owner just wants the GPU back for a while.
+
+### Staying out of the owner's way
+
+The machine belongs to its owner first. The agent gives the GPU back by
+itself, and takes work again by itself when the reason has gone:
+
+| When | By default | Change with |
+|---|---|---|
+| The machine is running on its battery | Yes | `yield --on-battery off` |
+| Another program is using the GPU (NVIDIA: it holds 1 GB or more of GPU memory, or the GPU is 30% busy while the agent is neither answering nor loading anything, for three looks in a row) | Yes | `yield --when-gpu-busy off` |
+| Someone is at the keyboard or mouse (macOS only for now) | No | `yield --when-active on` |
+| Outside the hours the machine is offered | Offered at any time | `yield --hours 22:00-07:00`, or `--hours any` |
+| The owner ran `pause` | Until `resume`, or for the time given | |
+
+The rules are kept on the machine (`~/.ayeusann/yield.json`) and are the
+owner's alone: the platform cannot change them and is only told the outcome.
+When a rule applies, the machine is shown as "Given back" with the reason; it
+is sent no new requests, the ones it is answering are given up to 20 seconds
+to finish, its models are unloaded and moved to other machines, and nothing
+is recorded against it. If the platform cannot be reached, the agent unloads
+its models itself after 30 seconds. Giving the GPU back is immediate; taking
+work again waits about 20 seconds after the reason has gone, so a charger
+nudged in its socket does not reload a model, and `resume` is obeyed at once.
+
+This is separate from **Pause** in the console, which stays until the owner
+clears it there.
 
 How it runs in the background depends on the system, and none of it needs
 administrator rights:

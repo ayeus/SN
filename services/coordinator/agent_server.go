@@ -696,6 +696,7 @@ func (s *AgentServer) onHeartbeat(ctx context.Context, sess *session, hb *agentv
 		return
 	}
 	s.watchRuntime(ctx, sess, hb.GetRuntimeHealthy())
+	s.applyYield(ctx, sess, hb.GetYielding(), hb.GetYieldReason())
 
 	// Persisting every 5 s heartbeat would write 17k rows per host per day for
 	// no analytical gain; one sample per 15 s is enough for uptime and charts.
@@ -713,6 +714,45 @@ func (s *AgentServer) onHeartbeat(ctx context.Context, sess *session, hb *agentv
 	`, hostID, hb.GetCpuUsagePct(), hb.GetMemoryUsagePct(), gpuStatus, hb.GetActiveJobs(), hb.GetHostUserActive()); err != nil {
 		s.log.Error("telemetry insert failed", "host_id", hostID, "err", err)
 	}
+}
+
+// applyYield records that a host is giving its GPU back to its owner, or has
+// stopped doing so. When it starts, what the host was running is drained:
+// its replicas take no new requests, the agent lets the ones in flight
+// finish and unloads, and the scheduler places replacements on other
+// machines or waits. Nothing is failed, because nothing went wrong. When it
+// ends, the host is simply eligible for work again.
+func (s *AgentServer) applyYield(ctx context.Context, sess *session, yielding bool, reason string) {
+	if sess.yieldKnown && sess.yielding == yielding && sess.yieldReason == reason {
+		return
+	}
+	err := s.db.ExecTx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			UPDATE hosts
+			SET yielding = $2,
+			    yield_reason = NULLIF($3, ''),
+			    yielding_since = CASE WHEN NOT $2 THEN NULL WHEN yielding THEN yielding_since ELSE NOW() END
+			WHERE id = $1;
+		`, sess.hostID, yielding, reason); err != nil {
+			return err
+		}
+		if !yielding {
+			return nil
+		}
+		why := "the machine's owner needs it"
+		if reason != "" {
+			why += " (" + reason + ")"
+		}
+		return lifecycle.DrainHost(ctx, tx, sess.hostID, why)
+	})
+	if err != nil {
+		s.log.Error("could not record a host yielding", "host_id", sess.hostID, "err", err)
+		return // tried again on the next heartbeat
+	}
+	if !sess.yieldKnown || sess.yielding != yielding {
+		s.log.Info("host yield changed", "host_id", sess.hostID, "yielding", yielding, "reason", reason)
+	}
+	sess.yieldKnown, sess.yielding, sess.yieldReason = true, yielding, reason
 }
 
 // watchRuntime gives up on a host's replicas once its model runtime has been

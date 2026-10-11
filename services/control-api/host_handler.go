@@ -137,14 +137,14 @@ const hostColumns = `
 	h.id, h.user_id, h.name, h.hostname, h.tier, h.region, h.overlay_ip, h.kyc_status, h.reputation, h.status,
 	h.hw_fingerprint, h.agent_version, h.last_heartbeat_at, h.os, h.runtime, h.runtime_healthy, h.cached_models,
 	h.paused, h.probation_until, h.created_at, h.updated_at, h.agent_outdated,
-	h.last_error, h.last_error_at, h.clock_skew_seconds`
+	h.last_error, h.last_error_at, h.clock_skew_seconds, h.yielding, h.yield_reason`
 
 func scanHost(row pgx.Row, extra ...any) (domain.Host, error) {
 	var h domain.Host
 	dest := append([]any{&h.ID, &h.UserID, &h.Name, &h.Hostname, &h.Tier, &h.Region, &h.OverlayIP, &h.KycStatus,
 		&h.Reputation, &h.Status, &h.HwFingerprint, &h.AgentVersion, &h.LastHeartbeatAt, &h.OS, &h.Runtime,
 		&h.RuntimeHealthy, &h.CachedModels, &h.Paused, &h.ProbationUntil, &h.CreatedAt, &h.UpdatedAt,
-		&h.AgentOutdated, &h.LastError, &h.LastErrorAt, &h.ClockSkewSeconds}, extra...)
+		&h.AgentOutdated, &h.LastError, &h.LastErrorAt, &h.ClockSkewSeconds, &h.Yielding, &h.YieldReason}, extra...)
 	err := row.Scan(dest...)
 	return h, err
 }
@@ -510,7 +510,7 @@ func (a *API) HandleHostControls(w http.ResponseWriter, r *http.Request) {
 			`, h.ID); err != nil {
 				return err
 			}
-			return drainHostReplicas(ctx, tx, h.ID, "host paused by its owner")
+			return lifecycle.DrainHost(ctx, tx, h.ID, "host paused by its owner")
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE hosts SET paused = FALSE,
@@ -535,39 +535,6 @@ func (a *API) HandleHostControls(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"host": updated})
 }
 
-// drainHostReplicas marks a host's replicas STOPPING so the coordinator stops
-// them gracefully while the scheduler places replacements.
-func drainHostReplicas(ctx context.Context, tx pgx.Tx, hostID, reason string) error {
-	rows, err := tx.Query(ctx, `
-		SELECT id FROM replicas WHERE host_id = $1 AND state IN ('pending', 'pulling', 'loading', 'warming', 'serving', 'degraded');
-	`, hostID)
-	if err != nil {
-		return err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	rows.Close()
-	deps := map[string]bool{}
-	for _, id := range ids {
-		depID, _, err := lifecycle.SetReplicaState(ctx, tx, id, lifecycle.Stopping, reason, "")
-		if err != nil {
-			return err
-		}
-		deps[depID] = true
-	}
-	for d := range deps {
-		if _, _, err := lifecycle.Recompute(ctx, tx, d); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // HandleDecommissionHost removes a machine: its credential is revoked so the
 // agent can no longer connect, and its jobs move elsewhere.
 func (a *API) HandleDecommissionHost(w http.ResponseWriter, r *http.Request) {
@@ -578,7 +545,7 @@ func (a *API) HandleDecommissionHost(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	err = a.db.ExecTx(ctx, func(tx pgx.Tx) error {
-		if err := drainHostReplicas(ctx, tx, h.ID, "host decommissioned"); err != nil {
+		if err := lifecycle.DrainHost(ctx, tx, h.ID, "host decommissioned"); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `

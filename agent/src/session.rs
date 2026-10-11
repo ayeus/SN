@@ -69,6 +69,11 @@ const MAX_MESSAGE_BYTES: usize = 17 << 20;
 /// platform's router stays well below it; this is the machine's own backstop.
 const MAX_INFLIGHT: usize = 32;
 
+/// How long a replica that has been told to stop waits for the requests it
+/// is answering. Shorter than the coordinator's own 30 s wait for the stop to
+/// be confirmed.
+const STOP_DRAIN: Duration = Duration::from_secs(20);
+
 /// How long the coordinator has to answer a new session.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -94,6 +99,8 @@ pub struct Shared {
     /// Where the record of all this is kept (the data directory). None in
     /// tests.
     ledger: Option<PathBuf>,
+    /// Why the machine is being given back to its owner right now, if it is.
+    yielding: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -189,10 +196,27 @@ impl Shared {
         held
     }
 
+    /// Records whether the machine is being given back to its owner. The
+    /// next heartbeat tells the platform.
+    pub fn set_yield(&self, reason: Option<String>) {
+        *self.yielding.lock().unwrap() = reason;
+    }
+
+    pub fn yield_reason(&self) -> Option<String> {
+        self.yielding.lock().unwrap().clone()
+    }
+
     /// Whether this agent holds anything in the runtime for the platform.
     /// Requests being answered right now.
     pub fn busy(&self) -> usize {
         self.inflight.lock().unwrap().len()
+    }
+
+    /// Everything this agent is doing with the GPU right now: requests being
+    /// answered and models being loaded. A GPU that is busy while this is
+    /// zero is busy with somebody else's work.
+    pub fn working(&self) -> usize {
+        self.busy() + self.starting.lock().unwrap().len()
     }
 
     pub fn has_replicas(&self) -> bool {
@@ -593,6 +617,20 @@ impl Session<'_> {
             .await;
             return;
         }
+        // The platform stops sending work within a heartbeat of being told
+        // the machine is needed; a job already on its way is turned down.
+        if let Some(reason) = self.shared.yield_reason() {
+            info!(replica_id = %replica_id, reason = %reason, "not starting a replica: the machine is being given back to its owner");
+            stage(
+                tx,
+                &replica_id,
+                ReplicaState::Failed,
+                "",
+                &format!("the machine's owner needs it ({reason})"),
+            )
+            .await;
+            return;
+        }
         // Asked to start what is already serving: say so at once. Reloading a
         // model that is in memory helps nobody.
         let already = self
@@ -757,24 +795,38 @@ impl Session<'_> {
         if let Some(r) = self.shared.replicas.lock().unwrap().remove(&replica_id) {
             model = Some(r.runtime_model);
         }
-        if let Some(m) = model {
-            if !self.shared.in_use(&m) {
-                self.shared.loose.lock().unwrap().remove(&m);
-                if let Err(e) = self.runtime.unload(&m).await {
-                    warn!(error = %e, "failed to unload model");
+        // From here the replica takes no new requests. The ones it is
+        // answering are given a little while to finish before the model
+        // goes: somebody is waiting for each of them, and the platform has
+        // already stopped sending more. Done off this loop, which has other
+        // messages to read meanwhile.
+        let shared = self.shared.clone();
+        let runtime = self.runtime.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let waited = std::time::Instant::now();
+            while shared.busy() > 0 && waited.elapsed() < STOP_DRAIN {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            if let Some(m) = model {
+                if !shared.in_use(&m) {
+                    shared.loose.lock().unwrap().remove(&m);
+                    if let Err(e) = runtime.unload(&m).await {
+                        warn!(error = %e, "failed to unload model");
+                    }
                 }
             }
-        }
-        self.shared.record();
-        info!(replica_id = %replica_id, "replica stopped");
-        stage(
-            tx,
-            &replica_id,
-            ReplicaState::Stopped,
-            "stopped on request",
-            "",
-        )
-        .await;
+            shared.record();
+            info!(replica_id = %replica_id, "replica stopped");
+            stage(
+                &tx,
+                &replica_id,
+                ReplicaState::Stopped,
+                "stopped on request",
+                "",
+            )
+            .await;
+        });
     }
 
     async fn on_inference(&self, req: crate::proto::InferenceRequest, tx: &Sender<AgentMessage>) {
@@ -891,6 +943,7 @@ async fn heartbeat_loop(
         n += 1;
 
         let active = shared.inflight.lock().unwrap().len() as i32;
+        let yield_reason = shared.yield_reason();
         let hb = Heartbeat {
             ts: Some(now_ts()),
             cpu_usage_pct: sys.global_cpu_info().cpu_usage() as f64,
@@ -900,6 +953,8 @@ async fn heartbeat_loop(
             host_user_active: false,
             cached_models: cached.clone(),
             runtime_healthy: healthy,
+            yielding: yield_reason.is_some(),
+            yield_reason: yield_reason.unwrap_or_default(),
         };
         if tx
             .send(AgentMessage {
@@ -987,6 +1042,75 @@ fn print_banner(f: &HostFacts, tier: &str, status: &str, runtime: &Runtime) {
         lines.push(String::new());
     }
     let _ = writeln!(Out, "{}", lines.join("\n"));
+}
+
+/// How long the platform has to take back what the machine is running, once
+/// told the owner needs it, before the agent lets go by itself.
+const YIELD_PATIENCE: Duration = Duration::from_secs(30);
+
+/// Watches whether the machine should be given back to its owner, for as
+/// long as the agent runs. The platform is told through the heartbeat and
+/// takes back what the machine is running; if it has not within
+/// YIELD_PATIENCE (it is unreachable, or too old to know what the heartbeat
+/// means) the agent frees the GPU itself, because the owner comes first.
+///
+/// With a simulated GPU there is no hardware to give back, so only an
+/// explicit pause counts; the same is true under SN_YIELD_RULES=off. Tests
+/// run agents on whatever machine is to hand, which may be a laptop on its
+/// battery.
+pub async fn watch_yield(data_dir: PathBuf, runtime: Runtime, shared: Arc<Shared>, fake_gpu: bool) {
+    let pause_only =
+        fake_gpu || std::env::var("SN_YIELD_RULES").is_ok_and(|v| v.eq_ignore_ascii_case("off"));
+    // Measuring runs small system commands; on Windows one of them is slow.
+    let every = Duration::from_secs(if cfg!(windows) { 15 } else { 5 });
+    let mut steady = crate::yielding::Steady::default();
+    let mut since: Option<std::time::Instant> = None;
+    let mut released = false;
+    loop {
+        let mut rules = crate::yielding::load(&data_dir);
+        if pause_only {
+            rules = crate::yielding::Rules {
+                on_battery: false,
+                when_gpu_busy: false,
+                when_active: false,
+                hours: None,
+                paused_until: rules.paused_until,
+            };
+        }
+        let kind = runtime.kind.name();
+        let own = shared.working();
+        let measured = {
+            let rules = rules.clone();
+            tokio::task::spawn_blocking(move || crate::yielding::probe(&rules, kind, own)).await
+        };
+        if let Ok(probe) = measured {
+            let before = steady.current().map(str::to_string);
+            let now = steady.look(&rules, &probe);
+            if now != before {
+                match &now {
+                    Some(reason) => info!(reason = %reason, "giving the machine back to its owner"),
+                    None => info!("the machine is free again; taking work"),
+                }
+            }
+            shared.set_yield(now.clone());
+            if now.is_some() {
+                let began = *since.get_or_insert_with(std::time::Instant::now);
+                if !released && began.elapsed() >= YIELD_PATIENCE {
+                    released = true;
+                    if shared.has_replicas() {
+                        warn!(
+                            "the platform has not taken back this machine's models; unloading them"
+                        );
+                        shared.unload_all(&runtime).await;
+                    }
+                }
+            } else {
+                since = None;
+                released = false;
+            }
+        }
+        tokio::time::sleep(every).await;
+    }
 }
 
 #[cfg(test)]

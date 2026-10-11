@@ -72,7 +72,13 @@ export default function MachinesPage() {
                       </div>
                     </td>
                     <td>
-                      {h.online ? <StateBadge state={h.paused ? "paused" : h.status} /> : <StateBadge state="offline" />}
+                      {!h.online ? (
+                        <StateBadge state="offline" />
+                      ) : h.yielding && !h.paused ? (
+                        <StateBadge state="paused" label={`Given back: ${h.yield_reason ?? "its owner needs it"}`} />
+                      ) : (
+                        <StateBadge state={h.paused ? "paused" : h.status} />
+                      )}
                       {h.online && !h.runtime_healthy && <div className="text-[12px] text-danger">Runtime not reachable</div>}
                       {h.agent_outdated && <div className="text-[12px] text-danger">Agent out of date</div>}
                     </td>

@@ -10,6 +10,7 @@ mod session;
 mod state;
 mod telemetry;
 mod update;
+mod yielding;
 
 // Generated code: tonic returns `Status` by value, which newer clippy flags.
 #[allow(clippy::result_large_err, clippy::large_enum_variant)]
@@ -52,6 +53,31 @@ enum Cmd {
     Service {
         #[command(subcommand)]
         action: ServiceAction,
+    },
+    /// Take the GPU back: stop serving until `resume`, or for a while.
+    Pause {
+        /// How long: 30m, 2h, 1d. Without it, until `resume`.
+        #[arg(long = "for", value_name = "TIME")]
+        duration: Option<String>,
+    },
+    /// Offer the GPU again after a `pause`.
+    Resume,
+    /// Show or change when this machine gives the GPU back by itself.
+    Yield {
+        /// Give way while the machine runs on its battery (on or off).
+        #[arg(long, value_name = "on|off")]
+        on_battery: Option<String>,
+        /// Give way while another program is using the GPU (on or off).
+        #[arg(long, value_name = "on|off")]
+        when_gpu_busy: Option<String>,
+        /// Give way while someone is using the keyboard or mouse (on or
+        /// off). macOS only for now.
+        #[arg(long, value_name = "on|off")]
+        when_active: Option<String>,
+        /// The hours the machine is offered, in its local time, such as
+        /// 22:00-07:00. `any` removes the limit.
+        #[arg(long, value_name = "HH:MM-HH:MM|any")]
+        hours: Option<String>,
     },
 }
 
@@ -519,6 +545,24 @@ async fn main() -> Result<()> {
         None => base_dir.clone(),
     };
 
+    match &command {
+        Some(Cmd::Pause { duration }) => std::process::exit(pause(&data_dir, duration.as_deref())),
+        Some(Cmd::Resume) => std::process::exit(resume(&data_dir)),
+        Some(Cmd::Yield {
+            on_battery,
+            when_gpu_busy,
+            when_active,
+            hours,
+        }) => std::process::exit(yield_rules(
+            &data_dir,
+            on_battery.as_deref(),
+            when_gpu_busy.as_deref(),
+            when_active.as_deref(),
+            hours.as_deref(),
+        )),
+        _ => {}
+    }
+
     if let Some(Cmd::Service { action }) = command {
         let spec = service::Spec::new(&base_dir, &data_dir, args.instance.as_deref())?;
         let code = match action {
@@ -698,6 +742,14 @@ async fn main() -> Result<()> {
     };
 
     let shared = Arc::new(Shared::new(&data_dir));
+    // The owner's rules for giving the GPU back are watched from the start,
+    // connected or not.
+    tokio::spawn(session::watch_yield(
+        data_dir.clone(),
+        rt.clone(),
+        shared.clone(),
+        fake_gpu,
+    ));
 
     // ── Self-update ──────────────────────────────────────────
     // A background agent replaces its own binary when the platform publishes
@@ -843,6 +895,134 @@ async fn main() -> Result<()> {
         }
     };
     std::process::exit(code);
+}
+
+/// `pause`: the owner takes the GPU back. The running agent reads the rules
+/// file every few seconds, so there is nothing to restart and nothing to
+/// reach: it works with the platform down, and it is the same on every
+/// system.
+fn pause(data_dir: &std::path::Path, duration: Option<&str>) -> i32 {
+    let mut rules = yielding::load(data_dir);
+    let until = match duration {
+        None => yielding::UNTIL_RESUMED,
+        Some(d) => match yielding::parse_duration(d) {
+            Ok(d) => chrono::Local::now().timestamp() + d.as_secs() as i64,
+            Err(e) => {
+                eprintln!("{e:#}");
+                return 2;
+            }
+        },
+    };
+    rules.paused_until = Some(until);
+    if let Err(e) = yielding::save(data_dir, &rules) {
+        eprintln!("Could not save the pause: {e:#}");
+        return 1;
+    }
+    match duration {
+        None => println!("Paused. The GPU is given back within half a minute and stays yours until you run: ayeusann-agent resume"),
+        Some(d) => println!("Paused for {d}. The GPU is given back within half a minute. To offer it again sooner: ayeusann-agent resume"),
+    }
+    0
+}
+
+fn resume(data_dir: &std::path::Path) -> i32 {
+    let mut rules = yielding::load(data_dir);
+    if rules.paused_until.take().is_none() {
+        println!("The agent was not paused.");
+        return 0;
+    }
+    if let Err(e) = yielding::save(data_dir, &rules) {
+        eprintln!("Could not save: {e:#}");
+        return 1;
+    }
+    println!("Resumed. The machine takes work again within a few seconds, unless one of its other rules applies (see: ayeusann-agent yield).");
+    0
+}
+
+/// `yield`: show the rules, or change the ones named.
+fn yield_rules(
+    data_dir: &std::path::Path,
+    on_battery: Option<&str>,
+    when_gpu_busy: Option<&str>,
+    when_active: Option<&str>,
+    hours: Option<&str>,
+) -> i32 {
+    fn switch(v: &str) -> Result<bool, String> {
+        match v.to_ascii_lowercase().as_str() {
+            "on" | "yes" | "true" => Ok(true),
+            "off" | "no" | "false" => Ok(false),
+            other => Err(format!("{other:?} is neither on nor off")),
+        }
+    }
+    let mut rules = yielding::load(data_dir);
+    let before = rules.clone();
+    let set = |target: &mut bool, v: Option<&str>| -> Result<(), String> {
+        if let Some(v) = v {
+            *target = switch(v)?;
+        }
+        Ok(())
+    };
+    let applied = set(&mut rules.on_battery, on_battery)
+        .and_then(|_| set(&mut rules.when_gpu_busy, when_gpu_busy))
+        .and_then(|_| set(&mut rules.when_active, when_active))
+        .and_then(|_| match hours {
+            None => Ok(()),
+            Some(h) if h.eq_ignore_ascii_case("any") => {
+                rules.hours = None;
+                Ok(())
+            }
+            Some(h) if yielding::parse_hours(h).is_some() => {
+                rules.hours = Some(h.trim().to_string());
+                Ok(())
+            }
+            Some(h) => Err(format!(
+                "{h:?} is not a range of hours; write it like 22:00-07:00, or any"
+            )),
+        });
+    if let Err(e) = applied {
+        eprintln!("{e}");
+        return 2;
+    }
+    if rules != before {
+        if let Err(e) = yielding::save(data_dir, &rules) {
+            eprintln!("Could not save: {e:#}");
+            return 1;
+        }
+    }
+    let word = |b: bool| if b { "yes" } else { "no" };
+    println!("This machine gives the GPU back:");
+    println!(
+        "  on battery                         {}",
+        word(rules.on_battery)
+    );
+    println!(
+        "  while another program uses the GPU {}",
+        word(rules.when_gpu_busy)
+    );
+    println!(
+        "  while someone is at the keyboard   {}",
+        word(rules.when_active)
+    );
+    println!(
+        "  outside these hours                {}",
+        rules
+            .hours
+            .as_deref()
+            .unwrap_or("never (offered at any time)")
+    );
+    match rules.paused_until {
+        Some(yielding::UNTIL_RESUMED) => println!(
+            "  paused                             yes, until you run: ayeusann-agent resume"
+        ),
+        Some(until) if until > chrono::Local::now().timestamp() => {
+            println!("  paused                             yes, for a while yet (ayeusann-agent resume ends it)")
+        }
+        _ => println!("  paused                             no"),
+    }
+    if rules != before {
+        println!("Saved. The running agent picks this up within a few seconds.");
+    }
+    0
 }
 
 /// Resolves when the agent is asked to stop: Ctrl+C in a terminal, or the

@@ -202,6 +202,41 @@ func SetReplicaState(ctx context.Context, q db.Querier, replicaID, state, detail
 	return depID, prev != state, nil
 }
 
+// DrainHost marks every replica on a host STOPPING, so the coordinator stops
+// them and the scheduler places replacements elsewhere. A replica that is
+// stopping takes no new requests; the agent lets the ones in flight finish
+// before it unloads the model.
+func DrainHost(ctx context.Context, tx pgx.Tx, hostID, reason string) error {
+	rows, err := tx.Query(ctx, `
+		SELECT id FROM replicas WHERE host_id = $1 AND state IN ('pending', 'pulling', 'loading', 'warming', 'serving', 'degraded');
+	`, hostID)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	deps := map[string]bool{}
+	for _, id := range ids {
+		depID, _, err := SetReplicaState(ctx, tx, id, Stopping, reason, "")
+		if err != nil {
+			return err
+		}
+		deps[depID] = true
+	}
+	for d := range deps {
+		if _, _, err := Recompute(ctx, tx, d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Recompute derives and stores a deployment's state inside tx. It takes a row
 // lock on the deployment so the coordinator and scheduler serialize.
 func Recompute(ctx context.Context, tx pgx.Tx, deploymentID string) (string, bool, error) {

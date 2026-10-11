@@ -93,7 +93,7 @@ func (a *API) HandleAdminDrainHost(w http.ResponseWriter, r *http.Request) {
 		if tag.RowsAffected() == 0 {
 			return pgx.ErrNoRows
 		}
-		return drainHostReplicas(ctx, tx, id, "host drained by operations")
+		return lifecycle.DrainHost(ctx, tx, id, "host drained by operations")
 	})
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Host not found")

@@ -653,8 +653,16 @@ type Heartbeat struct {
 	HostUserActive bool                   `protobuf:"varint,6,opt,name=host_user_active,json=hostUserActive,proto3" json:"host_user_active,omitempty"` // For pause-when-active
 	CachedModels   []string               `protobuf:"bytes,7,rep,name=cached_models,json=cachedModels,proto3" json:"cached_models,omitempty"`
 	RuntimeHealthy bool                   `protobuf:"varint,8,opt,name=runtime_healthy,json=runtimeHealthy,proto3" json:"runtime_healthy,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The machine's owner needs it: the agent is on battery, the GPU is busy
+	// with something of theirs, they paused it, or it is outside the hours
+	// they offer. The platform gives the machine no work and takes back what
+	// it is running until this clears. The rules live on the machine and the
+	// owner's choice always wins; the platform is only told.
+	Yielding bool `protobuf:"varint,9,opt,name=yielding,proto3" json:"yielding,omitempty"`
+	// Why, in words the owner would recognise: "on battery".
+	YieldReason   string `protobuf:"bytes,10,opt,name=yield_reason,json=yieldReason,proto3" json:"yield_reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -741,6 +749,20 @@ func (x *Heartbeat) GetRuntimeHealthy() bool {
 		return x.RuntimeHealthy
 	}
 	return false
+}
+
+func (x *Heartbeat) GetYielding() bool {
+	if x != nil {
+		return x.Yielding
+	}
+	return false
+}
+
+func (x *Heartbeat) GetYieldReason() string {
+	if x != nil {
+		return x.YieldReason
+	}
+	return ""
 }
 
 type GpuStatus struct {
@@ -2293,7 +2315,7 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x18compute_capability_major\x18\x05 \x01(\x05R\x16computeCapabilityMajor\x128\n" +
 	"\x18compute_capability_minor\x18\x06 \x01(\x05R\x16computeCapabilityMinor\x12\x12\n" +
 	"\x04uuid\x18\a \x01(\tR\x04uuid\x12 \n" +
-	"\vfingerprint\x18\b \x01(\tR\vfingerprint\"\xdb\x02\n" +
+	"\vfingerprint\x18\b \x01(\tR\vfingerprint\"\x9a\x03\n" +
 	"\tHeartbeat\x12*\n" +
 	"\x02ts\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02ts\x12\"\n" +
 	"\rcpu_usage_pct\x18\x02 \x01(\x01R\vcpuUsagePct\x12(\n" +
@@ -2304,7 +2326,10 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"activeJobs\x12(\n" +
 	"\x10host_user_active\x18\x06 \x01(\bR\x0ehostUserActive\x12#\n" +
 	"\rcached_models\x18\a \x03(\tR\fcachedModels\x12'\n" +
-	"\x0fruntime_healthy\x18\b \x01(\bR\x0eruntimeHealthy\"\xdc\x01\n" +
+	"\x0fruntime_healthy\x18\b \x01(\bR\x0eruntimeHealthy\x12\x1a\n" +
+	"\byielding\x18\t \x01(\bR\byielding\x12!\n" +
+	"\fyield_reason\x18\n" +
+	" \x01(\tR\vyieldReason\"\xdc\x01\n" +
 	"\tGpuStatus\x12\x19\n" +
 	"\bgpu_uuid\x18\x01 \x01(\tR\agpuUuid\x12'\n" +
 	"\x0futilization_pct\x18\x02 \x01(\x01R\x0eutilizationPct\x12 \n" +

@@ -209,17 +209,22 @@ type Host struct {
 	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
 	// ClockSkewSeconds is the machine's clock minus the platform's at its
 	// last heartbeat.
-	ClockSkewSeconds *int       `json:"clock_skew_seconds,omitempty"`
-	LastHeartbeatAt  *time.Time `json:"last_heartbeat_at,omitempty"`
-	OS               *string    `json:"os,omitempty"`
-	Runtime          *string    `json:"runtime,omitempty"`
-	RuntimeHealthy   bool       `json:"runtime_healthy"`
-	CachedModels     []string   `json:"cached_models"`
-	Paused           bool       `json:"paused"`
-	ProbationUntil   *time.Time `json:"probation_until,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	DeletedAt        *time.Time `json:"deleted_at,omitempty"`
+	ClockSkewSeconds *int `json:"clock_skew_seconds,omitempty"`
+	// Yielding: the machine's owner needs it for now (on battery, the GPU
+	// busy with something else, paused from its command line, outside the
+	// hours it is offered). It takes no work until that clears by itself.
+	Yielding        bool       `json:"yielding"`
+	YieldReason     *string    `json:"yield_reason,omitempty"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	OS              *string    `json:"os,omitempty"`
+	Runtime         *string    `json:"runtime,omitempty"`
+	RuntimeHealthy  bool       `json:"runtime_healthy"`
+	CachedModels    []string   `json:"cached_models"`
+	Paused          bool       `json:"paused"`
+	ProbationUntil  *time.Time `json:"probation_until,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
 }
 
 type GPU struct {

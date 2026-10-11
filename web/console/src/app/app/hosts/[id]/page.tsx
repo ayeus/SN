@@ -104,7 +104,13 @@ export default function HostPage() {
         }
         description={
           <span className="flex flex-wrap items-center gap-3">
-            {online ? <StateBadge state={h.paused ? "paused" : h.status} /> : <StateBadge state="offline" label={`Offline, last seen ${ago(h.last_heartbeat_at)}`} />}
+            {!online ? (
+              <StateBadge state="offline" label={`Offline, last seen ${ago(h.last_heartbeat_at)}`} />
+            ) : h.yielding && !h.paused ? (
+              <StateBadge state="paused" label={`Given back: ${h.yield_reason ?? "its owner needs it"}`} />
+            ) : (
+              <StateBadge state={h.paused ? "paused" : h.status} />
+            )}
             <TierBadge tier={h.tier} long />
             <span>{h.region}</span>
             {h.runtime && <span>{h.runtime}{h.runtime_healthy ? "" : " (not reachable)"}</span>}
@@ -138,6 +144,14 @@ export default function HostPage() {
         <Notice className="mb-6">
           On probation until {dateTime(h.probation_until)}. During probation the machine takes interruptible work only; it moves up once
           its uptime and reputation hold.
+        </Notice>
+      )}
+      {h.yielding && online && !h.paused && (
+        <Notice className="mb-6">
+          This machine has given its GPU back to its owner for now ({h.yield_reason ?? "its owner needs it"}). Its models were moved to
+          other machines, and it takes work again by itself when it is free. The rules are set on the machine:{" "}
+          <code>ayeusann-agent yield</code> shows them, and <code>ayeusann-agent pause</code> and <code>resume</code> take the GPU back
+          or offer it by hand.
         </Notice>
       )}
       {Math.abs(h.clock_skew_seconds ?? 0) >= 120 && online && (

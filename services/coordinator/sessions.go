@@ -30,6 +30,11 @@ type session struct {
 	// goroutine that reads this session's stream.
 	runtimeDownSince time.Time
 	runtimeGivenUp   bool
+	// What this session last recorded about the host yielding to its owner,
+	// so the host's row is written when that changes and not on every beat.
+	yieldKnown  bool
+	yielding    bool
+	yieldReason string
 
 	mu       sync.Mutex
 	inflight map[string]*answer

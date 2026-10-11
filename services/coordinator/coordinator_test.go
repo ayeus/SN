@@ -1577,6 +1577,75 @@ func TestReplicasAreReplacedWhenTheRuntimeUnderThemDies(t *testing.T) {
 	}
 }
 
+// A friend unplugs their laptop, or starts a game. The agent says the machine
+// is needed; nothing has gone wrong, so nothing is failed.
+func TestAYieldingHostIsDrainedAndComesBackByItself(t *testing.T) {
+	f := setup(t)
+	rep, _, sess := f.serving()
+	var last time.Time
+	beat := func(yielding bool, reason string) {
+		f.s.onHeartbeat(f.ctx, sess, &agentv1.Heartbeat{RuntimeHealthy: true, Yielding: yielding, YieldReason: reason}, &last)
+	}
+
+	beat(false, "")
+	if s := f.replicaState(rep); s != "serving" {
+		t.Fatalf("replica is %s on a host that is not yielding, want serving", s)
+	}
+
+	beat(true, "on battery")
+	if s := f.replicaState(rep); s != "stopping" {
+		t.Fatalf("replica is %s on a yielding host, want stopping: no new requests, the ones in flight finish", s)
+	}
+	if d := f.str(`SELECT COALESCE(detail, '') FROM replicas WHERE id = $1`, rep); !strings.Contains(d, "on battery") {
+		t.Fatalf("the replica's detail is %q, want the owner's reason", d)
+	}
+	if e := f.str(`SELECT COALESCE(last_error, '') FROM replicas WHERE id = $1`, rep); e != "" {
+		t.Fatalf("yielding was recorded as an error: %q", e)
+	}
+	var yielding bool
+	var reason string
+	if err := testDB.Pool.QueryRow(f.ctx, `SELECT yielding, COALESCE(yield_reason, '') FROM hosts WHERE id = $1`, sess.hostID).Scan(&yielding, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if !yielding || reason != "on battery" {
+		t.Fatalf("host recorded as yielding=%v reason=%q", yielding, reason)
+	}
+	// It is not offered work while it yields,
+	cands, err := placement.LoadCandidates(f.ctx, testDB.Pool, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cands {
+		if c.HostID == sess.hostID {
+			t.Fatal("a yielding host is still a candidate for new work")
+		}
+	}
+	// and is the same host, still in good standing.
+	if s := f.str(`SELECT status FROM hosts WHERE id = $1`, sess.hostID); s != "active" {
+		t.Fatalf("host status is %s while yielding, want active", s)
+	}
+
+	// The reason can change without anything being done twice.
+	since := f.str(`SELECT yielding_since::TEXT FROM hosts WHERE id = $1`, sess.hostID)
+	beat(true, "the GPU is in use by another program")
+	if got := f.str(`SELECT yielding_since::TEXT FROM hosts WHERE id = $1`, sess.hostID); got != since {
+		t.Fatal("a change of reason restarted the clock on how long the host has been yielding")
+	}
+
+	// Plugged back in: eligible again, with nothing for anyone to do.
+	f.exec(`UPDATE replicas SET state = 'stopped' WHERE id = $1`, rep)
+	f.exec(`UPDATE gpus SET status = 'available', replica_id = NULL WHERE host_id = $1`, sess.hostID)
+	beat(false, "")
+	cands, _ = placement.LoadCandidates(f.ctx, testDB.Pool, time.Minute)
+	found := false
+	for _, c := range cands {
+		found = found || c.HostID == sess.hostID
+	}
+	if !found {
+		t.Fatal("the host was not offered work again once it stopped yielding")
+	}
+}
+
 // A host whose clock is wrong refuses every signed job, and nothing on the
 // host says why. The platform can see it from the heartbeat.
 func TestAHostsClockIsComparedWithThePlatforms(t *testing.T) {
