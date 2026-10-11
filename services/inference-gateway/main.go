@@ -68,21 +68,29 @@ func main() {
 		revocations:    auth.NewPGRevocationStore(dbClient.Pool),
 		limiter:        limiter,
 		router:         newRouter(dbClient, platform.HeartbeatTimeout()),
+		timeout:        platform.InferenceTimeout(),
 		svcAuth:        svcAuth,
 		coordinatorURL: platform.CoordinatorURL(),
 		inferenceHost:  platform.Env("INFERENCE_HOST", ""),
 		log:            logger,
 		client: &http.Client{
-			// No overall timeout: streams legitimately last minutes. The
-			// coordinator enforces per-request deadlines.
+			// No timeout here, and none on waiting for the first byte: an
+			// answer that is not streamed sends nothing until it is whole,
+			// which can take minutes. Each request carries its own limit
+			// (INFERENCE_TIMEOUT_SECONDS), and the coordinator notices a
+			// host that has gone quiet long before that.
 			Transport: &http.Transport{
-				DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-				ResponseHeaderTimeout: 70 * time.Second,
-				MaxIdleConnsPerHost:   64,
-				IdleConnTimeout:       90 * time.Second,
+				DialContext:         (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+				MaxIdleConnsPerHost: 64,
+				IdleConnTimeout:     90 * time.Second,
 			},
 		},
 	}
+
+	// One replica answers a few requests at once and queues the rest itself;
+	// past this many the caller is told to wait, rather than joining a queue
+	// on a friend's laptop that it cannot see.
+	g.router.maxInflight = platform.EnvInt("REPLICA_MAX_INFLIGHT", 8)
 
 	srv, err := platform.NewServer(platform.ServiceConfig{Name: "inference-gateway", Version: platform.Version, Port: port})
 	if err != nil {

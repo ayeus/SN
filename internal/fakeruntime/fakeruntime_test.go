@@ -258,3 +258,20 @@ func TestFaultsCanBeSetOverHTTP(t *testing.T) {
 		t.Fatalf("forced status ignored: %d", resp.StatusCode)
 	}
 }
+
+// A runtime that crashes mid-answer leaves a stream with no ending. Tests of
+// the request path use this to check the caller is told.
+func TestAStreamCanBeCutAfterSomeTokens(t *testing.T) {
+	_, url := serve(t, Config{AbortAfterTokens: 3}, "m:1")
+	resp := post(t, url+"/v1/chat/completions", `{"model":"m:1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	body, err := io.ReadAll(resp.Body)
+	if err == nil {
+		t.Fatalf("the stream ended cleanly, want a broken connection; got %q", body)
+	}
+	if n := strings.Count(string(body), `"content"`); n != 3 {
+		t.Fatalf("%d tokens arrived before the cut, want 3: %q", n, body)
+	}
+	if strings.Contains(string(body), "[DONE]") || strings.Contains(string(body), `"finish_reason":"stop"`) {
+		t.Fatalf("a cut stream must not look finished: %q", body)
+	}
+}

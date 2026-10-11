@@ -810,13 +810,10 @@ func TestSilentHostGoesOfflineAndItsServingReplicasWait(t *testing.T) {
 		t.Fatal("the offline host still has a session")
 	}
 	// A request in flight on the dead host is failed so the gateway can retry.
-	select {
-	case c := <-ch:
-		if !c.GetDone() || c.GetError() == "" {
-			t.Fatalf("in-flight request got %+v, want a terminal error", c)
-		}
-	default:
+	if c := ch.pop(); c == nil {
 		t.Fatal("an in-flight request on the offline host was left hanging")
+	} else if !c.GetDone() || c.GetError() == "" {
+		t.Fatalf("in-flight request got %+v, want a terminal error", c)
 	}
 
 	// Inside the minute nothing more happens.
@@ -1244,31 +1241,49 @@ func TestAFailedSendDropsTheSession(t *testing.T) {
 	}
 }
 
-// A slow reader of an inference answer can hold up the handler that delivers
-// it. Closing the session has to get through anyway.
-func TestClosingASessionUnblocksADeliveryInProgress(t *testing.T) {
+// Everything a host sends arrives on one stream, heartbeats included. An
+// answer nobody is reading must not hold that stream up: the host would be
+// declared offline for a caller's slow download.
+func TestASlowReaderNeverHoldsUpItsHost(t *testing.T) {
 	st := newStream()
 	t.Cleanup(st.cancel)
 	sess := newSession("host", st)
-	ch, _ := sess.open("req")
-	for range cap(ch) {
-		sess.deliver(&agentv1.InferenceChunk{RequestId: "req"}, st.ctx.Done())
-	}
-	blocked := make(chan struct{})
+	ans, _ := sess.open("req")
+
+	piece := make([]byte, 1<<20)
+	delivered := make(chan struct{})
 	go func() {
-		sess.deliver(&agentv1.InferenceChunk{RequestId: "req"}, st.ctx.Done()) // the reader has stopped
-		close(blocked)
+		// Far more than the buffer holds, with nobody reading.
+		for range maxBufferedAnswer>>20 + 8 {
+			sess.deliver(&agentv1.InferenceChunk{RequestId: "req", Data: piece})
+		}
+		close(delivered)
 	}()
 	select {
-	case <-blocked:
-		t.Fatal("delivery into a full channel did not wait")
-	case <-time.After(100 * time.Millisecond):
+	case <-delivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivering to a reader that has stopped made the host's stream wait")
 	}
-	sess.close()
-	select {
-	case <-blocked:
-	case <-time.After(2 * time.Second):
-		t.Fatal("a delivery in progress outlived the session; its handler could never end the stream")
+
+	// The request is ended with an error rather than left half-buffered,
+	c := ans.pop()
+	if c == nil || !c.GetDone() || c.GetError() != errSlowReader {
+		t.Fatalf("got %+v, want one final chunk saying the answer was not being read", c)
+	}
+	if ans.pop() != nil {
+		t.Fatal("chunks were queued after the request had ended")
+	}
+	// and the host is told to stop producing it.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case m := <-st.out:
+			if m.GetInferenceCancel().GetRequestId() == "req" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("the host was not told to stop an answer nobody was reading")
+		}
 	}
 }
 
@@ -1429,8 +1444,8 @@ func TestTunnelStreamsTheAnswerAndReportsUsage(t *testing.T) {
 	go func() {
 		m := <-st.out
 		id := m.GetInferenceRequest().GetRequestId()
-		sess.deliver(&agentv1.InferenceChunk{RequestId: id, Data: []byte("data: hel\n\n"), StatusCode: 200}, f.ctx.Done())
-		sess.deliver(&agentv1.InferenceChunk{RequestId: id, Data: []byte("data: lo\n\n"), Done: true, PromptTokens: 7, CompletionTokens: 2}, f.ctx.Done())
+		sess.deliver(&agentv1.InferenceChunk{RequestId: id, Data: []byte("data: hel\n\n"), StatusCode: 200})
+		sess.deliver(&agentv1.InferenceChunk{RequestId: id, Data: []byte("data: lo\n\n"), Done: true, PromptTokens: 7, CompletionTokens: 2})
 	}()
 
 	rec := httptest.NewRecorder()
@@ -1485,7 +1500,7 @@ func TestTunnelRefusesBeforeTheFirstByteSoTheGatewayCanRetry(t *testing.T) {
 	sess := f.s.sessions.get(hostID)
 	go func() {
 		m := <-st.out
-		sess.deliver(&agentv1.InferenceChunk{RequestId: m.GetInferenceRequest().GetRequestId(), Done: true, StatusCode: 503, Error: "model not loaded"}, f.ctx.Done())
+		sess.deliver(&agentv1.InferenceChunk{RequestId: m.GetInferenceRequest().GetRequestId(), Done: true, StatusCode: 503, Error: "model not loaded"})
 	}()
 	if code := call(f.infer(rep, false)); code != http.StatusServiceUnavailable {
 		t.Fatalf("runtime error: status %d, want the runtime's 503", code)
@@ -1498,6 +1513,280 @@ func TestTunnelRefusesBeforeTheFirstByteSoTheGatewayCanRetry(t *testing.T) {
 	}()
 	if code := call(f.infer(rep, false)); code != http.StatusBadGateway {
 		t.Fatalf("host disconnect: status %d, want 502", code)
+	}
+}
+
+// serving returns a serving replica on a host whose agent has connected with
+// the given capabilities, and the stream the test plays that agent on.
+func (f *fixture) serving(capabilities ...string) (rep string, st *fakeStream, sess *session) {
+	f.t.Helper()
+	hostID, gpuID := f.host()
+	rep = f.replica(f.deployment(), hostID, gpuID)
+	f.exec(`UPDATE replicas SET state = 'serving' WHERE id = $1`, rep)
+	st = f.connect(hostID)
+	sess = f.s.sessions.get(hostID)
+	sess.capabilities = capabilities
+	return rep, st, sess
+}
+
+// asked waits for the request the coordinator sends the agent.
+func asked(t *testing.T, st *fakeStream) *agentv1.InferenceRequest {
+	t.Helper()
+	select {
+	case m := <-st.out:
+		if r := m.GetInferenceRequest(); r != nil {
+			return r
+		}
+		t.Fatalf("the agent was sent %T, want an inference request", m.GetPayload())
+	case <-time.After(5 * time.Second):
+		t.Fatal("the agent was never sent the request")
+	}
+	return nil
+}
+
+// cancelled reports whether the agent was told to stop the request.
+func cancelled(st *fakeStream, id string) bool {
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case m := <-st.out:
+			if m.GetInferenceCancel().GetRequestId() == id {
+				return true
+			}
+		case <-deadline:
+			return false
+		}
+	}
+}
+
+// A model that thinks for a long time before answering is not a host that has
+// gone quiet. The agent says it is still working, and the answer, arriving in
+// pieces, is put back together.
+func TestALongAnswerIsWaitedForWhileTheAgentKeepsSayingItIsWorking(t *testing.T) {
+	f := setup(t)
+	f.s.keepaliveEvery, f.s.silenceLimit = 20*time.Millisecond, 150*time.Millisecond
+	rep, st, sess := f.serving(capKeepalive)
+
+	go func() {
+		r := asked(t, st)
+		if r.GetKeepaliveSeconds() < 1 {
+			t.Errorf("an agent that sends keep-alives was not asked for them")
+		}
+		// Three times as long as the coordinator would wait in silence.
+		for range 15 {
+			time.Sleep(30 * time.Millisecond)
+			sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Keepalive: true})
+		}
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Data: []byte(`{"answer":`), StatusCode: 200})
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Data: []byte(`"whole"}`), Done: true, PromptTokens: 3, CompletionTokens: 1})
+	}()
+
+	rec := httptest.NewRecorder()
+	f.s.handleInfer(rec, f.infer(rep, false))
+	res := rec.Result()
+	if res.StatusCode != 200 || rec.Body.String() != `{"answer":"whole"}` {
+		t.Fatalf("status %d body %q, want the whole answer", res.StatusCode, rec.Body.String())
+	}
+	if res.Trailer.Get(TrailerCompletionTokens) != "1" {
+		t.Fatal("usage of an answer that arrived in pieces was lost")
+	}
+}
+
+func TestAHostThatGoesQuietIsGivenUpOnAndToldToStop(t *testing.T) {
+	f := setup(t)
+	f.s.keepaliveEvery, f.s.silenceLimit = 20*time.Millisecond, 100*time.Millisecond
+	rep, st, _ := f.serving(capKeepalive)
+
+	rec := httptest.NewRecorder()
+	begun := time.Now()
+	f.s.handleInfer(rec, f.infer(rep, false))
+	if rec.Code != http.StatusGatewayTimeout || rec.Header().Get(HeaderReason) != reasonHostTimeout {
+		t.Fatalf("status %d reason %q, want 504 host_timeout so the gateway tries another replica", rec.Code, rec.Header().Get(HeaderReason))
+	}
+	if time.Since(begun) > 3*time.Second {
+		t.Fatal("a silent host was waited on far longer than the silence limit")
+	}
+	asked(t, st)
+	if !cancelled(st, "req-"+rep) {
+		t.Fatal("the host was not told to stop a request that was given up on")
+	}
+}
+
+// An agent from before keep-alives cannot be told from a wedged one by its
+// silence, so it is given the whole time limit, and asked for nothing new.
+func TestAnAgentWithoutKeepalivesIsGivenTheWholeLimit(t *testing.T) {
+	f := setup(t)
+	f.s.keepaliveEvery, f.s.silenceLimit = 20*time.Millisecond, 100*time.Millisecond
+	rep, st, sess := f.serving()
+
+	go func() {
+		r := asked(t, st)
+		if r.GetKeepaliveSeconds() != 0 {
+			t.Errorf("an old agent was asked for keep-alives")
+		}
+		time.Sleep(300 * time.Millisecond)
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Data: []byte(`{}`), Done: true, StatusCode: 200})
+	}()
+	rec := httptest.NewRecorder()
+	f.s.handleInfer(rec, f.infer(rep, false))
+	if rec.Code != 200 {
+		t.Fatalf("status %d: an old agent's slow answer was cut off", rec.Code)
+	}
+
+	// The limit itself still holds.
+	f.s.inferenceTimeout = 100 * time.Millisecond
+	rec = httptest.NewRecorder()
+	f.s.handleInfer(rec, f.infer(rep, false))
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status %d, want 504 once the request's time is up", rec.Code)
+	}
+}
+
+// One limit, streamed or not, however busy the agent sounds.
+func TestTheTimeLimitHoldsEvenWhileTheAgentIsWorking(t *testing.T) {
+	f := setup(t)
+	f.s.keepaliveEvery, f.s.silenceLimit = 10*time.Millisecond, time.Second
+	f.s.inferenceTimeout = 150 * time.Millisecond
+	rep, st, sess := f.serving(capKeepalive)
+
+	ctx, stop := context.WithCancel(f.ctx)
+	defer stop()
+	go func() {
+		r := asked(t, st)
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Data: []byte("data: one\n\n"), StatusCode: 200})
+		for ctx.Err() == nil {
+			time.Sleep(10 * time.Millisecond)
+			sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Keepalive: true})
+		}
+	}()
+	rec := httptest.NewRecorder()
+	f.s.handleInfer(rec, f.infer(rep, true))
+	body := rec.Body.String()
+	if !strings.HasPrefix(body, "data: one\n\n") || !strings.Contains(body, `"code":"stream_interrupted"`) {
+		t.Fatalf("body %q, want what was streamed and then an error event", body)
+	}
+	if rec.Result().Trailer.Get(TrailerError) == "" {
+		t.Fatal("a stream that ran out of time was reported as a success")
+	}
+}
+
+// A stream that breaks after it has started cannot take its status back. It
+// must not look finished either.
+func TestAStreamCutShortEndsWithAnErrorEvent(t *testing.T) {
+	f := setup(t)
+	rep, st, sess := f.serving()
+
+	check := func(what string, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		body := rec.Body.String()
+		if rec.Code != 200 || !strings.HasPrefix(body, "data: hel\n\n") {
+			t.Fatalf("%s: status %d body %q", what, rec.Code, body)
+		}
+		if strings.Contains(body, "[DONE]") {
+			t.Fatalf("%s: a broken stream was ended as if it were complete: %q", what, body)
+		}
+		last := strings.TrimSpace(body[strings.LastIndex(body, "data: "):])
+		var ev struct {
+			Error struct{ Message, Type, Code string }
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(last, "data: ")), &ev); err != nil || ev.Error.Code != "stream_interrupted" || ev.Error.Message == "" {
+			t.Fatalf("%s: the stream ended with %q, want an error event", what, last)
+		}
+		if rec.Result().Trailer.Get(TrailerError) == "" {
+			t.Fatalf("%s: no error trailer, so the request would be recorded as a success", what)
+		}
+	}
+
+	// The runtime dies mid-answer and the agent says so.
+	go func() {
+		r := asked(t, st)
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Data: []byte("data: hel\n\n"), StatusCode: 200})
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Done: true, Error: "stream interrupted: connection reset", CompletionTokens: 1})
+	}()
+	rec := httptest.NewRecorder()
+	f.s.handleInfer(rec, f.infer(rep, true))
+	check("runtime died", rec)
+	if rec.Result().Trailer.Get(TrailerCompletionTokens) != "1" {
+		t.Fatal("the tokens produced before the break were not reported")
+	}
+
+	// The host itself drops mid-answer.
+	go func() {
+		r := asked(t, st)
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Data: []byte("data: hel\n\n"), StatusCode: 200})
+		time.Sleep(50 * time.Millisecond)
+		sess.close()
+	}()
+	rec = httptest.NewRecorder()
+	f.s.handleInfer(rec, f.infer(rep, true))
+	check("host dropped", rec)
+}
+
+// An answer that is not streamed is all or nothing: if it breaks half way the
+// caller gets none of it, and the gateway can ask another replica.
+func TestAnAnswerThatBreaksHalfWayIsRefusedWhole(t *testing.T) {
+	f := setup(t)
+	rep, st, sess := f.serving()
+	go func() {
+		r := asked(t, st)
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Data: []byte(`{"half":`), StatusCode: 200})
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Done: true, Error: "reading runtime response: connection reset"})
+	}()
+	rec := httptest.NewRecorder()
+	f.s.handleInfer(rec, f.infer(rep, false))
+	if rec.Code != http.StatusBadGateway || rec.Header().Get(HeaderReason) != reasonHostError {
+		t.Fatalf("status %d reason %q, want 502 host_error", rec.Code, rec.Header().Get(HeaderReason))
+	}
+	if strings.Contains(rec.Body.String(), "half") {
+		t.Fatalf("half an answer reached the caller: %q", rec.Body.String())
+	}
+
+	// A host that drops is named as such, so it is the host that is blamed.
+	go func() {
+		asked(t, st)
+		sess.close()
+	}()
+	rec = httptest.NewRecorder()
+	f.s.handleInfer(rec, f.infer(rep, false))
+	if rec.Code != http.StatusBadGateway || rec.Header().Get(HeaderReason) != reasonDisconnected {
+		t.Fatalf("status %d reason %q, want 502 host_disconnected", rec.Code, rec.Header().Get(HeaderReason))
+	}
+}
+
+// A message over 4 MB breaks the connection of an agent that predates large
+// messages, and with it every other request that host is answering.
+func TestALargeRequestIsNotSentToAnAgentThatCannotTakeIt(t *testing.T) {
+	f := setup(t)
+	big := func(rep string) *http.Request {
+		body, _ := json.Marshal(inferRequest{
+			RequestID: "req-" + rep, ReplicaID: rep, Path: "/v1/chat/completions",
+			Body: json.RawMessage(`{"prompt":"` + strings.Repeat("a", 5<<20) + `"}`),
+		})
+		return httptest.NewRequest("POST", "/internal/v1/infer", bytes.NewReader(body)).WithContext(f.ctx)
+	}
+
+	rep, st, _ := f.serving()
+	rec := httptest.NewRecorder()
+	f.s.handleInfer(rec, big(rep))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get(HeaderReason) != reasonAgentTooOld {
+		t.Fatalf("status %d reason %q, want 503 agent_too_old", rec.Code, rec.Header().Get(HeaderReason))
+	}
+	if len(st.messages()) != 0 {
+		t.Fatal("the oversized request was sent to the old agent anyway")
+	}
+
+	rep, st, sess := f.serving(capLargeMessages)
+	go func() {
+		r := asked(t, st)
+		if len(r.GetBody()) < 5<<20 {
+			t.Errorf("the body arrived short: %d bytes", len(r.GetBody()))
+		}
+		sess.deliver(&agentv1.InferenceChunk{RequestId: r.GetRequestId(), Data: []byte(`{}`), Done: true, StatusCode: 200})
+	}()
+	rec = httptest.NewRecorder()
+	f.s.handleInfer(rec, big(rep))
+	if rec.Code != 200 {
+		t.Fatalf("status %d: an agent that takes large messages was refused one", rec.Code)
 	}
 }
 

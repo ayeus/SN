@@ -25,7 +25,7 @@ type session struct {
 	sendMu sync.Mutex
 
 	mu       sync.Mutex
-	inflight map[string]chan *agentv1.InferenceChunk
+	inflight map[string]*answer
 	closed   bool
 	// done is closed with the session. The stream's handler watches it, so
 	// closing a session really does end the connection: the agent sees the
@@ -34,7 +34,7 @@ type session struct {
 }
 
 func newSession(hostID string, stream agentv1.AgentService_SessionServer) *session {
-	return &session{hostID: hostID, stream: stream, inflight: map[string]chan *agentv1.InferenceChunk{}, done: make(chan struct{})}
+	return &session{hostID: hostID, stream: stream, inflight: map[string]*answer{}, done: make(chan struct{})}
 }
 
 func (s *session) send(msg *agentv1.CoordinatorMessage) error {
@@ -48,16 +48,98 @@ func (s *session) send(msg *agentv1.CoordinatorMessage) error {
 	return s.stream.Send(msg)
 }
 
-// open registers an in-flight inference request and returns its chunk channel.
-func (s *session) open(requestID string) (chan *agentv1.InferenceChunk, error) {
+// Protocol features an agent may list when it registers.
+const (
+	// capKeepalive: the agent says "still working" while a runtime has
+	// produced nothing, so silence means the host is gone, not thinking.
+	capKeepalive = "inference-keepalive"
+	// capLargeMessages: the agent accepts messages up to
+	// platform.MaxAgentMessage. Older agents drop the connection at 4 MB.
+	capLargeMessages = "large-messages"
+)
+
+// has reports whether the agent listed a capability when it registered.
+func (s *session) has(capability string) bool {
+	for _, c := range s.capabilities {
+		if c == capability {
+			return true
+		}
+	}
+	return false
+}
+
+// maxBufferedAnswer bounds what one request may have waiting for a reader
+// that is not keeping up. It is above the largest answer an agent sends in
+// one piece of work (32 MB, non-streamed), so only a stalled reader meets it.
+const maxBufferedAnswer = 48 << 20
+
+// errSlowReader ends a request whose reader fell too far behind.
+const errSlowReader = "the answer was not being read and outgrew its buffer"
+
+// answer holds the chunks of one request until its HTTP handler takes them.
+//
+// It never makes the sender wait. Everything an agent sends, heartbeats
+// included, arrives on one stream read by one goroutine; if a chunk could
+// wait here for a slow reader, that host's heartbeats would wait behind it
+// and the host would be declared offline for somebody else's slow download.
+type answer struct {
+	mu     sync.Mutex
+	chunks []*agentv1.InferenceChunk
+	bytes  int
+	ended  bool // the final chunk is queued; anything later is dropped
+	// wake holds at most one token: "there is something to take".
+	wake chan struct{}
+}
+
+func newAnswer() *answer { return &answer{wake: make(chan struct{}, 1)} }
+
+// push queues a chunk. It reports false, once, when the queue has outgrown
+// its limit: what was waiting is dropped and the request ends with an error.
+func (a *answer) push(c *agentv1.InferenceChunk) bool {
+	a.mu.Lock()
+	ok := true
+	switch {
+	case a.ended:
+	case a.bytes+len(c.GetData()) > maxBufferedAnswer:
+		a.chunks = []*agentv1.InferenceChunk{{RequestId: c.GetRequestId(), Done: true, StatusCode: 502, Error: errSlowReader}}
+		a.bytes, a.ended, ok = 0, true, false
+	default:
+		a.chunks = append(a.chunks, c)
+		a.bytes += len(c.GetData())
+		a.ended = c.GetDone()
+	}
+	a.mu.Unlock()
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
+	return ok
+}
+
+// pop takes the oldest waiting chunk, or nil when there is none.
+func (a *answer) pop() *agentv1.InferenceChunk {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.chunks) == 0 {
+		return nil
+	}
+	c := a.chunks[0]
+	a.chunks[0] = nil
+	a.chunks = a.chunks[1:]
+	a.bytes -= len(c.GetData())
+	return c
+}
+
+// open registers an in-flight inference request and returns its answer queue.
+func (s *session) open(requestID string) (*answer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, errSessionClosed
 	}
-	ch := make(chan *agentv1.InferenceChunk, 256)
-	s.inflight[requestID] = ch
-	return ch, nil
+	a := newAnswer()
+	s.inflight[requestID] = a
+	return a, nil
 }
 
 // release forgets an in-flight request.
@@ -67,21 +149,24 @@ func (s *session) release(requestID string) {
 	delete(s.inflight, requestID)
 }
 
-// deliver routes a chunk from the agent to the waiting HTTP handler. It blocks
-// when the handler is slow, which applies back-pressure to the agent stream.
-func (s *session) deliver(c *agentv1.InferenceChunk, done <-chan struct{}) {
+// deliver hands a chunk from the agent to the request waiting for it. It
+// returns at once whatever the reader is doing.
+func (s *session) deliver(c *agentv1.InferenceChunk) {
 	s.mu.Lock()
-	ch, ok := s.inflight[c.GetRequestId()]
+	a, ok := s.inflight[c.GetRequestId()]
 	s.mu.Unlock()
 	if !ok {
 		return // request already finished or cancelled
 	}
-	select {
-	case ch <- c:
-	case <-done:
-	case <-s.done:
-		// The session was closed while a slow reader held this up. Giving up
-		// lets the stream's handler see the close and end the stream.
+	if !a.push(c) {
+		// Nobody is reading this answer; tell the host to stop producing it.
+		// Sending can wait on the agent, so it is not done on this goroutine.
+		id := c.GetRequestId()
+		go func() {
+			_ = s.send(&agentv1.CoordinatorMessage{Payload: &agentv1.CoordinatorMessage_InferenceCancel{
+				InferenceCancel: &agentv1.InferenceCancel{RequestId: id},
+			}})
+		}()
 	}
 }
 
@@ -94,11 +179,8 @@ func (s *session) close() {
 	}
 	s.closed = true
 	close(s.done)
-	for id, ch := range s.inflight {
-		select {
-		case ch <- &agentv1.InferenceChunk{RequestId: id, Done: true, StatusCode: 502, Error: errSessionClosed.Error()}:
-		default:
-		}
+	for id, a := range s.inflight {
+		a.push(&agentv1.InferenceChunk{RequestId: id, Done: true, StatusCode: 502, Error: errSessionClosed.Error()})
 		delete(s.inflight, id)
 	}
 }

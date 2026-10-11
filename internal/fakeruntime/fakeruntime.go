@@ -42,6 +42,10 @@ type Config struct {
 	Hang bool `json:"hang"`
 	// Status, when not zero, is returned by every completion instead of an answer.
 	Status int `json:"status"`
+	// AbortAfterTokens, when above zero, cuts the connection of a streamed
+	// completion after that many tokens, the way a runtime that crashes
+	// mid-answer does: no finish reason, no [DONE].
+	AbortAfterTokens int `json:"abort_after_tokens"`
 }
 
 // Runtime is one fake model runtime.
@@ -391,6 +395,9 @@ func (r *Runtime) handleCompletion(w http.ResponseWriter, req *http.Request, cha
 		}
 	}
 	for i := 0; i < n; i++ {
+		if cfg.AbortAfterTokens > 0 && i == cfg.AbortAfterTokens {
+			panic(http.ErrAbortHandler)
+		}
 		if cfg.TokenDelayMs > 0 {
 			select {
 			case <-req.Context().Done():

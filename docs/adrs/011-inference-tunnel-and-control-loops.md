@@ -22,6 +22,18 @@ The agent already holds a long-lived, outbound, authenticated stream to the coor
 
 This keeps the principle behind ADR-001: hosts are outbound-only, need no inbound ports, and work behind home and campus NAT. It does so without deploying a WireGuard concentrator. The agent still generates and registers a WireGuard key pair, so the overlay can later carry bulk traffic without re-enrolling hosts.
 
+#### What a caller is told when a request goes wrong
+
+- **One time limit.** `INFERENCE_TIMEOUT_SECONDS` (default 600) bounds a request from start to finish, streamed or not. The inference gateway passes it to the coordinator, which passes it to the agent. There is no separate limit on the first byte: an answer that is not streamed sends nothing until it is complete, and that can take minutes.
+- **Silence means gone, not thinking.** The coordinator asks the agent (`InferenceRequest.keepalive_seconds`) to send a keep-alive chunk whenever a request has produced nothing for 10 s. An agent that sends them and then says nothing for 45 s has gone; the request is refused and retried elsewhere. Agents list the `inference-keepalive` capability; one that does not is given the whole limit.
+- **An answer that is not streamed is all or nothing.** The coordinator holds it until the final chunk, so a failure part-way is a refusal (502, 503 or 504) and the gateway tries another replica.
+- **A stream that breaks ends with an error event.** Once the first byte is out the status cannot change, so the stream ends with `data: {"error": {"code": "stream_interrupted", …}}` and no `[DONE]`. Client libraries raise it. Without it a cut stream is indistinguishable from a finished one.
+- **One size limit, 16 MB, on every hop** (`platform.MaxInferenceBody`). gRPC's default of 4 MB per message used to end the session of whichever host a larger prompt was sent to. Agents list `large-messages`; an agent without it is never sent a body over 4 MB. Agents send answers in pieces of at most 256 KB.
+- **A slow reader cannot stall a host.** Chunks, heartbeats and stage events arrive on one stream read by one goroutine. Chunks are queued per request without ever blocking it; a request with more than 48 MB waiting is ended and the host told to stop.
+- **Failures are written down.** `request_failures` records each attempt that failed before anything was sent (`kind = attempt`, with the coordinator's `X-Tunnel-Reason`) and each request answered with an error without being served (`kind = refused`). Reasons `host_error`, `host_timeout` and `host_disconnected` count in the host's success rate; the `request_outcomes` view adds refusals to the caller's error counts.
+- **A replica is given at most `REPLICA_MAX_INFLIGHT` requests at once** (default 8). When every replica is at its limit the caller gets 429 `at_capacity` with `Retry-After`, which client libraries retry. A replica that fails rests for 5 s, doubling with each failure in a row up to 2 minutes.
+- **One request id** is issued by the public gateway and carried to the runtime (`X-Request-ID`); a caller cannot choose it, because usage is recorded once per id.
+
 **Trade-off:** every token crosses the coordinator. At M1–M3 scale (tens to hundreds of GPUs) this is negligible. At Phase-5 scale, add coordinators per PoP with session-affinity routing, or move bulk traffic to the overlay.
 
 ### 2. Control is reconciliation against Postgres, not RPC chains

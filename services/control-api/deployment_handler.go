@@ -264,7 +264,7 @@ func (a *API) usageSummary(ctx context.Context, orgID, deploymentID string, wind
 	err := a.db.Pool.QueryRow(ctx, `
 		SELECT COUNT(*), COUNT(*) FILTER (WHERE status <> 'success'),
 		       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
-		FROM usage_events
+		FROM request_outcomes
 		WHERE org_id = $1 AND ($2 = '' OR deployment_id::TEXT = $2) AND ts >= NOW() - ($3 * INTERVAL '1 second');
 	`, orgID, deploymentID, int(window.Seconds())).Scan(&u.Requests, &u.Errors, &u.InputTokens, &u.OutputTokens)
 	return &u, err
@@ -276,7 +276,7 @@ func (a *API) HandleUsageDaily(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.Pool.Query(r.Context(), `
 		SELECT DATE_TRUNC('day', ts) AS d, COUNT(*), COUNT(*) FILTER (WHERE status <> 'success'),
 		       COALESCE(SUM(input_tokens + output_tokens), 0)
-		FROM usage_events
+		FROM request_outcomes
 		WHERE org_id = $1 AND ts >= NOW() - INTERVAL '30 days'
 		GROUP BY d ORDER BY d;
 	`, claimsOf(r).OrgID)
@@ -450,9 +450,9 @@ func (a *API) HandleDeploymentMetrics(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.Pool.Query(r.Context(), `
 		SELECT DATE_TRUNC($3, ts) AS t, COUNT(*), COUNT(*) FILTER (WHERE status <> 'success'),
 		       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-		       COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_ms), 0),
-		       COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms), 0)
-		FROM usage_events
+		       COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_ms) FILTER (WHERE served), 0),
+		       COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) FILTER (WHERE served), 0)
+		FROM request_outcomes
 		WHERE deployment_id = $1 AND ts >= NOW() - ($2 * INTERVAL '1 second')
 		GROUP BY t ORDER BY t;
 	`, v.ID, int(window.Seconds()), bucket)

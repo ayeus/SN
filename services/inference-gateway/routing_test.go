@@ -12,21 +12,21 @@ func TestPickPrefersLeastOutstanding(t *testing.T) {
 	r.acquire("a")
 	r.acquire("b")
 
-	got, ok := r.pick(cands, nil)
+	got, ok, _ := r.pick(cands, nil)
 	if !ok || got.ID != "c" {
 		t.Fatalf("expected idle replica c, got %+v", got)
 	}
 
 	r.acquire("c")
 	r.acquire("c")
-	got, _ = r.pick(cands, nil)
+	got, _, _ = r.pick(cands, nil)
 	if got.ID != "b" {
 		t.Fatalf("expected b (1 outstanding), got %s", got.ID)
 	}
 
 	r.release("a")
 	r.release("a")
-	got, _ = r.pick(cands, nil)
+	got, _, _ = r.pick(cands, nil)
 	if got.ID != "a" {
 		t.Fatalf("expected a after release, got %s", got.ID)
 	}
@@ -38,18 +38,18 @@ func TestPickSkipsExcludedAndRecentlyFailed(t *testing.T) {
 
 	r.markFailed("a")
 	for i := 0; i < 20; i++ {
-		got, ok := r.pick(cands, nil)
+		got, ok, _ := r.pick(cands, nil)
 		if !ok || got.ID != "b" {
 			t.Fatalf("failed replica must be skipped during cooldown, got %+v", got)
 		}
 	}
 
-	if _, ok := r.pick(cands, map[string]bool{"b": true}); ok {
+	if _, ok, _ := r.pick(cands, map[string]bool{"b": true}); ok {
 		t.Fatal("no replica should be eligible when the only healthy one is excluded")
 	}
 
 	r.markHealthy("a")
-	if got, ok := r.pick(cands, map[string]bool{"b": true}); !ok || got.ID != "a" {
+	if got, ok, _ := r.pick(cands, map[string]bool{"b": true}); !ok || got.ID != "a" {
 		t.Fatalf("healthy replica should be eligible again, got %+v", got)
 	}
 }
@@ -59,7 +59,7 @@ func TestPickSpreadsTies(t *testing.T) {
 	cands := []replica{{ID: "a"}, {ID: "b"}, {ID: "c"}}
 	seen := map[string]int{}
 	for i := 0; i < 300; i++ {
-		got, _ := r.pick(cands, nil)
+		got, _, _ := r.pick(cands, nil)
 		seen[got.ID]++
 	}
 	for _, id := range []string{"a", "b", "c"} {
@@ -95,5 +95,30 @@ func TestEstimatePromptTokens(t *testing.T) {
 	}
 	if estimatePromptTokens([]byte(`not json`)) != 0 {
 		t.Fatal("invalid body must estimate 0")
+	}
+}
+
+// A replica that keeps failing is asked less and less often, and one success
+// puts it back in rotation at once.
+func TestARepeatedlyFailingReplicaRestsLonger(t *testing.T) {
+	if cooldown(1) != unhealthyCooldown || cooldown(2) != 2*unhealthyCooldown || cooldown(3) != 4*unhealthyCooldown {
+		t.Fatalf("cooldowns %s, %s, %s: each failure in a row should double the wait", cooldown(1), cooldown(2), cooldown(3))
+	}
+	if cooldown(50) != maxCooldown {
+		t.Fatalf("cooldown grows without limit: %s", cooldown(50))
+	}
+
+	r := newRouter(nil, 15*time.Second)
+	cands := []replica{{ID: "a"}}
+	r.markFailed("a")
+	r.markFailed("a")
+	// Six seconds on: past the first cooldown, inside the second.
+	r.failedAt["a"] = time.Now().Add(-6 * time.Second)
+	if _, ok, _ := r.pick(cands, nil); ok {
+		t.Fatal("a replica that failed twice in a row was asked again after one cooldown")
+	}
+	r.markHealthy("a")
+	if _, ok, _ := r.pick(cands, nil); !ok {
+		t.Fatal("a success did not put the replica back in rotation")
 	}
 }

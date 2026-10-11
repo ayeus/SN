@@ -78,6 +78,8 @@ func main() {
 		wgServerPubKey:  platform.Env("WIREGUARD_SERVER_PUBKEY", ""),
 		coordinatorURLs: platform.CoordinatorURLs(),
 		allowFakeGPU:    platform.AllowsFakeGPU(),
+
+		inferenceTimeout: platform.InferenceTimeout(),
 	}
 	// Agent updates: the coordinator checks what is published against the
 	// release key's public half and passes it on. It never holds the private
@@ -101,6 +103,9 @@ func main() {
 	opts := []grpc.ServerOption{
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 20 * time.Second, Timeout: 10 * time.Second}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}),
+		// Above the largest answer an agent sends in one message (it splits
+		// anything bigger), and the same limit the agents accept from here.
+		grpc.MaxRecvMsgSize(platform.MaxAgentMessage),
 	}
 	if cert, key := os.Getenv("GRPC_TLS_CERT_FILE"), os.Getenv("GRPC_TLS_KEY_FILE"); cert != "" && key != "" {
 		creds, err := credentials.NewServerTLSFromFile(cert, key)

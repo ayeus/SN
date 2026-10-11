@@ -42,6 +42,10 @@ x-env: &env
   COORDINATOR_URL: http://coordinator:8083
   COORDINATOR_GRPC_URL: http://coordinator:50051
   INFERENCE_GATEWAY_URL: http://inference-gateway:8085
+  # The one limit on how long a request may take, streamed or not, and how
+  # many requests a replica is given at a time before callers are told to wait.
+  INFERENCE_TIMEOUT_SECONDS: ${INFERENCE_TIMEOUT_SECONDS:-600}
+  REPLICA_MAX_INFLIGHT: ${REPLICA_MAX_INFLIGHT:-8}
   TRUST_ENGINE_URL: http://trust-engine:8087
   WEB_URL: http://console:3000
 

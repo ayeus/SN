@@ -89,6 +89,15 @@ GPU report is the real code. CI runs it on every push. It answers with a fixed
 sentence, so use the real-Ollama run when a change touches how answers are
 parsed.
 
+The stand-in can be told to misbehave (`POST /_fake/config` on its port, or
+`fakeruntime.Config` in a Go test): a delay before the first byte, a delay
+between tokens, a status to return instead of an answer, a stream cut after
+some tokens, a download or a load that fails. `scripts/smoke.sh` uses these to
+check that a slow answer still arrives, that a stream cut short ends with an
+error event, that a 6 MB prompt leaves its host online, and that failed
+attempts are recorded. `SLOW_ANSWER_SECONDS=5` shortens the slow answer (65 s
+by default, to be past every limit that used to cut it off).
+
 `scripts/smoke-remote.sh` checks that a machine other than this one can join:
 a clean Linux container enrols with the console's install command and serves a
 deployment called through this machine's network address. It needs Docker and

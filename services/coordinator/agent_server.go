@@ -53,6 +53,13 @@ type AgentServer struct {
 	// releases is the published agent release; nil when none is configured.
 	releases *releases
 
+	// inferenceTimeout is the limit on one request (INFERENCE_TIMEOUT_SECONDS).
+	// keepaliveEvery and silenceLimit are set only by tests; zero means the
+	// defaults in tunnel.go.
+	inferenceTimeout time.Duration
+	keepaliveEvery   time.Duration
+	silenceLimit     time.Duration
+
 	// Liveness bookkeeping, touched only by the control loop (loops.go).
 	clock      func() time.Time // wall clock; replaced in tests
 	lastTick   time.Time        // when the loop last completed a pass
@@ -236,7 +243,7 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 		case *agentv1.AgentMessage_StageEvent:
 			s.onStage(ctx, en.hostID, p.StageEvent)
 		case *agentv1.AgentMessage_InferenceChunk:
-			sess.deliver(p.InferenceChunk, ctx.Done())
+			sess.deliver(p.InferenceChunk)
 		case *agentv1.AgentMessage_DrainAck:
 			s.log.Info("agent acknowledged drain", "host_id", en.hostID, "remaining", p.DrainAck.GetRemainingJobs())
 		}

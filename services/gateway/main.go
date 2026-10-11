@@ -274,13 +274,14 @@ func NewHandler(u Upstreams) http.Handler {
 	return withRequestID(httpx.CORS(u.CORSOrigins, h))
 }
 
+// withRequestID gives every request the id it is known by from here to the
+// host that answers it. The id is always issued here: usage is recorded once
+// per id, so one chosen by the caller could be sent twice to have the second
+// request go unrecorded.
 func withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-ID")
-		if id == "" || len(id) > 128 {
-			id = uuid.NewString()
-			r.Header.Set("X-Request-ID", id)
-		}
+		id := uuid.NewString()
+		r.Header.Set("X-Request-ID", id)
 		w.Header().Set("X-Request-ID", id)
 		next.ServeHTTP(w, r)
 	})

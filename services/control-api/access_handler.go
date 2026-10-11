@@ -283,15 +283,20 @@ type personView struct {
 }
 
 func (a *API) HandleListPeople(w http.ResponseWriter, r *http.Request) {
+	// Oldest first, as the page shows them. If there are ever more than the
+	// page holds it is the newest that are kept: the person who has just
+	// joined is the one an operator comes here to find.
 	rows, err := a.db.Pool.Query(r.Context(), `
-		SELECT u.id, u.email, u.name, u.is_operator, u.disabled_at,
-		       COALESCE((SELECT string_agg(o.name || ' (' || m.role || ')', ', ' ORDER BY m.created_at)
-		                 FROM memberships m JOIN organizations o ON o.id = m.org_id
-		                 WHERE m.user_id = u.id), ''),
-		       (SELECT COUNT(*) FROM hosts h WHERE h.user_id = u.id AND h.deleted_at IS NULL),
-		       u.created_at
-		FROM users u WHERE u.deleted_at IS NULL
-		ORDER BY u.created_at ASC LIMIT 500;
+		SELECT * FROM (
+			SELECT u.id, u.email, u.name, u.is_operator, u.disabled_at,
+			       COALESCE((SELECT string_agg(o.name || ' (' || m.role || ')', ', ' ORDER BY m.created_at)
+			                 FROM memberships m JOIN organizations o ON o.id = m.org_id
+			                 WHERE m.user_id = u.id), '') AS workspaces,
+			       (SELECT COUNT(*) FROM hosts h WHERE h.user_id = u.id AND h.deleted_at IS NULL) AS machines,
+			       u.created_at
+			FROM users u WHERE u.deleted_at IS NULL
+			ORDER BY u.created_at DESC LIMIT 500
+		) AS people ORDER BY created_at ASC;
 	`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Database error")

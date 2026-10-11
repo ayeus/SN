@@ -161,8 +161,8 @@ message DrainAck {
 
 // A slice of an inference response flowing back to the coordinator. For a
 // streamed request each chunk carries raw SSE bytes; for a non-streamed request
-// a single chunk carries the whole JSON body. The final chunk has done=true and,
-// when the runtime reported them, exact token counts.
+// the JSON body arrives in one or more chunks, in order. The final chunk has
+// done=true and, when the runtime reported them, exact token counts.
 message InferenceChunk {
   string request_id = 1;
   bytes data = 2;
@@ -171,6 +171,11 @@ message InferenceChunk {
   string error = 5;
   int32 prompt_tokens = 6;
   int32 completion_tokens = 7;
+  // Carries nothing: the request is still being worked on. Sent while the
+  // runtime has not produced anything yet, and only when the request asked
+  // for it (InferenceRequest.keepalive_seconds), so the coordinator can tell
+  // a model that is thinking from a host that has gone quiet.
+  bool keepalive = 8;
 }
 
 // ─── Coordinator → Agent Messages ────────────────────────────
@@ -266,6 +271,9 @@ message InferenceRequest {
   bytes body = 4;
   bool stream = 5;
   int32 timeout_seconds = 6;
+  // When above zero, the agent sends a keepalive chunk this often for as long
+  // as the runtime has produced nothing. Agents that predate it ignore it.
+  int32 keepalive_seconds = 7;
 }
 
 message InferenceCancel {

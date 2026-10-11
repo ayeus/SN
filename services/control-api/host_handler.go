@@ -329,6 +329,10 @@ type ActivitySummary struct {
 	Today    WorkCount `json:"today"`
 	MTD      WorkCount `json:"month_to_date"`
 	Lifetime WorkCount `json:"lifetime"`
+	// Failed30d is what went wrong on these machines in the last 30 days:
+	// answers that ended in an error, and attempts that failed before
+	// anything was sent back and were answered by another machine.
+	Failed30d int64 `json:"failed_30d"`
 }
 
 // WorkCount is successful requests and the tokens they processed.
@@ -349,6 +353,15 @@ func (a *API) activity(ctx context.Context, hostFilter string, arg any) (Activit
 		FROM usage_events WHERE status = 'success' AND `+hostFilter+`;
 	`, arg).Scan(&s.Today.Requests, &s.Today.Tokens, &s.MTD.Requests, &s.MTD.Tokens, &s.Lifetime.Requests, &s.Lifetime.Tokens)
 	if err != nil {
+		return s, nil, err
+	}
+	if err := a.db.Pool.QueryRow(ctx, `
+		SELECT (SELECT COUNT(*) FROM usage_events
+		        WHERE status IN ('error', 'timeout') AND `+hostFilter+` AND ts >= NOW() - INTERVAL '30 days')
+		     + (SELECT COUNT(*) FROM request_failures
+		        WHERE kind = 'attempt' AND reason IN ('host_error', 'host_timeout', 'host_disconnected')
+		          AND `+hostFilter+` AND ts >= NOW() - INTERVAL '30 days');
+	`, arg).Scan(&s.Failed30d); err != nil {
 		return s, nil, err
 	}
 

@@ -158,7 +158,7 @@ export default function HostPage() {
         <div className="grid grid-cols-2 gap-6 md:grid-cols-4">
           <Stat label="Requests today" value={activity.data ? number(activity.data.summary.today.requests) : "-"} />
           <Stat label="This month" value={activity.data ? number(activity.data.summary.month_to_date.requests) : "-"} />
-          <Stat label="All time" value={activity.data ? number(activity.data.summary.lifetime.requests) : "-"} />
+          <Stat label="All time" value={activity.data ? number(activity.data.summary.lifetime.requests) : "-"} sub={activity.data ? `${number(activity.data.summary.failed_30d ?? 0)} failed in 30 days` : undefined} />
           <Stat label="Tokens served" value={activity.data ? compact(activity.data.summary.lifetime.tokens) : "-"} />
         </div>
       </Panel>

@@ -3,8 +3,9 @@
 # stack (`make dev`) and a local Ollama with the model below pulled:
 #
 #   sign up → enrol two hosts → deploy (2 replicas) → SERVING → streamed chat →
-#   OpenAI SDK call → usage recorded for the customer and the host → kill one
-#   the coordinator restarts, then freezes: the models stay loaded through both
+#   OpenAI SDK call → usage recorded for the customer and the host → a slow
+#   answer, a stream cut short, a 6 MB prompt and a failing runtime (stand-in
+#   runtime only) → the coordinator restarts, then freezes: the models stay loaded through both
 #   → kill one host → requests keep succeeding → stop the deployment
 #
 #   scripts/smoke.sh            # uses gemma2:2b via gemma-2-2b-it
@@ -36,6 +37,8 @@ RUN="$(uuidgen | tr A-Z a-z | cut -c1-8)"   # fresh host identities each run
 cleanup() {
   # A coordinator left frozen would take the whole stack down with it.
   [ -z "${FROZEN:-}" ] || eval "$COORD_THAW" >/dev/null 2>&1 || true
+  # A stand-in runtime left misbehaving would fail whatever runs next.
+  [ -z "${FAKED:-}" ] || curl -s -X POST "$RUNTIME_URL/_fake/config" -d '{}' >/dev/null 2>&1 || true
   # Runs on success and on failure: a leftover running deployment would claim
   # every GPU that connects afterwards.
   if [ -n "${TOKEN:-}" ]; then
@@ -50,7 +53,14 @@ cleanup() {
 trap cleanup EXIT
 
 pass() { printf '  \033[32mpass\033[0m  %s\n' "$*"; }
-fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; exit 1; }
+# The agents' logs live in a directory that is removed on exit, so a failure
+# copies them to logs/, where CI also picks them up.
+fail() {
+  printf '  \033[31mFAIL\033[0m  %s\n' "$*"
+  mkdir -p logs
+  for f in "$WORK"/agent-*.log; do [ -f "$f" ] && cp "$f" "logs/smoke-$(basename "$f")"; done
+  exit 1
+}
 json() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval('d'+sys.argv[1]))" "$1"; }
 api()  { local m=$1 p=$2; shift 2; curl -sS -X "$m" "$BASE$p" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
 
@@ -96,7 +106,7 @@ for _ in $(seq 1 60); do
   N=$(api GET /v1/hosts | python3 -c "import json,sys; print(sum(1 for h in json.load(sys.stdin)['hosts'] if h['online'] and h['runtime_healthy']))")
   [ "$N" -ge 2 ] && break; sleep 1
 done
-[ "$N" -ge 2 ] || fail "hosts did not come online; see $WORK/agent-*.log"
+[ "$N" -ge 2 ] || fail "hosts did not come online; see logs/smoke-agent-*.log"
 pass "two hosts online with a healthy runtime (one through the gateway at $COORD, one direct at $COORD_DIRECT)"
 
 # 3. Deploy with two replicas.
@@ -155,14 +165,72 @@ TOKENS=$(api GET /v1/hosts/activity | json "['summary']['lifetime']['tokens']")
 [ "$SERVED" -ge 2 ] && [ "$TOKENS" -gt 0 ] || fail "host activity shows $SERVED requests and $TOKENS tokens"
 pass "usage recorded: $REQS requests for the customer; hosts served $SERVED requests, $TOKENS tokens"
 
-# 8. The platform restarts, and then stalls the way a sleeping laptop does.
-# The hosts only lose their connection, so the models must stay loaded: the
-# same two replicas, nothing sent again, nothing reloaded, and answers again
-# within 30 s.
 ask() {
   curl -s -m 20 -o /dev/null -w '%{http_code}' "$BASE_URL/chat/completions" -H "Authorization: Bearer $KEY" \
     -H 'Content-Type: application/json' -d '{"model":"smoke","messages":[{"role":"user","content":"ping"}],"max_tokens":3}'
 }
+online() { api GET /v1/hosts | python3 -c "import json,sys; print(sum(1 for h in json.load(sys.stdin)['hosts'] if h['online'] and h['runtime_healthy']))"; }
+
+# 7b. When things go wrong, the request path says so. Only the stand-in
+# runtime can be told to misbehave, so this part is skipped with a real one.
+if curl -sf "$RUNTIME_URL/_fake/config" >/dev/null 2>&1; then
+  fake() { curl -sf -X POST "$RUNTIME_URL/_fake/config" -H 'Content-Type: application/json' -d "$1" >/dev/null || fail "could not configure the stand-in runtime"; }
+  FAKED=1
+
+  # A model that thinks for over a minute before answering. Nothing is sent
+  # back in that time, so only the agent's keep-alives tell the platform the
+  # host is still there.
+  SLOW="${SLOW_ANSWER_SECONDS:-65}"
+  fake "{\"first_byte_delay_ms\":$((SLOW * 1000))}"
+  T0=$(date +%s)
+  C=$(curl -s -m $((SLOW + 60)) -o /dev/null -w '%{http_code}' "$BASE_URL/chat/completions" -H "Authorization: Bearer $KEY" \
+      -H 'Content-Type: application/json' -d '{"model":"smoke","messages":[{"role":"user","content":"think hard"}],"max_tokens":3}')
+  [ "$C" = 200 ] || fail "an answer that took ${SLOW}s returned $C after $(( $(date +%s) - T0 ))s"
+  pass "an answer that took $(( $(date +%s) - T0 ))s to start arrived whole"
+
+  # The runtime dies three tokens into a stream. The caller must be told,
+  # not left with half an answer that looks finished.
+  fake '{"abort_after_tokens":3}'
+  OUT=$(curl -sN -m 30 "$BASE_URL/chat/completions" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+        -d '{"model":"smoke","messages":[{"role":"user","content":"Say hello."}],"stream":true}')
+  echo "$OUT" | grep -q '"code":"stream_interrupted"' || fail "a stream cut short did not end with an error event: $OUT"
+  echo "$OUT" | grep -q 'data: \[DONE\]' && fail "a stream cut short was ended as if it were complete: $OUT"
+  pass "a stream cut short ends with an error event ($(echo "$OUT" | grep -c '"content"') tokens arrived first)"
+
+  # A 6 MB prompt. It used to break the connection of the host it was sent to.
+  fake '{}'
+  python3 -c "import json,sys; json.dump({'model':'smoke','max_tokens':3,'messages':[{'role':'user','content':'a'*(6<<20)}]}, open(sys.argv[1],'w'))" "$WORK/big.json"
+  C=$(curl -s -m 60 -o /dev/null -w '%{http_code}' "$BASE_URL/chat/completions" -H "Authorization: Bearer $KEY" \
+      -H 'Content-Type: application/json' --data-binary "@$WORK/big.json")
+  [ "$C" = 200 ] || fail "a 6 MB request returned $C"
+  sleep 6   # longer than a heartbeat, so a host that dropped would show
+  [ "$(online)" -ge 2 ] || fail "a 6 MB request took a host offline"
+  pass "a 6 MB request is answered and both hosts stay online"
+
+  # A runtime that fails every request: the caller gets an error, and the
+  # failures are held against the hosts instead of vanishing.
+  BEFORE=$(api GET /v1/hosts/activity | json "['summary']['failed_30d']")
+  fake '{"status":500}'
+  C=$(ask)
+  [ "$C" = 503 ] || fail "a request no host could answer returned $C, want 503"
+  fake '{}'
+  FAKED=""
+  AFTER=$(api GET /v1/hosts/activity | json "['summary']['failed_30d']")
+  [ "$AFTER" -ge $((BEFORE + 2)) ] || fail "failed attempts on both hosts were not recorded (failures before: $BEFORE, after: $AFTER)"
+  ERRORS=$(api GET /v1/usage/daily | python3 -c "import json,sys; print(sum(d['errors'] for d in json.load(sys.stdin)['days']))")
+  [ "$ERRORS" -ge 2 ] || fail "the customer's usage shows $ERRORS errors, want the cut stream and the refused request"
+  # The hosts were rested after failing; they are asked again within seconds.
+  for _ in $(seq 1 30); do C=$(ask); [ "$C" = 200 ] && break; sleep 1; done
+  [ "$C" = 200 ] || fail "requests did not work again after the runtime recovered (last answer $C)"
+  pass "failures are recorded: $((AFTER - BEFORE)) against the hosts, $ERRORS errors shown to the customer; serving again"
+else
+  echo "  skip  fault checks need the stand-in runtime (make smoke-fake)"
+fi
+
+# 8. The platform restarts, and then stalls the way a sleeping laptop does.
+# The hosts only lose their connection, so the models must stay loaded: the
+# same two replicas, nothing sent again, nothing reloaded, and answers again
+# within 30 s.
 serving() { api GET "/v1/deployments/$DEP/replicas" | python3 -c "import json,sys; print(' '.join(sorted(r['id'] for r in json.load(sys.stdin)['replicas'] if r['state']=='serving')))"; }
 last_event() { api GET "/v1/deployments/$DEP/logs" | python3 -c "import json,sys; e=json.load(sys.stdin)['events']; print(e[-1]['id'] if e else 0)"; }
 since() { api GET "/v1/deployments/$DEP/logs?after=$1" | python3 -c "import json,sys; print('; '.join(e['message'] for e in json.load(sys.stdin)['events']))"; }
@@ -197,8 +265,10 @@ sleep 25
 eval "$COORD_THAW" || fail "could not thaw the coordinator ($COORD_THAW)"
 FROZEN=""
 survived "coordinator frozen for 25 s"
-# The grace period after a stall is not a blind spot: both hosts are still there.
-N=$(api GET /v1/hosts | python3 -c "import json,sys; print(sum(1 for h in json.load(sys.stdin)['hosts'] if h['online'] and h['runtime_healthy']))")
+# The grace period after a stall is not a blind spot: both hosts are still
+# there. A host whose connection timed out in the last seconds of the freeze
+# is between attempts when the platform wakes, so it is given a moment.
+for _ in $(seq 1 20); do N=$(online); [ "$N" -ge 2 ] && break; sleep 1; done
 [ "$N" -ge 2 ] || fail "only $N of the two hosts is online after the freeze"
 
 # 9. Failover: kill one host, requests keep working (NFR-2: < 5 s).

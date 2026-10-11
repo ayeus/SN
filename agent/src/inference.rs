@@ -5,8 +5,10 @@ use crate::proto::{agent_message, AgentMessage, InferenceChunk, InferenceRequest
 use crate::runtime::Runtime;
 use futures_util::StreamExt;
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
+use tokio::time::Instant;
 
 /// Upper bound on a non-streamed response body.
 const MAX_RESPONSE_BYTES: usize = 32 << 20;
@@ -105,22 +107,116 @@ fn event_end(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\n\n").map(|p| p + 2)
 }
 
-async fn send(tx: &Sender<AgentMessage>, chunk: InferenceChunk) {
-    let _ = tx
-        .send(AgentMessage {
-            payload: Some(agent_message::Payload::InferenceChunk(chunk)),
-        })
-        .await;
+/// The largest piece of an answer sent in one message. Anything bigger is
+/// split, so no answer, however long, is one message large enough to be
+/// refused by the coordinator or to hold up the heartbeats queued behind it.
+const PIECE_BYTES: usize = 256 << 10;
+
+/// Where one request's chunks go. It remembers when it last sent anything, so
+/// the keep-alive only speaks when the request has been silent.
+#[derive(Clone)]
+struct Sink {
+    tx: Sender<AgentMessage>,
+    id: String,
+    last: Arc<Mutex<Instant>>,
 }
 
-fn error_chunk(id: &str, status: i32, error: String) -> InferenceChunk {
-    InferenceChunk {
-        request_id: id.to_string(),
-        done: true,
-        status_code: status,
-        error,
-        ..Default::default()
+impl Sink {
+    fn new(tx: Sender<AgentMessage>, id: &str) -> Self {
+        Sink {
+            tx,
+            id: id.to_string(),
+            last: Arc::new(Mutex::new(Instant::now())),
+        }
     }
+
+    async fn send(&self, mut chunk: InferenceChunk) {
+        chunk.request_id = self.id.clone();
+        *self.last.lock().unwrap() = Instant::now();
+        let _ = self
+            .tx
+            .send(AgentMessage {
+                payload: Some(agent_message::Payload::InferenceChunk(chunk)),
+            })
+            .await;
+    }
+
+    /// Sends `data` in pieces. `last` describes the final piece: whether it
+    /// ends the request, and the usage that goes with it.
+    async fn send_data(&self, data: &[u8], status: i32, last: InferenceChunk) {
+        let pieces = split(data);
+        let n = pieces.len();
+        for (i, piece) in pieces.into_iter().enumerate() {
+            let mut chunk = if i + 1 == n {
+                last.clone()
+            } else {
+                InferenceChunk::default()
+            };
+            chunk.data = piece.to_vec();
+            chunk.status_code = if i == 0 { status } else { 0 };
+            self.send(chunk).await;
+        }
+    }
+
+    async fn fail(&self, status: i32, error: String) {
+        self.send(InferenceChunk {
+            done: true,
+            status_code: status,
+            error,
+            ..Default::default()
+        })
+        .await;
+    }
+
+    /// Says "still working" whenever the request has sent nothing for
+    /// `every`. The coordinator asked for this; it is how it tells a model
+    /// that is thinking from a machine that has gone away. Stops when the
+    /// returned guard is dropped, which is when the request ends, however it
+    /// ends.
+    fn keep_alive(&self, every: Duration) -> KeepAlive {
+        let sink = self.clone();
+        KeepAlive(tokio::spawn(async move {
+            loop {
+                let idle = sink.last.lock().unwrap().elapsed();
+                if idle < every {
+                    tokio::time::sleep(every - idle).await;
+                    continue;
+                }
+                sink.send(InferenceChunk {
+                    keepalive: true,
+                    ..Default::default()
+                })
+                .await;
+            }
+        }))
+    }
+}
+
+struct KeepAlive(tokio::task::JoinHandle<()>);
+
+impl Drop for KeepAlive {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Splits an answer into pieces of at most PIECE_BYTES. An empty answer is
+/// one empty piece, so there is always a piece to carry the final fields.
+fn split(data: &[u8]) -> Vec<&[u8]> {
+    if data.is_empty() {
+        return vec![data];
+    }
+    data.chunks(PIECE_BYTES).collect()
+}
+
+/// The paths of the runtime a request may be sent to. The coordinator checks
+/// this too; the agent does not take its word for what reaches the runtime,
+/// which also answers to paths that download and delete models.
+pub fn allowed_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/chat/completions" | "/v1/completions" | "/v1/embeddings"
+    )
 }
 
 /// Runs one request to completion, sending chunks as they arrive.
@@ -131,24 +227,23 @@ pub async fn run(
     model_name: String,
     tx: Sender<AgentMessage>,
 ) {
-    let id = req.request_id.clone();
+    let sink = Sink::new(tx, &req.request_id);
+    let _keep_alive = (req.keepalive_seconds > 0)
+        .then(|| sink.keep_alive(Duration::from_secs(req.keepalive_seconds as u64)));
 
     let mut body: Value = match serde_json::from_slice(&req.body) {
         Ok(v) => v,
         Err(e) => {
-            let msg = format!(
-                r#"{{"error":{{"message":"invalid JSON body: {e}","type":"invalid_request_error"}}}}"#
-            );
-            send(
-                &tx,
-                InferenceChunk {
-                    request_id: id,
-                    data: msg.into_bytes(),
-                    done: true,
-                    status_code: 400,
-                    ..Default::default()
-                },
-            )
+            let msg = serde_json::json!({"error": {
+                "message": format!("invalid JSON body: {e}"),
+                "type": "invalid_request_error",
+            }});
+            sink.send(InferenceChunk {
+                data: msg.to_string().into_bytes(),
+                done: true,
+                status_code: 400,
+                ..Default::default()
+            })
             .await;
             return;
         }
@@ -162,7 +257,7 @@ pub async fn run(
         body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
     let prompt_estimate = estimate_prompt_tokens(&body);
-    let timeout = Duration::from_secs(req.timeout_seconds.clamp(1, 600) as u64);
+    let timeout = Duration::from_secs(req.timeout_seconds.clamp(1, 3600) as u64);
 
     let resp = match runtime
         .request(
@@ -170,16 +265,15 @@ pub async fn run(
             serde_json::to_vec(&body).unwrap_or_default(),
             timeout,
         )
+        // The id the request has carried since the platform's front door, so
+        // one search finds it in the runtime's log too.
+        .header("X-Request-ID", &req.request_id)
         .send()
         .await
     {
         Ok(r) => r,
         Err(e) => {
-            send(
-                &tx,
-                error_chunk(&id, 502, format!("runtime unreachable: {e}")),
-            )
-            .await;
+            sink.fail(502, format!("runtime unreachable: {e}")).await;
             return;
         }
     };
@@ -187,23 +281,18 @@ pub async fn run(
     let status = resp.status().as_u16() as i32;
     if status >= 500 {
         let text = resp.text().await.unwrap_or_default();
-        send(
-            &tx,
-            error_chunk(&id, 502, format!("runtime error {status}: {text}")),
-        )
-        .await;
+        sink.fail(502, format!("runtime error {status}: {text}"))
+            .await;
         return;
     }
     if status >= 400 {
         // A client error is the customer's to see, not a reason to fail over.
         let data = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
-        send(
-            &tx,
+        sink.send_data(
+            &data,
+            status,
             InferenceChunk {
-                request_id: id,
-                data,
                 done: true,
-                status_code: status,
                 ..Default::default()
             },
         )
@@ -215,19 +304,12 @@ pub async fn run(
         let bytes = match resp.bytes().await {
             Ok(b) if b.len() <= MAX_RESPONSE_BYTES => b,
             Ok(_) => {
-                send(
-                    &tx,
-                    error_chunk(&id, 502, "runtime response too large".into()),
-                )
-                .await;
+                sink.fail(502, "runtime response too large".into()).await;
                 return;
             }
             Err(e) => {
-                send(
-                    &tx,
-                    error_chunk(&id, 502, format!("reading runtime response: {e}")),
-                )
-                .await;
+                sink.fail(502, format!("reading runtime response: {e}"))
+                    .await;
                 return;
             }
         };
@@ -247,13 +329,11 @@ pub async fn run(
             }
             Err(_) => (bytes.to_vec(), Usage::default()),
         };
-        send(
-            &tx,
+        sink.send_data(
+            &data,
+            status,
             InferenceChunk {
-                request_id: id,
-                data,
                 done: true,
-                status_code: status,
                 prompt_tokens: usage.prompt,
                 completion_tokens: usage.completion,
                 ..Default::default()
@@ -288,18 +368,18 @@ pub async fn run(
                 &mut content_chunks,
             );
             if !out.is_empty() {
-                send(
-                    &tx,
-                    InferenceChunk {
-                        request_id: id.clone(),
-                        data: out.into_bytes(),
-                        status_code: if first { status } else { 0 },
-                        ..Default::default()
-                    },
+                sink.send_data(
+                    out.as_bytes(),
+                    if first { status } else { 0 },
+                    InferenceChunk::default(),
                 )
                 .await;
                 first = false;
             }
+        }
+        if buf.len() > MAX_RESPONSE_BYTES {
+            failure = Some("the runtime sent an event too large to pass on".into());
+            break;
         }
     }
 
@@ -308,18 +388,14 @@ pub async fn run(
         usage.prompt = prompt_estimate;
         usage.completion = content_chunks;
     }
-    send(
-        &tx,
-        InferenceChunk {
-            request_id: id,
-            done: true,
-            status_code: if first { status } else { 0 },
-            error: failure.unwrap_or_default(),
-            prompt_tokens: usage.prompt,
-            completion_tokens: usage.completion,
-            ..Default::default()
-        },
-    )
+    sink.send(InferenceChunk {
+        done: true,
+        status_code: if first { status } else { 0 },
+        error: failure.unwrap_or_default(),
+        prompt_tokens: usage.prompt,
+        completion_tokens: usage.completion,
+        ..Default::default()
+    })
     .await;
 }
 
@@ -387,6 +463,108 @@ mod tests {
     }
 
     #[test]
+    fn only_the_inference_paths_reach_the_runtime() {
+        for p in ["/v1/chat/completions", "/v1/completions", "/v1/embeddings"] {
+            assert!(allowed_path(p), "{p}");
+        }
+        for p in [
+            "/api/pull",
+            "/api/delete",
+            "/v1/models",
+            "/v1/chat/completions/../../api/delete",
+            "",
+        ] {
+            assert!(!allowed_path(p), "{p} must not reach the runtime");
+        }
+    }
+
+    #[test]
+    fn a_large_answer_is_split_and_nothing_is_lost() {
+        let data: Vec<u8> = (0..PIECE_BYTES * 2 + 17).map(|i| (i % 251) as u8).collect();
+        let pieces = split(&data);
+        assert_eq!(pieces.len(), 3);
+        assert!(pieces.iter().all(|p| p.len() <= PIECE_BYTES));
+        assert_eq!(pieces.concat(), data);
+        // Even an empty answer has a piece to carry "done".
+        assert_eq!(split(&[]).len(), 1);
+    }
+
+    fn chunk_of(msg: AgentMessage) -> InferenceChunk {
+        match msg.payload {
+            Some(agent_message::Payload::InferenceChunk(c)) => c,
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pieces_carry_the_status_first_and_the_ending_last() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let sink = Sink::new(tx, "req-1");
+        let data = vec![7u8; PIECE_BYTES + 1];
+        sink.send_data(
+            &data,
+            200,
+            InferenceChunk {
+                done: true,
+                completion_tokens: 9,
+                ..Default::default()
+            },
+        )
+        .await;
+        let a = chunk_of(rx.recv().await.unwrap());
+        let b = chunk_of(rx.recv().await.unwrap());
+        assert_eq!(
+            (a.request_id.as_str(), a.status_code, a.done),
+            ("req-1", 200, false)
+        );
+        assert_eq!(
+            a.completion_tokens, 0,
+            "usage belongs to the last piece only"
+        );
+        assert_eq!((b.status_code, b.done, b.completion_tokens), (0, true, 9));
+        assert_eq!(a.data.len() + b.data.len(), data.len());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keep_alives_are_sent_only_while_a_request_is_silent() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let sink = Sink::new(tx, "req-1");
+        let guard = sink.keep_alive(Duration::from_secs(10));
+
+        // Nothing sent for 25 s: two keep-alives.
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        let a = chunk_of(rx.try_recv().expect("first keep-alive"));
+        let b = chunk_of(rx.try_recv().expect("second keep-alive"));
+        assert!(a.keepalive && b.keepalive && !a.done && a.data.is_empty());
+        assert_eq!(a.request_id, "req-1");
+        assert!(rx.try_recv().is_err());
+
+        // Tokens are flowing: nothing extra is said.
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            sink.send(InferenceChunk {
+                data: b"data: x\n\n".to_vec(),
+                ..Default::default()
+            })
+            .await;
+        }
+        let mut sent = 0;
+        while let Ok(m) = rx.try_recv() {
+            assert!(
+                !chunk_of(m).keepalive,
+                "a keep-alive was sent while tokens were flowing"
+            );
+            sent += 1;
+        }
+        assert_eq!(sent, 5);
+
+        // When the request ends, so does the keep-alive.
+        drop(guard);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(rx.try_recv().is_err(), "a keep-alive outlived its request");
+    }
+
+    #[test]
     fn estimates_prompt_tokens() {
         let body: Value = serde_json::json!({"messages":[{"role":"user","content":"12345678"}]});
         assert_eq!(estimate_prompt_tokens(&body), 2);
@@ -422,6 +600,7 @@ mod live {
             body: serde_json::to_vec(&body).unwrap(),
             stream,
             timeout_seconds: 120,
+            keepalive_seconds: 0,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(512);
         tokio::spawn(run(rt, req, "gemma2:2b".into(), "gemma-2-2b-it".into(), tx));

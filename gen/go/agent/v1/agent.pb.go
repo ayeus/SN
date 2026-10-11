@@ -1294,8 +1294,8 @@ func (x *DrainAck) GetRemainingJobs() int32 {
 
 // A slice of an inference response flowing back to the coordinator. For a
 // streamed request each chunk carries raw SSE bytes; for a non-streamed request
-// a single chunk carries the whole JSON body. The final chunk has done=true and,
-// when the runtime reported them, exact token counts.
+// the JSON body arrives in one or more chunks, in order. The final chunk has
+// done=true and, when the runtime reported them, exact token counts.
 type InferenceChunk struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	RequestId        string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -1305,8 +1305,13 @@ type InferenceChunk struct {
 	Error            string                 `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
 	PromptTokens     int32                  `protobuf:"varint,6,opt,name=prompt_tokens,json=promptTokens,proto3" json:"prompt_tokens,omitempty"`
 	CompletionTokens int32                  `protobuf:"varint,7,opt,name=completion_tokens,json=completionTokens,proto3" json:"completion_tokens,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Carries nothing: the request is still being worked on. Sent while the
+	// runtime has not produced anything yet, and only when the request asked
+	// for it (InferenceRequest.keepalive_seconds), so the coordinator can tell
+	// a model that is thinking from a host that has gone quiet.
+	Keepalive     bool `protobuf:"varint,8,opt,name=keepalive,proto3" json:"keepalive,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InferenceChunk) Reset() {
@@ -1386,6 +1391,13 @@ func (x *InferenceChunk) GetCompletionTokens() int32 {
 		return x.CompletionTokens
 	}
 	return 0
+}
+
+func (x *InferenceChunk) GetKeepalive() bool {
+	if x != nil {
+		return x.Keepalive
+	}
+	return false
 }
 
 type CoordinatorMessage struct {
@@ -1960,8 +1972,11 @@ type InferenceRequest struct {
 	Body           []byte                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
 	Stream         bool                   `protobuf:"varint,5,opt,name=stream,proto3" json:"stream,omitempty"`
 	TimeoutSeconds int32                  `protobuf:"varint,6,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// When above zero, the agent sends a keepalive chunk this often for as long
+	// as the runtime has produced nothing. Agents that predate it ignore it.
+	KeepaliveSeconds int32 `protobuf:"varint,7,opt,name=keepalive_seconds,json=keepaliveSeconds,proto3" json:"keepalive_seconds,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *InferenceRequest) Reset() {
@@ -2032,6 +2047,13 @@ func (x *InferenceRequest) GetStream() bool {
 func (x *InferenceRequest) GetTimeoutSeconds() int32 {
 	if x != nil {
 		return x.TimeoutSeconds
+	}
+	return 0
+}
+
+func (x *InferenceRequest) GetKeepaliveSeconds() int32 {
+	if x != nil {
+		return x.KeepaliveSeconds
 	}
 	return 0
 }
@@ -2336,7 +2358,7 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x06status\x18\t \x01(\x0e2 .ayeusann.agent.v1.RequestStatusR\x06status\"I\n" +
 	"\bDrainAck\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12%\n" +
-	"\x0eremaining_jobs\x18\x02 \x01(\x05R\rremainingJobs\"\xe0\x01\n" +
+	"\x0eremaining_jobs\x18\x02 \x01(\x05R\rremainingJobs\"\xfe\x01\n" +
 	"\x0eInferenceChunk\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x12\n" +
@@ -2346,7 +2368,8 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"statusCode\x12\x14\n" +
 	"\x05error\x18\x05 \x01(\tR\x05error\x12#\n" +
 	"\rprompt_tokens\x18\x06 \x01(\x05R\fpromptTokens\x12+\n" +
-	"\x11completion_tokens\x18\a \x01(\x05R\x10completionTokens\"\x97\x04\n" +
+	"\x11completion_tokens\x18\a \x01(\x05R\x10completionTokens\x12\x1c\n" +
+	"\tkeepalive\x18\b \x01(\bR\tkeepalive\"\x97\x04\n" +
 	"\x12CoordinatorMessage\x12R\n" +
 	"\x11register_response\x18\x01 \x01(\v2#.ayeusann.agent.v1.RegisterResponseH\x00R\x10registerResponse\x12A\n" +
 	"\bmanifest\x18\x02 \x01(\v2#.ayeusann.agent.v1.ManifestDispatchH\x00R\bmanifest\x127\n" +
@@ -2404,7 +2427,7 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\vStopReplica\x12\x1d\n" +
 	"\n" +
 	"replica_id\x18\x01 \x01(\tR\treplicaId\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"\xb9\x01\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"\xe6\x01\n" +
 	"\x10InferenceRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1d\n" +
@@ -2413,7 +2436,8 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x04path\x18\x03 \x01(\tR\x04path\x12\x12\n" +
 	"\x04body\x18\x04 \x01(\fR\x04body\x12\x16\n" +
 	"\x06stream\x18\x05 \x01(\bR\x06stream\x12'\n" +
-	"\x0ftimeout_seconds\x18\x06 \x01(\x05R\x0etimeoutSeconds\"0\n" +
+	"\x0ftimeout_seconds\x18\x06 \x01(\x05R\x0etimeoutSeconds\x12+\n" +
+	"\x11keepalive_seconds\x18\a \x01(\x05R\x10keepaliveSeconds\"0\n" +
 	"\x0fInferenceCancel\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\"X\n" +

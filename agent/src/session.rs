@@ -52,6 +52,23 @@ struct Replica {
 /// release.
 pub const CAP_SELF_UPDATE: &str = "self-update";
 
+/// Tells the coordinator this agent says "still working" during a request
+/// when asked to, so a slow answer is not mistaken for a dead machine.
+pub const CAP_INFERENCE_KEEPALIVE: &str = "inference-keepalive";
+
+/// Tells the coordinator this agent accepts messages up to MAX_MESSAGE_BYTES.
+pub const CAP_LARGE_MESSAGES: &str = "large-messages";
+
+/// The largest message accepted from the coordinator: the platform's limit on
+/// a request body (16 MB) plus room for the fields around it. The library's
+/// default is 4 MB, and a message over the limit ends the whole session, so
+/// one large prompt used to take the machine offline.
+const MAX_MESSAGE_BYTES: usize = 17 << 20;
+
+/// The most requests this machine answers at once, across all its models. The
+/// platform's router stays well below it; this is the machine's own backstop.
+const MAX_INFLIGHT: usize = 32;
+
 /// How long the coordinator has to answer a new session.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -299,7 +316,11 @@ impl Session<'_> {
             cached_models: cached,
             replicas: held,
             capabilities: {
-                let mut caps = vec![CAP_REPLICA_REPORT.to_string()];
+                let mut caps = vec![
+                    CAP_REPLICA_REPORT.to_string(),
+                    CAP_INFERENCE_KEEPALIVE.to_string(),
+                    CAP_LARGE_MESSAGES.to_string(),
+                ];
                 if self.updates.is_some() {
                     caps.push(CAP_SELF_UPDATE.to_string());
                 }
@@ -312,7 +333,8 @@ impl Session<'_> {
             channel(self.coordinator_url)
                 .await
                 .context("connecting to coordinator")?,
-        );
+        )
+        .max_decoding_message_size(MAX_MESSAGE_BYTES);
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentMessage>(256);
         tx.send(AgentMessage {
             payload: Some(agent_message::Payload::Register(reg)),
@@ -683,6 +705,24 @@ impl Session<'_> {
     }
 
     async fn on_inference(&self, req: crate::proto::InferenceRequest, tx: &Sender<AgentMessage>) {
+        let refuse = |status: i32, error: &str| AgentMessage {
+            payload: Some(agent_message::Payload::InferenceChunk(
+                crate::proto::InferenceChunk {
+                    request_id: req.request_id.clone(),
+                    done: true,
+                    status_code: status,
+                    error: error.to_string(),
+                    ..Default::default()
+                },
+            )),
+        };
+        if !inference::allowed_path(&req.path) {
+            warn!(request_id = %req.request_id, path = %req.path, "refusing a request for a path that is not an inference path");
+            let _ = tx
+                .send(refuse(400, "this path is not served by hosts"))
+                .await;
+            return;
+        }
         let replica = self
             .shared
             .replicas
@@ -692,20 +732,20 @@ impl Session<'_> {
             .cloned();
         let Some(replica) = replica.filter(|r| r.serving) else {
             let _ = tx
-                .send(AgentMessage {
-                    payload: Some(agent_message::Payload::InferenceChunk(
-                        crate::proto::InferenceChunk {
-                            request_id: req.request_id.clone(),
-                            done: true,
-                            status_code: 503,
-                            error: "replica is not loaded on this host".into(),
-                            ..Default::default()
-                        },
-                    )),
-                })
+                .send(refuse(503, "replica is not loaded on this host"))
                 .await;
             return;
         };
+        if self.shared.busy() >= MAX_INFLIGHT {
+            let _ = tx
+                .send(refuse(
+                    503,
+                    "this host is answering as many requests as it can",
+                ))
+                .await;
+            return;
+        }
+        tracing::debug!(request_id = %req.request_id, replica_id = %req.replica_id, path = %req.path, "request received");
         let id = req.request_id.clone();
         let shared = self.shared.clone();
         let runtime = self.runtime.clone();

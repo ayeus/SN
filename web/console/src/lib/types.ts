@@ -137,7 +137,9 @@ export type HostSummary = Host & {
 export type WorkCount = { requests: number; tokens: number };
 
 export type HostActivity = {
-  summary: { today: WorkCount; month_to_date: WorkCount; lifetime: WorkCount };
+  // failed_30d: answers that ended in an error plus attempts that failed and
+  // were answered by another machine, over the last 30 days.
+  summary: { today: WorkCount; month_to_date: WorkCount; lifetime: WorkCount; failed_30d: number };
   daily: { date: string; requests: number; tokens: number }[];
 };
 

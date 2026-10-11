@@ -156,3 +156,27 @@ func CoordinatorURLs() []string {
 func HeartbeatTimeout() time.Duration {
 	return time.Duration(EnvInt("HOST_HEARTBEAT_TIMEOUT_SEC", 15)) * time.Second
 }
+
+// MaxInferenceBody is the largest request body the inference API accepts.
+// Every hop agrees on it: the inference gateway refuses anything larger, and
+// the coordinator and the agents accept messages a little above it, so a
+// request the platform has accepted is never the one that breaks a host's
+// connection.
+const MaxInferenceBody = 16 << 20
+
+// MaxAgentMessage bounds one message on an agent's session: the largest
+// request body plus room for the fields around it.
+const MaxAgentMessage = MaxInferenceBody + (1 << 20)
+
+// InferenceTimeout is the one limit on how long a request may take from start
+// to finish, streamed or not. INFERENCE_TIMEOUT_SECONDS, default ten minutes.
+func InferenceTimeout() time.Duration {
+	n := EnvInt("INFERENCE_TIMEOUT_SECONDS", 600)
+	if n < 10 {
+		n = 10
+	}
+	if n > 3600 {
+		n = 3600
+	}
+	return time.Duration(n) * time.Second
+}

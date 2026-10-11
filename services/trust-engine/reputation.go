@@ -181,10 +181,22 @@ func (e *ReputationEngine) Compute(ctx context.Context, hostID string) (*Snapsho
 		AgeDays:   int(time.Since(created).Hours() / 24),
 	}
 
+	// What the host was asked to do and how often it failed: the requests it
+	// answered, plus the attempts that failed before anything was sent back
+	// and were quietly answered elsewhere. A caller who hung up, and a
+	// refusal that was not the host's doing, are not held against it.
 	var total, failed int64
 	if err := e.db.Pool.QueryRow(ctx, `
-		SELECT COUNT(*), COUNT(*) FILTER (WHERE status <> 'success')
-		FROM usage_events WHERE host_id = $1 AND ts >= NOW() - INTERVAL '30 days';
+		SELECT COALESCE(SUM(n), 0), COALESCE(SUM(bad), 0) FROM (
+			SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE status IN ('error', 'timeout')) AS bad
+			FROM usage_events
+			WHERE host_id = $1 AND ts >= NOW() - INTERVAL '30 days' AND status <> 'cancelled'
+			UNION ALL
+			SELECT COUNT(*), COUNT(*)
+			FROM request_failures
+			WHERE host_id = $1 AND ts >= NOW() - INTERVAL '30 days' AND kind = 'attempt'
+			  AND reason IN ('host_error', 'host_timeout', 'host_disconnected')
+		) AS asked;
 	`, hostID).Scan(&total, &failed); err == nil && total > 0 {
 		v := float64(total-failed) / float64(total) * 100
 		in.SuccessRatePct = &v

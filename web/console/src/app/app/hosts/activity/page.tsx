@@ -21,7 +21,7 @@ export default function ActivityPage() {
           <div className="grid grid-cols-2 gap-6 md:grid-cols-4">
             <Stat label="Requests today" value={number(a.data.summary.today.requests)} sub={`${compact(a.data.summary.today.tokens)} tokens`} />
             <Stat label="This month" value={number(a.data.summary.month_to_date.requests)} sub={`${compact(a.data.summary.month_to_date.tokens)} tokens`} />
-            <Stat label="All time" value={number(a.data.summary.lifetime.requests)} />
+            <Stat label="All time" value={number(a.data.summary.lifetime.requests)} sub={`${number(a.data.summary.failed_30d ?? 0)} failed in 30 days`} />
             <Stat label="Tokens served" value={compact(a.data.summary.lifetime.tokens)} />
           </div>
         )}
