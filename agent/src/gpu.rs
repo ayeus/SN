@@ -270,6 +270,7 @@ impl GpuDetector {
 /// 16 GB, and loading one left nothing for macOS. The system itself lets the
 /// GPU use about two thirds of the memory on smaller machines and three
 /// quarters on larger ones, which is also what the runtime will load.
+#[cfg(any(target_os = "macos", test))]
 pub fn usable_unified_gb(total_gb: i32) -> i32 {
     if total_gb >= 36 {
         total_gb * 3 / 4
