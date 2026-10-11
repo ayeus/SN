@@ -246,7 +246,10 @@ done
 [ "$(serving | wc -w | tr -d ' ')" = 1 ] || fail "the paused machine's replica was not taken off it: serving [$(serving)]"
 WHY=$(api GET /v1/hosts | python3 -c "import json,sys; print(next(h.get('yield_reason','') for h in json.load(sys.stdin)['hosts'] if h.get('yielding')))")
 C=$(ask); [ "$C" = 200 ] || fail "a request while one machine was paused returned $C"
-grep -q "unloaded\|replica stopped" "$WORK/agent-a.log" || fail "the paused agent did not let go of its model"
+# The replica leaves routing the moment the platform hears of the pause; the
+# agent is told to stop on the coordinator's next pass, a moment later.
+for _ in $(seq 1 30); do grep -q "replica stopped" "$WORK/agent-a.log" && break; sleep 1; done
+grep -q "replica stopped" "$WORK/agent-a.log" || fail "the paused agent did not let go of its model"
 pass "paused: the machine gave its GPU back in $(( $(date +%s) - T0 ))s ($WHY) and the other kept answering"
 "${AGENT_A[@]}" resume >/dev/null || fail "the resume command failed"
 T0=$(date +%s)
