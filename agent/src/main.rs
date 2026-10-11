@@ -60,9 +60,14 @@ enum ServiceAction {
     /// Set up the background service and start it. Takes the same options as
     /// a normal run (--token, --coordinator, --region, ...) and remembers them.
     Install,
-    /// Stop the background agent and stop starting it at login. The machine
-    /// stays enrolled.
-    Uninstall,
+    /// Stop the background agent, stop starting it at login, and give back
+    /// the memory its models were using. The machine stays enrolled.
+    Uninstall {
+        /// Also remove everything the agent put on this machine: the models
+        /// it downloaded, its enrolment, its settings and its logs.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Show whether the background agent is set up and running.
     Status,
 }
@@ -529,7 +534,16 @@ async fn main() -> Result<()> {
                     reset: args.reset,
                 },
             ),
-            ServiceAction::Uninstall => service::uninstall(&spec),
+            ServiceAction::Uninstall { purge } => {
+                let code = service::uninstall(&spec);
+                if code == 0 {
+                    release_models(&data_dir, purge).await;
+                    if purge {
+                        service::purge(&spec);
+                    }
+                }
+                code
+            }
             ServiceAction::Status => service::status(&spec),
         };
         std::process::exit(code);
@@ -683,7 +697,7 @@ async fn main() -> Result<()> {
         benchmark: bench,
     };
 
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared::new(&data_dir));
 
     // ── Self-update ──────────────────────────────────────────
     // A background agent replaces its own binary when the platform publishes
@@ -816,12 +830,92 @@ async fn main() -> Result<()> {
 
     let code = tokio::select! {
         code = run => code,
-        _ = tokio::signal::ctrl_c() => {
+        _ = stop_requested() => {
             info!("shutting down; the coordinator will move this host's jobs elsewhere");
+            // Stopping the agent is the owner taking the machine back, so the
+            // models go too: left loaded they would hold the GPU's memory
+            // until the runtime itself was restarted. Bounded, because
+            // whatever asked for the stop will not wait for ever.
+            if shared.has_replicas() {
+                let _ = tokio::time::timeout(Duration::from_secs(10), shared.unload_all(&rt)).await;
+            }
             0
         }
     };
     std::process::exit(code);
+}
+
+/// Resolves when the agent is asked to stop: Ctrl+C in a terminal, or the
+/// termination signal a service manager sends (launchd and systemd both do
+/// on stop, logout and shutdown). An agent that restarts itself for an update
+/// does not come through here, and its models stay loaded for its successor.
+async fn stop_requested() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Gives back what a stopped agent left in the model runtime: the memory of
+/// the models it had loaded and, with `purge`, the models it downloaded.
+/// Works from the agent's own record, so models the machine's owner uses are
+/// not touched. Where the agent could be told to stop politely it has
+/// already unloaded them; on Windows it is simply ended, and this is the only
+/// chance.
+async fn release_models(data_dir: &std::path::Path, purge: bool) {
+    let ledger = state::load_ledger(data_dir);
+    if ledger.loaded.is_empty() && !(purge && !ledger.pulled.is_empty()) {
+        return;
+    }
+    let saved = state::load(data_dir);
+    let Ok(kind) = runtime::Kind::parse(saved.runtime.as_deref().unwrap_or("ollama")) else {
+        return;
+    };
+    let url = saved
+        .runtime_url
+        .unwrap_or_else(|| kind.default_url().to_string());
+    let Ok(rt) = runtime::Runtime::new(kind, &url) else {
+        return;
+    };
+    let mut kept = ledger.clone();
+    for m in &ledger.loaded {
+        match rt.unload(m).await {
+            Ok(()) => {
+                println!("Unloaded {m} from memory.");
+                kept.loaded.remove(m);
+            }
+            Err(e) => eprintln!("Could not unload {m}: {e:#}"),
+        }
+    }
+    if purge {
+        for m in &ledger.pulled {
+            match rt.delete(m).await {
+                Ok(()) => {
+                    println!("Removed the downloaded model {m}.");
+                    kept.pulled.remove(m);
+                }
+                Err(e) => {
+                    eprintln!("Could not remove {m}: {e:#}. Remove it yourself with: ollama rm {m}")
+                }
+            }
+        }
+    }
+    let _ = state::save_ledger(data_dir, &kept);
 }
 
 #[cfg(test)]

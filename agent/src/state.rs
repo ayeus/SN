@@ -146,6 +146,41 @@ pub fn is_loopback(url: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// What this agent has put into the model runtime for the platform: the
+/// models it has loaded into memory, and the ones it downloaded itself.
+///
+/// Kept in its own file so that a command which is not the running agent
+/// (`service uninstall`) can give the memory back, and remove the downloads
+/// when asked to, without touching models the machine's owner uses.
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone, PartialEq)]
+pub struct Ledger {
+    #[serde(default)]
+    pub loaded: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub pulled: std::collections::BTreeSet<String>,
+}
+
+pub fn ledger_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("models.json")
+}
+
+pub fn load_ledger(data_dir: &Path) -> Ledger {
+    std::fs::read(ledger_path(data_dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_ledger(data_dir: &Path, ledger: &Ledger) -> Result<()> {
+    std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("creating {}", data_dir.display()))?;
+    let p = ledger_path(data_dir);
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(ledger)?)?;
+    std::fs::rename(&tmp, &p)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

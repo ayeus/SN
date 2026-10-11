@@ -280,6 +280,11 @@ for i in 1 2 3 4 5; do
   [ "$C" = "200" ] || fail "request $i after host loss returned $C"
 done
 pass "5/5 requests succeeded within $(( $(date +%s) - T0 ))s of losing a host"
+# Stopping an agent is its owner taking the machine back: the model's memory
+# goes back too, instead of staying held until the runtime is restarted.
+for _ in $(seq 1 15); do grep -q "unloaded" "$WORK/agent-a.log" && break; sleep 1; done
+grep -q "unloaded" "$WORK/agent-a.log" || fail "the stopped agent did not unload its model"
+pass "the stopped host gave its model's memory back"
 
 # 10. Stop.
 api DELETE "/v1/deployments/$DEP" >/dev/null

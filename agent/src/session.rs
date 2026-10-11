@@ -88,9 +88,54 @@ pub struct Shared {
     /// serving them, so they are unloaded when the agent lets go of
     /// everything, unless a later start takes them over.
     loose: Mutex<std::collections::HashSet<String>>,
+    /// Models this agent downloaded itself, as opposed to finding them
+    /// already on the machine.
+    pulled: Mutex<std::collections::BTreeSet<String>>,
+    /// Where the record of all this is kept (the data directory). None in
+    /// tests.
+    ledger: Option<PathBuf>,
 }
 
 impl Shared {
+    /// State for an agent that keeps its record of models in `data_dir`.
+    pub fn new(data_dir: &std::path::Path) -> Self {
+        Shared {
+            pulled: Mutex::new(state::load_ledger(data_dir).pulled),
+            ledger: Some(data_dir.to_path_buf()),
+            ..Default::default()
+        }
+    }
+
+    /// Writes down what this agent holds in the runtime. Called whenever that
+    /// changes, so the record is right even if the agent is killed.
+    fn record(&self) {
+        let Some(dir) = &self.ledger else {
+            return;
+        };
+        let mut loaded: std::collections::BTreeSet<String> = self
+            .replicas
+            .lock()
+            .unwrap()
+            .values()
+            .map(|r| r.runtime_model.clone())
+            .collect();
+        loaded.extend(
+            self.starting
+                .lock()
+                .unwrap()
+                .values()
+                .map(|(_, m)| m.clone()),
+        );
+        loaded.extend(self.loose.lock().unwrap().iter().cloned());
+        let ledger = state::Ledger {
+            loaded,
+            pulled: self.pulled.lock().unwrap().clone(),
+        };
+        if let Err(e) = state::save_ledger(dir, &ledger) {
+            warn!(error = %format!("{e:#}"), "could not record which models are loaded");
+        }
+    }
+
     /// Stops the work that belonged to a connection that has ended. A replica
     /// that was still starting reports its progress down that connection, and
     /// a request in flight streams its answer down it; neither can finish
@@ -187,6 +232,7 @@ impl Shared {
                 Err(e) => warn!(model = %m, error = %format!("{e:#}"), "failed to unload"),
             }
         }
+        self.record();
     }
 }
 
@@ -579,6 +625,7 @@ impl Session<'_> {
         let shared = self.shared.clone();
         let tx = tx.clone();
         let started_model = m.runtime_model.clone();
+        let fake_gpu = self.fake_gpu;
         let task = tokio::spawn(async move {
             let rid = m.replica_id.clone();
             let model = m.runtime_model.clone();
@@ -617,6 +664,29 @@ impl Session<'_> {
                     stage(&tx, &rid, ReplicaState::Failed, "", &format!("{e:#}")).await;
                     shared.starting.lock().unwrap().remove(&rid);
                     return;
+                }
+                shared.pulled.lock().unwrap().insert(model.clone());
+                shared.record();
+            }
+
+            // Loading a model there is no room for fails slowly, or succeeds
+            // by pushing the machine into swap. Better to say so now. A
+            // model that is already in memory needs no room made for it.
+            if !fake_gpu && m.memory_mb > 0 && !runtime.loaded_models().await.contains(&model) {
+                if let Some(free) = crate::gpu::free_memory_mb(&m.gpu_uuid) {
+                    if !crate::gpu::enough_memory(m.memory_mb, free) {
+                        let why = format!(
+                            "not enough free memory to load {model}: it needs about {:.1} GB and {:.1} GB is free. \
+                             Close other applications that are using the GPU, or deploy a smaller model.",
+                            m.memory_mb as f64 / 1024.0,
+                            free as f64 / 1024.0
+                        );
+                        warn!(replica_id = %rid, "{why}");
+                        stage(&tx, &rid, ReplicaState::Failed, "", &why).await;
+                        shared.starting.lock().unwrap().remove(&rid);
+                        shared.record();
+                        return;
+                    }
                 }
             }
 
@@ -657,6 +727,7 @@ impl Session<'_> {
                 },
             );
             shared.starting.lock().unwrap().remove(&rid);
+            shared.record();
             stage(
                 &tx,
                 &rid,
@@ -672,6 +743,7 @@ impl Session<'_> {
             .lock()
             .unwrap()
             .insert(replica_id, (task.abort_handle(), started_model));
+        self.shared.record();
     }
 
     async fn on_stop(&self, replica_id: String, tx: &Sender<AgentMessage>) {
@@ -693,6 +765,7 @@ impl Session<'_> {
                 }
             }
         }
+        self.shared.record();
         info!(replica_id = %replica_id, "replica stopped");
         stage(
             tx,
@@ -1048,6 +1121,52 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2, "one check per distinct model: {seen:?}");
         assert!(seen.iter().all(|b| b.contains("\"keep_alive\":-1")));
+    }
+
+    /// A scratch directory that is removed when the test ends.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("ayeusann-session-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn what_the_agent_holds_is_written_down_and_survives_it() {
+        let dir = Scratch::new("ledger");
+        let (runtime, _) = stub_runtime().await;
+        let shared = Shared::new(&dir.0);
+        serving(&shared, "r-1", "kept:1");
+        shared.pulled.lock().unwrap().insert("kept:1".into());
+        shared.loose.lock().unwrap().insert("half:1".into());
+        shared.record();
+
+        // What a command that is not the agent would find.
+        let found = state::load_ledger(&dir.0);
+        assert_eq!(
+            found.loaded.iter().collect::<Vec<_>>(),
+            vec!["half:1", "kept:1"]
+        );
+        assert_eq!(found.pulled.iter().collect::<Vec<_>>(), vec!["kept:1"]);
+
+        // Unloading clears what is in memory; a download is still a download.
+        shared.unload_all(&runtime).await;
+        let after = state::load_ledger(&dir.0);
+        assert!(after.loaded.is_empty(), "{after:?}");
+        assert_eq!(after.pulled.len(), 1);
+
+        // A new agent in the same directory remembers what it downloaded.
+        let next = Shared::new(&dir.0);
+        assert!(next.pulled.lock().unwrap().contains("kept:1"));
     }
 
     #[tokio::test]

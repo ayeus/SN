@@ -116,6 +116,11 @@ export type Host = {
   agent_version?: string;
   // Below the platform's minimum version: connected, but given no work.
   agent_outdated?: boolean;
+  // The last thing that went wrong starting or running a model here.
+  last_error?: string;
+  last_error_at?: string;
+  // This machine's clock minus the platform's, in seconds.
+  clock_skew_seconds?: number;
   last_heartbeat_at?: string;
   os?: string;
   runtime?: string;

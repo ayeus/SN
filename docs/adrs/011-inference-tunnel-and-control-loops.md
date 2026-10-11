@@ -48,6 +48,13 @@ A deployment created while the scheduler is down is placed when it comes back. A
 
 Deviation from UML §8: reservations live in Postgres (`gpus.replica_id`, claimed with a conditional update) instead of Redis with a TTL. Postgres is already the system of record, and one store for one fact avoids a class of divergence bugs. The 60 s "agent confirms within TTL" rule is kept, enforced by the coordinator.
 
+#### Placement learns from failures
+
+- **A machine that fails to start a model is rested for that model.** A replica that fails without ever serving is a start failure on its host for its model. The scheduler reads these from the `replicas` table on every pass and leaves such a host out for one minute, doubling to thirty while it keeps failing (`cooldownAfter`); one successful start of that model on that host clears the count. Without this the replacement went to the best-scoring host, which was the one that had just failed, once a second.
+- **A deployment is given up after three different machines fail to start it**, with the last machine's error as the reason, and only while nothing is running or starting. Failures are counted since `deployments.placing_since` (set on create, resume and retry) and since the deployment last had a replica start.
+- **Waiting for capacity is never a failure.** The old ten-minute scheduling timeout is gone: on a network of a few machines the GPU a deployment needs is often just switched off, and the deployment starts by itself when it returns.
+- **A dead runtime is not a dead host.** When heartbeats report the model runtime unreachable for 30 seconds, the coordinator fails the replicas on that host for the scheduler to replace and tells the agent to let go of them. The host stays connected and takes work again when its runtime is back.
+
 #### Losing the connection is not losing the host
 
 The stream between an agent and the coordinator drops for ordinary reasons: Wi-Fi, a coordinator restart, a laptop lid, the platform's own computer going to sleep. The models stay loaded through all of them, so a dropped connection must not be treated as a dead host.

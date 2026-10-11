@@ -33,7 +33,6 @@ func main() {
 		db:               dbClient,
 		log:              logger,
 		heartbeatTimeout: platform.HeartbeatTimeout(),
-		scheduleTimeout:  time.Duration(platform.EnvInt("SCHEDULE_TIMEOUT_SEC", 600)) * time.Second,
 	}
 	interval := time.Duration(platform.EnvInt("SCHEDULER_INTERVAL_MS", 1000)) * time.Millisecond
 
@@ -67,6 +66,10 @@ func main() {
 				"host telemetry":      `DELETE FROM host_telemetry WHERE ts < NOW() - INTERVAL '30 days';`,
 				"registration tokens": `DELETE FROM host_registration_tokens WHERE expires_at < NOW() - INTERVAL '30 days';`,
 				"request failures":    `DELETE FROM request_failures WHERE ts < NOW() - INTERVAL '90 days';`,
+				// A deployment's log matters while it is being watched; a
+				// score's history, for the month it is judged over.
+				"deployment events":  `DELETE FROM deployment_events WHERE created_at < NOW() - INTERVAL '30 days';`,
+				"reputation history": `DELETE FROM reputation_snapshots WHERE computed_at < NOW() - INTERVAL '90 days';`,
 			} {
 				if _, err := dbClient.Pool.Exec(ctx, q); err != nil && ctx.Err() == nil {
 					logger.Error("housekeeping failed", "task", name, "err", err)

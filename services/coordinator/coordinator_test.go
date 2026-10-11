@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/ayeus/ayeusann/internal/placement"
 	"github.com/ayeus/ayeusann/internal/release"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"io"
 	"log/slog"
 	"net/http"
@@ -837,7 +838,7 @@ func TestSilentHostGoesOfflineAndItsServingReplicasWait(t *testing.T) {
 
 	// A heartbeat brings the host back.
 	var last time.Time
-	f.s.onHeartbeat(f.ctx, silent, &agentv1.Heartbeat{RuntimeHealthy: true}, &last)
+	f.s.onHeartbeat(f.ctx, newSession(silent, newStream()), &agentv1.Heartbeat{RuntimeHealthy: true}, &last)
 	if s := f.str(`SELECT status FROM hosts WHERE id = $1`, silent); s != "active" {
 		t.Fatalf("host is %s after heartbeating again, want active", s)
 	}
@@ -1513,6 +1514,82 @@ func TestTunnelRefusesBeforeTheFirstByteSoTheGatewayCanRetry(t *testing.T) {
 	}()
 	if code := call(f.infer(rep, false)); code != http.StatusBadGateway {
 		t.Fatalf("host disconnect: status %d, want 502", code)
+	}
+}
+
+// Ollama quit, crashed or was closed by the machine's owner. The machine is
+// still there, but what it was serving is not.
+func TestReplicasAreReplacedWhenTheRuntimeUnderThemDies(t *testing.T) {
+	f := setup(t)
+	now := time.Now()
+	f.s.clock = func() time.Time { return now }
+	rep, st, sess := f.serving()
+	hostID := sess.hostID
+	var last time.Time
+	beat := func(healthy bool) {
+		f.s.onHeartbeat(f.ctx, sess, &agentv1.Heartbeat{RuntimeHealthy: healthy, Ts: timestamppb.New(now)}, &last)
+	}
+
+	// A runtime that restarts is back within seconds: nothing is disturbed.
+	beat(false)
+	now = now.Add(10 * time.Second)
+	beat(false)
+	now = now.Add(5 * time.Second)
+	beat(true)
+	if s := f.replicaState(rep); s != "serving" {
+		t.Fatalf("replica is %s after a runtime restart of 15 s, want serving", s)
+	}
+
+	// One that stays down is given up on, once.
+	beat(false)
+	now = now.Add(runtimeDownLimit + time.Second)
+	beat(false)
+	if s := f.replicaState(rep); s != "failed" {
+		t.Fatalf("replica is %s with its runtime down for over %s, want failed so it is replaced", s, runtimeDownLimit)
+	}
+	if e := f.str(`SELECT last_error FROM replicas WHERE id = $1`, rep); !strings.Contains(e, "runtime") {
+		t.Fatalf("the replica's error is %q, want it to name the runtime", e)
+	}
+	// The machine's owner is told, on the machine's own page.
+	if e := f.str(`SELECT COALESCE(last_error, '') FROM hosts WHERE id = $1`, hostID); !strings.Contains(e, "runtime") {
+		t.Fatalf("the host's last error is %q, want the runtime failure", e)
+	}
+	// The agent is told to let go, or it would load the model back for
+	// nobody when the runtime returns.
+	stopped := false
+	for _, m := range st.messages() {
+		if m.GetStopReplica().GetReplicaId() == rep {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Fatal("the agent was not told to let go of the replica that was given up on")
+	}
+	sent := len(st.messages())
+	now = now.Add(time.Minute)
+	beat(false)
+	if len(st.messages()) != sent {
+		t.Fatal("the same replicas were given up on a second time")
+	}
+	// The host itself is not in trouble: it stays connected and known.
+	if s := f.str(`SELECT status FROM hosts WHERE id = $1`, hostID); s != "active" {
+		t.Fatalf("host is %s, want still active", s)
+	}
+}
+
+// A host whose clock is wrong refuses every signed job, and nothing on the
+// host says why. The platform can see it from the heartbeat.
+func TestAHostsClockIsComparedWithThePlatforms(t *testing.T) {
+	f := setup(t)
+	now := time.Now()
+	f.s.clock = func() time.Time { return now }
+	_, _, sess := f.serving()
+	var last time.Time
+	f.s.onHeartbeat(f.ctx, sess, &agentv1.Heartbeat{RuntimeHealthy: true, Ts: timestamppb.New(now.Add(-7 * time.Minute))}, &last)
+	var skew int
+	f.scan(&skew, `SELECT clock_skew_seconds FROM hosts WHERE id = $1`, sess.hostID)
+	if skew != -420 {
+		t.Fatalf("clock skew recorded as %d s, want -420 (seven minutes slow)", skew)
 	}
 }
 

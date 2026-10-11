@@ -84,12 +84,17 @@ The agent lives in `~/.ayeusann` (on Windows, `%USERPROFILE%\.ayeusann`).
 | See whether it is running and connected | `~/.ayeusann/bin/ayeusann-agent service status` |
 | Read its log | `~/.ayeusann/agent.log` |
 | Stop it and stop starting it at login | `~/.ayeusann/bin/ayeusann-agent service uninstall` |
+| Remove it completely: its downloaded models, enrolment, settings and logs | `~/.ayeusann/bin/ayeusann-agent service uninstall --purge` |
 | Start it in the background again | `~/.ayeusann/bin/ayeusann-agent service install` |
 | Run it in a terminal instead | `~/.ayeusann/bin/ayeusann-agent` |
 | Enrol again with a new token | `~/.ayeusann/bin/ayeusann-agent service install --token <token>` |
 
 Stopping the agent keeps the machine enrolled; starting it again brings the
 same machine back, with the coordinator address and settings it enrolled with.
+A stopped agent unloads the models it had in memory, so the GPU is free the
+moment it stops. It only ever touches models it loaded or downloaded itself:
+with `--purge` the models it downloaded are deleted, and models the owner
+pulled for their own use are left alone.
 Pausing from the console (**Host > Machines > Pause**) is the lighter option
 when the owner just wants the GPU back for a while.
 
@@ -189,7 +194,14 @@ production stack, which adds TLS: see [deployment.md](deployment.md).
 | The NVIDIA driver was updated, or a GPU was added, replaced or removed | Nothing to do. A machine is identified by its operating system's machine id, not by its GPUs; the platform reads the GPUs again each time the agent connects. A model that was running on a card that is gone is moved to another machine. |
 | Two machines built from the same disk image show up as one, taking turns | They share a machine id and the same enrolment. Enrol each with its own install command; if they still collide, give one a new machine id (on Linux: `sudo rm /etc/machine-id && sudo systemd-machine-id-setup`) and enrol it again. |
 | The machine went offline and nothing is on screen | The agent runs in the background. `ayeusann-agent service status` says whether it is running and why it was last refused; `~/.ayeusann/agent.log` has the detail. |
-| The deployment stays in "Waiting for capacity" | No free GPU qualifies. The deployment page says why: usually the model needs more GPU memory than the host has, or the host is paused. |
+| The deployment stays in "Waiting for capacity" | No free GPU qualifies. The deployment page says why: usually the model needs more GPU memory than the host has, or the host is paused. It waits for as long as it takes and starts by itself when a machine becomes available. |
+| A Mac shows less GPU memory than it has RAM | A Mac shares one pool of memory between the system and the GPU. The agent advertises what a model can actually have: two thirds of the memory, or three quarters on machines with 36 GB or more. |
+| The deployment says a machine "failed to start this model a short while ago" | That machine could not download, load or warm up the model. It is rested for that model (a minute at first, doubling to half an hour while it keeps failing) and other machines are tried. The machine's page in the console shows what went wrong under "Last problem on this machine". |
+| The deployment failed with "3 machines failed to start this model" | Three different machines could not start it, so the platform stopped trying. The message carries the last machine's error. Fix the cause, then press Retry on the deployment. |
+| "not enough free memory to load ..." | Something else on the machine is using the GPU's memory. Close it, or deploy a smaller model. The machine is tried again by itself. |
+| "the download of ... stalled" | The model download made no progress for five minutes and was abandoned. It is tried again by itself; check the machine's connection if it keeps happening. |
+| The host page says the machine's clock is behind or ahead | Jobs are signed with a time limit, so a clock more than a few minutes out makes the machine refuse them. Turn on automatic date and time. |
+| "the model runtime on the host stopped responding" | Ollama was quit or crashed on that machine. After 30 seconds its models are moved to other machines; start Ollama again and the machine takes work as before. |
 
 ## What has been tested
 

@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from "recharts";
 import { api, ApiError } from "@/lib/api";
 import { useData } from "@/lib/hooks";
-import { ago, compact, dateTime, number, time } from "@/lib/format";
+import { ago, compact, dateTime, number, span, time } from "@/lib/format";
 import type { GPU, Host, HostActivity } from "@/lib/types";
 import { Button, Confirm, Empty, Input, Notice, PageHeader, Panel, Skeleton, Stat, StateBadge, TierBadge } from "@/components/ui";
 
@@ -138,6 +138,18 @@ export default function HostPage() {
         <Notice className="mb-6">
           On probation until {dateTime(h.probation_until)}. During probation the machine takes interruptible work only; it moves up once
           its uptime and reputation hold.
+        </Notice>
+      )}
+      {Math.abs(h.clock_skew_seconds ?? 0) >= 120 && online && (
+        <Notice tone="warn" className="mb-6">
+          This machine&apos;s clock is {span(Math.abs(h.clock_skew_seconds ?? 0))} {(h.clock_skew_seconds ?? 0) < 0 ? "behind" : "ahead"}.
+          Jobs are signed with a time limit, so a clock this far out can make the machine refuse them. Turn on automatic date and time
+          in its system settings.
+        </Notice>
+      )}
+      {h.last_error && h.last_error_at && Date.now() - new Date(h.last_error_at).getTime() < 24 * 3600 * 1000 && (
+        <Notice tone="warn" className="mb-6">
+          Last problem on this machine, {ago(h.last_error_at)}: {h.last_error}
         </Notice>
       )}
       {h.agent_outdated && (

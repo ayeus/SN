@@ -202,17 +202,24 @@ type Host struct {
 	BankEnc       []byte  `json:"-"` // Column-encrypted
 	AgentVersion  *string `json:"agent_version,omitempty"`
 	// AgentOutdated: the agent is below the minimum version and gets no work.
-	AgentOutdated   bool       `json:"agent_outdated"`
-	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
-	OS              *string    `json:"os,omitempty"`
-	Runtime         *string    `json:"runtime,omitempty"`
-	RuntimeHealthy  bool       `json:"runtime_healthy"`
-	CachedModels    []string   `json:"cached_models"`
-	Paused          bool       `json:"paused"`
-	ProbationUntil  *time.Time `json:"probation_until,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
+	AgentOutdated bool `json:"agent_outdated"`
+	// LastError is the last thing that went wrong starting or running a
+	// model on this machine.
+	LastError   *string    `json:"last_error,omitempty"`
+	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
+	// ClockSkewSeconds is the machine's clock minus the platform's at its
+	// last heartbeat.
+	ClockSkewSeconds *int       `json:"clock_skew_seconds,omitempty"`
+	LastHeartbeatAt  *time.Time `json:"last_heartbeat_at,omitempty"`
+	OS               *string    `json:"os,omitempty"`
+	Runtime          *string    `json:"runtime,omitempty"`
+	RuntimeHealthy   bool       `json:"runtime_healthy"`
+	CachedModels     []string   `json:"cached_models"`
+	Paused           bool       `json:"paused"`
+	ProbationUntil   *time.Time `json:"probation_until,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	DeletedAt        *time.Time `json:"deleted_at,omitempty"`
 }
 
 type GPU struct {

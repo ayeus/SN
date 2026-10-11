@@ -252,7 +252,7 @@ impl GpuDetector {
 
         Some(GpuInfo {
             model: chip_name,
-            vram_gb: memory_gb,
+            vram_gb: usable_unified_gb(memory_gb),
             driver_version: "Metal (macOS Unified)".to_string(),
             cuda_version: String::new(), // Apple does not have CUDA; explicitly empty
             compute_capability_major: 0,
@@ -261,6 +261,67 @@ impl GpuDetector {
             fingerprint,
         })
     }
+}
+
+/// How much of a Mac's memory a model can actually have.
+///
+/// A Mac has one pool of memory for everything, so the whole of it was being
+/// advertised as GPU memory: a 16 GB MacBook was offered models that need
+/// 16 GB, and loading one left nothing for macOS. The system itself lets the
+/// GPU use about two thirds of the memory on smaller machines and three
+/// quarters on larger ones, which is also what the runtime will load.
+pub fn usable_unified_gb(total_gb: i32) -> i32 {
+    if total_gb >= 36 {
+        total_gb * 3 / 4
+    } else {
+        total_gb * 2 / 3
+    }
+}
+
+/// Memory free right now for a model on the given GPU, in megabytes. None
+/// when it cannot be measured, in which case nothing is assumed.
+pub fn free_memory_mb(gpu_uuid: &str) -> Option<i64> {
+    if gpu_uuid.starts_with("apple-soc-") {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        return Some((sys.available_memory() / (1024 * 1024)) as i64);
+    }
+    let out = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=uuid,memory.free",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_nvidia_free(&String::from_utf8_lossy(&out.stdout), gpu_uuid)
+}
+
+/// Reads one GPU's free memory from `nvidia-smi --query-gpu=uuid,memory.free`.
+/// With one GPU the id need not match: fake and re-seated cards change it.
+pub fn parse_nvidia_free(csv: &str, gpu_uuid: &str) -> Option<i64> {
+    let rows: Vec<(&str, i64)> = csv
+        .lines()
+        .filter_map(|l| {
+            let (id, free) = l.split_once(',')?;
+            Some((id.trim(), free.trim().parse().ok()?))
+        })
+        .collect();
+    rows.iter()
+        .find(|(id, _)| *id == gpu_uuid)
+        .or(if rows.len() == 1 { rows.first() } else { None })
+        .map(|(_, free)| *free)
+}
+
+/// Whether a model that needs `need_mb` can be loaded with `free_mb` free.
+/// The catalogue's figure is the size of card the model is sold for, with
+/// headroom; three quarters of it free is enough to load. Below that the
+/// load would fail slowly or push the machine into swap, so it is refused
+/// with a reason instead.
+pub fn enough_memory(need_mb: i64, free_mb: i64) -> bool {
+    free_mb >= need_mb * 3 / 4
 }
 
 /// The per-GPU fingerprint agents up to 0.3 computed, kept only to recognise
@@ -319,10 +380,40 @@ mod tests {
         let sample = "Graphics/Displays:\n    Chipset Model: Apple M2 Pro\nHardware Overview:\n    Memory: 32 GB\n    Hardware UUID: 12345678-ABCD-EF01-2345-6789ABCDEF01\n";
         let gpu = GpuDetector::parse_macos_profiler(sample).expect("should parse macos profiler");
         assert_eq!(gpu.model, "Apple M2 Pro GPU");
-        assert_eq!(gpu.vram_gb, 32);
+        // 32 GB of unified memory, of which a model can have two thirds.
+        assert_eq!(gpu.vram_gb, 21);
         assert_eq!(gpu.cuda_version, ""); // Explicitly no CUDA
         assert_eq!(gpu.compute_capability_major, 0);
         assert!(gpu.fingerprint.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn a_mac_advertises_the_memory_a_model_can_have() {
+        assert_eq!(usable_unified_gb(8), 5);
+        assert_eq!(usable_unified_gb(16), 10);
+        assert_eq!(usable_unified_gb(24), 16);
+        assert_eq!(usable_unified_gb(36), 27);
+        assert_eq!(usable_unified_gb(64), 48);
+    }
+
+    #[test]
+    fn free_memory_is_read_for_the_right_gpu() {
+        let two = "GPU-aaa, 20000\nGPU-bbb, 512\n";
+        assert_eq!(parse_nvidia_free(two, "GPU-bbb"), Some(512));
+        assert_eq!(parse_nvidia_free(two, "GPU-zzz"), None);
+        assert_eq!(
+            parse_nvidia_free("GPU-aaa, 7000\n", "GPU-other"),
+            Some(7000)
+        );
+        assert_eq!(parse_nvidia_free("", "GPU-aaa"), None);
+    }
+
+    #[test]
+    fn a_load_is_refused_only_when_memory_is_clearly_short() {
+        assert!(enough_memory(8192, 8192));
+        assert!(enough_memory(8192, 6144));
+        assert!(!enough_memory(8192, 6000));
+        assert!(!enough_memory(3072, 1024));
     }
 
     #[test]

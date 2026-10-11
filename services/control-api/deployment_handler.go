@@ -525,7 +525,7 @@ func (a *API) HandleUpdateDeployment(w http.ResponseWriter, r *http.Request) {
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE deployments SET desired_state = 'running', state = 'pending', last_error = NULL,
-				       state_changed_at = NOW(), updated_at = NOW()
+				       state_changed_at = NOW(), placing_since = NOW(), updated_at = NOW()
 				WHERE id = $1;
 			`, v.ID); err != nil {
 				return err

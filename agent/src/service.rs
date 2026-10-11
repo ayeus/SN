@@ -228,6 +228,51 @@ pub fn uninstall(spec: &Spec) -> i32 {
     0
 }
 
+/// `service uninstall --purge`: after the service is gone, remove what the
+/// agent kept on this machine. The enrolment goes with it, so the machine
+/// has to be enrolled again to come back, and the platform still lists it
+/// until it is removed there.
+pub fn purge(spec: &Spec) {
+    let dir = &spec.data_dir;
+    // Entry by entry rather than the directory at once, for two reasons. The
+    // program itself may live here, and on Windows a running program cannot
+    // be removed, so what is left is named rather than silently kept. And
+    // other agents set up on this machine keep their own directories inside
+    // the default one; they were not asked to go.
+    let mut left = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let other_instance =
+                p.is_dir() && entry.file_name().to_string_lossy().starts_with("instance-");
+            if other_instance {
+                continue;
+            }
+            let gone = if p.is_dir() {
+                std::fs::remove_dir_all(&p).is_ok()
+            } else {
+                std::fs::remove_file(&p).is_ok()
+            };
+            if !gone {
+                left.push(p.display().to_string());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(dir); // only if nothing is left in it
+    if left.is_empty() {
+        println!(
+            "Removed the agent's enrolment, settings and logs from {}.",
+            dir.display()
+        );
+    } else {
+        println!(
+            "Removed the agent's enrolment, settings and logs. These could not be removed while in use; delete them yourself: {}",
+            left.join(", ")
+        );
+    }
+    println!("This machine is no longer enrolled. To take it off the network's list too, remove it in the console under Hosts.");
+}
+
 /// `service status`. Exits 0 when the agent is running in the background.
 pub fn status(spec: &Spec) -> i32 {
     let s = platform::status(spec);

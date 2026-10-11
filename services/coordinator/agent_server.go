@@ -237,7 +237,7 @@ func (s *AgentServer) Session(stream agentv1.AgentService_SessionServer) error {
 
 		switch p := msg.Payload.(type) {
 		case *agentv1.AgentMessage_Heartbeat:
-			s.onHeartbeat(ctx, en.hostID, p.Heartbeat, &lastTelemetry)
+			s.onHeartbeat(ctx, sess, p.Heartbeat, &lastTelemetry)
 		case *agentv1.AgentMessage_Benchmark:
 			s.onBenchmark(ctx, en.hostID, p.Benchmark)
 		case *agentv1.AgentMessage_StageEvent:
@@ -665,21 +665,37 @@ func nonNil(s []string) []string {
 	return s
 }
 
-func (s *AgentServer) onHeartbeat(ctx context.Context, hostID string, hb *agentv1.Heartbeat, lastTelemetry *time.Time) {
+// runtimeDownLimit is how long a host's model runtime may be unreachable
+// before the replicas on it are given up on. A runtime that is restarting
+// answers again within seconds; one that has crashed or been quit does not.
+const runtimeDownLimit = 30 * time.Second
+
+func (s *AgentServer) onHeartbeat(ctx context.Context, sess *session, hb *agentv1.Heartbeat, lastTelemetry *time.Time) {
+	hostID := sess.hostID
+	// How far the host's clock is from this one. Signed jobs carry an expiry,
+	// so a host whose clock is far out refuses every job it is sent, and
+	// nothing on the host says why.
+	var skew *int
+	if ts := hb.GetTs(); ts != nil {
+		d := int(ts.AsTime().Sub(s.now()).Round(time.Second) / time.Second)
+		skew = &d
+	}
 	if _, err := s.db.Pool.Exec(ctx, `
 		UPDATE hosts
 		SET last_heartbeat_at = NOW(),
 		    runtime_healthy = $2,
 		    cached_models = $3,
+		    clock_skew_seconds = COALESCE($4, clock_skew_seconds),
 		    status = CASE
 		        WHEN status = 'offline' AND probation_until IS NOT NULL AND probation_until > NOW() THEN 'probation'
 		        WHEN status = 'offline' THEN 'active'
 		        ELSE status END
 		WHERE id = $1;
-	`, hostID, hb.GetRuntimeHealthy(), nonNil(hb.GetCachedModels())); err != nil {
+	`, hostID, hb.GetRuntimeHealthy(), nonNil(hb.GetCachedModels()), skew); err != nil {
 		s.log.Error("heartbeat update failed", "host_id", hostID, "err", err)
 		return
 	}
+	s.watchRuntime(ctx, sess, hb.GetRuntimeHealthy())
 
 	// Persisting every 5 s heartbeat would write 17k rows per host per day for
 	// no analytical gain; one sample per 15 s is enough for uptime and charts.
@@ -696,6 +712,56 @@ func (s *AgentServer) onHeartbeat(ctx context.Context, hostID string, hb *agentv
 		VALUES ($1, $2, $3, $4, $5, $6);
 	`, hostID, hb.GetCpuUsagePct(), hb.GetMemoryUsagePct(), gpuStatus, hb.GetActiveJobs(), hb.GetHostUserActive()); err != nil {
 		s.log.Error("telemetry insert failed", "host_id", hostID, "err", err)
+	}
+}
+
+// watchRuntime gives up on a host's replicas once its model runtime has been
+// unreachable for runtimeDownLimit. The host itself is fine and stays
+// connected; what it was serving is gone, so the replicas are failed for the
+// scheduler to replace, and the agent is told to let go of them so it does
+// not load them back for nobody when the runtime returns.
+func (s *AgentServer) watchRuntime(ctx context.Context, sess *session, healthy bool) {
+	if healthy {
+		sess.runtimeDownSince, sess.runtimeGivenUp = time.Time{}, false
+		return
+	}
+	now := s.now()
+	if sess.runtimeDownSince.IsZero() {
+		sess.runtimeDownSince = now
+		return
+	}
+	if sess.runtimeGivenUp || now.Sub(sess.runtimeDownSince) < runtimeDownLimit {
+		return
+	}
+	sess.runtimeGivenUp = true
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id FROM replicas
+		WHERE host_id = $1 AND state IN ('pulling', 'loading', 'warming', 'serving', 'degraded');
+	`, sess.hostID)
+	if err != nil {
+		s.log.Error("could not list replicas on a host whose runtime stopped", "host_id", sess.hostID, "err", err)
+		sess.runtimeGivenUp = false // try again on the next heartbeat
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return
+	}
+	const reason = "the model runtime on the host stopped responding"
+	s.log.Warn("a host's model runtime stopped; replacing its replicas", "host_id", sess.hostID, "replicas", len(ids))
+	for _, id := range ids {
+		s.failReplica(ctx, id, reason)
+		_ = sess.send(&agentv1.CoordinatorMessage{Payload: &agentv1.CoordinatorMessage_StopReplica{
+			StopReplica: &agentv1.StopReplica{ReplicaId: id, Reason: reason},
+		}})
 	}
 }
 
@@ -781,6 +847,11 @@ func (s *AgentServer) onStage(ctx context.Context, hostID string, se *agentv1.St
 		depID, _, err := lifecycle.SetReplicaState(ctx, tx, se.GetReplicaId(), state, se.GetDetail(), se.GetErrorMessage())
 		if err != nil || depID == "" {
 			return err
+		}
+		if state == lifecycle.Failed && se.GetErrorMessage() != "" {
+			if err := noteHostError(ctx, tx, hostID, se.GetErrorMessage()); err != nil {
+				return err
+			}
 		}
 		if se.GetImageHash() != "" || se.GetModelHash() != "" {
 			if _, err := tx.Exec(ctx, `

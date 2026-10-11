@@ -18,6 +18,9 @@ import (
 // gemma-2-2b-it from the seed catalogue: Ollama needs 3 GB, every tier may run it.
 const smallModel = "550e8400-e29b-41d4-a716-446655440015"
 
+// llama-3.1-8b-instruct: another catalogue model an 8 GB GPU can run.
+const otherModel = "550e8400-e29b-41d4-a716-446655440001"
+
 var testDB *db.Client
 
 func TestMain(m *testing.M) {
@@ -49,7 +52,7 @@ func setup(t *testing.T) *fixture {
 	t.Cleanup(cancel)
 	f := &fixture{t: t, ctx: ctx, r: &Reconciler{
 		db: testDB, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		heartbeatTimeout: 15 * time.Second, scheduleTimeout: 5 * time.Minute,
+		heartbeatTimeout: 15 * time.Second,
 	}}
 	f.exec(`TRUNCATE deployment_events, replicas, gpus, deployments, hosts CASCADE`)
 	f.scan(&f.org, `INSERT INTO organizations (name) VALUES ('SchedulerTestOrg') RETURNING id`)
@@ -240,13 +243,15 @@ func TestHostsThatCannotTakeWorkAreSkipped(t *testing.T) {
 	}
 }
 
-func TestNoCapacityFailsTheDeploymentAfterTheTimeout(t *testing.T) {
+// On a network of a few machines the GPU a deployment needs is often just
+// switched off. Waiting for it is not a failure, however long it takes.
+func TestWaitingForCapacityNeverBecomesAFailure(t *testing.T) {
 	f := setup(t)
 	dep := f.deployment("t3", 1)
 
 	f.tick()
 	if s := f.state(dep); s != "pending" {
-		t.Fatalf("state = %s, want pending while inside the timeout", s)
+		t.Fatalf("state = %s, want pending", s)
 	}
 	events := f.count(`SELECT COUNT(*) FROM deployment_events WHERE deployment_id = $1`, dep)
 	f.tick()
@@ -254,17 +259,159 @@ func TestNoCapacityFailsTheDeploymentAfterTheTimeout(t *testing.T) {
 		t.Fatalf("events grew from %d to %d: the same waiting reason must be logged once", events, n)
 	}
 
-	f.exec(`UPDATE deployments SET state_changed_at = NOW() - INTERVAL '10 minutes' WHERE id = $1`, dep)
+	f.exec(`UPDATE deployments SET state_changed_at = NOW() - INTERVAL '3 days', placing_since = NOW() - INTERVAL '3 days' WHERE id = $1`, dep)
 	f.tick()
-	if s := f.state(dep); s != "failed" {
-		t.Fatalf("state = %s, want failed after the scheduling timeout", s)
+	if s := f.state(dep); s != "pending" {
+		t.Fatalf("state = %s after three days without capacity, want still pending", s)
 	}
 
-	// Failed is sticky: capacity arriving later must not start it on its own.
+	// And when a machine does turn up, it is used.
 	f.host("t3", 8)
 	f.tick()
+	if n := f.activeReplicas(dep); n != 1 {
+		t.Fatalf("%d replicas placed once capacity arrived, want 1", n)
+	}
+}
+
+// startFailure records what the coordinator records when a host cannot start
+// a replica: failed, never served, GPU free again.
+func (f *fixture) startFailure(dep, reason string, ago time.Duration) (host string) {
+	f.t.Helper()
+	var replica string
+	if err := testDB.Pool.QueryRow(f.ctx, `
+		SELECT id, host_id FROM replicas WHERE deployment_id = $1 AND state = 'pending'`, dep).Scan(&replica, &host); err != nil {
+		f.t.Fatalf("no pending replica to fail: %v", err)
+	}
+	f.exec(`UPDATE replicas SET state = 'failed', last_error = $2, stopped_at = NOW() - ($3 * INTERVAL '1 second') WHERE id = $1`,
+		replica, reason, int(ago.Seconds()))
+	f.exec(`UPDATE gpus SET status = 'available', replica_id = NULL WHERE replica_id = $1`, replica)
+	return host
+}
+
+// A machine that cannot start a model is still the best-scoring machine a
+// second later. It must not be handed the same job again and again.
+func TestAMachineThatFailsToStartAModelIsRested(t *testing.T) {
+	f := setup(t)
+	f.host("t3", 8)
+	dep := f.deployment("t3", 1)
+	f.tick()
+	bad := f.startFailure(dep, "pull failed: no space left on device", 0)
+
+	f.tick()
 	if n := f.activeReplicas(dep); n != 0 {
-		t.Fatalf("a failed deployment was placed (%d replicas) without the customer retrying", n)
+		t.Fatal("the replica was placed straight back on the machine that had just failed to start it")
+	}
+	var why string
+	f.scan(&why, `SELECT COALESCE(last_error, '') FROM deployments WHERE id = $1`, dep)
+	if !strings.Contains(why, "failed to start this model") {
+		t.Fatalf("the deployment says %q, want it to say the machine is being rested", why)
+	}
+
+	// Another model is that machine's business as usual.
+	var other string
+	f.scan(&other, `
+		INSERT INTO deployments (org_id, model_id, name, tier, region, min_replicas, max_replicas)
+		VALUES ($1, $2, 'other', 't3', 'IN-SOUTH', 1, 1) RETURNING id`, f.org, otherModel)
+	f.tick()
+	if n := f.activeReplicas(other); n != 1 {
+		t.Fatal("a machine resting for one model was refused a different one")
+	}
+	f.exec(`UPDATE deployments SET desired_state = 'stopped' WHERE id = $1`, other)
+	f.exec(`UPDATE replicas SET state = 'stopped' WHERE deployment_id = $1`, other)
+	f.exec(`UPDATE gpus SET status = 'available', replica_id = NULL`)
+
+	// After the first cool-down it is tried again,
+	f.exec(`UPDATE replicas SET stopped_at = NOW() - INTERVAL '61 seconds' WHERE deployment_id = $1 AND state = 'failed'`, dep)
+	f.tick()
+	if n := f.activeReplicas(dep); n != 1 {
+		t.Fatal("the machine was not tried again after its cool-down")
+	}
+	// and a second failure in a row earns a longer one.
+	if again := f.startFailure(dep, "pull failed: no space left on device", 61*time.Second); again != bad {
+		t.Fatal("expected the retry on the same machine")
+	}
+	f.tick()
+	if n := f.activeReplicas(dep); n != 0 {
+		t.Fatal("after two failures in a row the machine was tried again after only one minute")
+	}
+	if cooldownAfter(1) != time.Minute || cooldownAfter(2) != 2*time.Minute || cooldownAfter(40) != maxCooldown {
+		t.Fatalf("cool-downs %s, %s, %s", cooldownAfter(1), cooldownAfter(2), cooldownAfter(40))
+	}
+}
+
+// One machine failing is that machine's problem. Three different machines
+// failing says the model or the request is, and the deployment stops trying
+// and says why.
+func TestADeploymentIsGivenUpAfterThreeMachinesFailToStartIt(t *testing.T) {
+	f := setup(t)
+	for range 4 {
+		f.host("t3", 8)
+	}
+	dep := f.deployment("t3", 1)
+
+	hosts := map[string]bool{}
+	for i := range 3 {
+		f.tick()
+		if s := f.state(dep); s == "failed" {
+			t.Fatalf("given up after %d machine(s), want three", i)
+		}
+		hosts[f.startFailure(dep, "model requires more system memory than is available", 0)] = true
+	}
+	if len(hosts) != 3 {
+		t.Fatalf("the three attempts used %d machines, want each on a different one", len(hosts))
+	}
+
+	f.tick()
+	if s := f.state(dep); s != "failed" {
+		t.Fatalf("state = %s after three machines failed, want failed", s)
+	}
+	var why string
+	f.scan(&why, `SELECT last_error FROM deployments WHERE id = $1`, dep)
+	if !strings.Contains(why, "3 machines") || !strings.Contains(why, "more system memory") {
+		t.Fatalf("the reason given is %q, want the count and the last machine's error", why)
+	}
+	if n := f.activeReplicas(dep); n != 0 {
+		t.Fatal("a fourth machine was tried after the deployment was given up")
+	}
+
+	// Retrying starts the count again: the old failures are not held against it.
+	f.exec(`UPDATE deployments SET state = 'pending', last_error = NULL, placing_since = NOW() WHERE id = $1`, dep)
+	f.tick()
+	if s := f.state(dep); s == "failed" {
+		t.Fatal("a retried deployment was given up at once on the strength of its old failures")
+	}
+	if n := f.activeReplicas(dep); n != 1 {
+		t.Fatalf("%d replicas after the retry, want one on the machine that has not failed", n)
+	}
+}
+
+// A deployment that has served is not written off for failures from before
+// it did.
+func TestFailuresBeforeASuccessfulStartAreNotCounted(t *testing.T) {
+	f := setup(t)
+	for range 4 {
+		f.host("t3", 8)
+	}
+	dep := f.deployment("t3", 1)
+	for range 2 {
+		f.tick()
+		f.startFailure(dep, "warm-up failed", 0)
+	}
+	// The third machine starts it.
+	f.tick()
+	f.exec(`UPDATE replicas SET state = 'serving', started_at = NOW() WHERE deployment_id = $1 AND state = 'pending'`, dep)
+	f.tick()
+	if s := f.state(dep); s != "serving" {
+		t.Fatalf("state = %s, want serving", s)
+	}
+	// Later that machine goes away, and the first replacement fails to start.
+	f.exec(`UPDATE replicas SET state = 'failed', stopped_at = NOW() WHERE deployment_id = $1 AND state = 'serving'`, dep)
+	f.exec(`UPDATE gpus SET status = 'available', replica_id = NULL`)
+	f.tick()
+	f.startFailure(dep, "warm-up failed", 0)
+	f.tick()
+	if s := f.state(dep); s == "failed" {
+		t.Fatal("one failure after a week of serving was added to two from before it, and the deployment given up")
 	}
 }
 

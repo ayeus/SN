@@ -34,3 +34,12 @@ export const TIERS: Record<Tier, { short: string; name: string; who: string; sla
   t2: { short: "T2", name: "Lab & workstation", who: "College labs and vetted workstations", sla: "99% SLA" },
   t3: { short: "T3", name: "Spot", who: "Personal laptops and desktops", sla: "Best effort, interruptible" },
 };
+
+// A length of time in words: "45 seconds", "7 minutes", "3 hours".
+export function span(seconds: number): string {
+  const unit = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  if (seconds < 90) return unit(Math.round(seconds), "second");
+  if (seconds < 90 * 60) return unit(Math.round(seconds / 60), "minute");
+  if (seconds < 36 * 3600) return unit(Math.round(seconds / 3600), "hour");
+  return unit(Math.round(seconds / 86400), "day");
+}

@@ -13,6 +13,9 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
+/// How long a download may go without any progress before it is abandoned.
+const DOWNLOAD_STALL: Duration = Duration::from_secs(300);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Ollama,
@@ -109,7 +112,17 @@ impl Runtime {
     }
 
     /// Makes the model available locally, reporting progress.
-    pub async fn pull(&self, model: &str, mut progress: impl FnMut(String)) -> Result<()> {
+    pub async fn pull(&self, model: &str, progress: impl FnMut(String)) -> Result<()> {
+        self.pull_within(model, progress, DOWNLOAD_STALL).await
+    }
+
+    /// `pull`, giving up when the download makes no progress for `stall`.
+    pub async fn pull_within(
+        &self,
+        model: &str,
+        mut progress: impl FnMut(String),
+        stall: Duration,
+    ) -> Result<()> {
         if self.kind == Kind::Vllm {
             if self.cached_models().await?.iter().any(|m| m == model) {
                 return Ok(());
@@ -138,8 +151,26 @@ impl Runtime {
         let mut stream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
         let mut last = Instant::now() - Duration::from_secs(10);
-        while let Some(chunk) = stream.next().await {
-            buf.extend_from_slice(&chunk?);
+        // A download that has stopped moving is abandoned: the runtime keeps
+        // such a connection open and keeps reporting the same figures, and
+        // the replica would sit at "downloading" until somebody noticed.
+        // Progress is any change in what the runtime reports.
+        let mut moved = Instant::now();
+        let mut seen = String::new();
+        let stalled = |since: Instant| {
+            anyhow!(
+                "the download of {model} stalled: no progress for {} minutes",
+                since.elapsed().as_secs().max(60) / 60
+            )
+        };
+        loop {
+            let left = stall.saturating_sub(moved.elapsed());
+            let chunk = match tokio::time::timeout(left, stream.next()).await {
+                Err(_) => return Err(stalled(moved)),
+                Ok(None) => break,
+                Ok(Some(chunk)) => chunk?,
+            };
+            buf.extend_from_slice(&chunk);
             while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=pos).collect();
                 let Ok(v) = serde_json::from_slice::<Value>(&line) else {
@@ -151,6 +182,13 @@ impl Runtime {
                 let status = v["status"].as_str().unwrap_or_default();
                 if status == "success" {
                     return Ok(());
+                }
+                let now = format!("{status}:{}", v["completed"]);
+                if now != seen {
+                    seen = now;
+                    moved = Instant::now();
+                } else if moved.elapsed() >= stall {
+                    return Err(stalled(moved));
                 }
                 if last.elapsed() >= Duration::from_secs(2) {
                     last = Instant::now();
@@ -168,6 +206,53 @@ impl Runtime {
             }
         }
         bail!("pull stream ended before completion")
+    }
+
+    /// The models the runtime has in memory right now. Empty when it cannot
+    /// say (vLLM, or a runtime that is not answering).
+    pub async fn loaded_models(&self) -> Vec<String> {
+        if self.kind == Kind::Vllm {
+            return Vec::new();
+        }
+        let Ok(resp) = self
+            .http
+            .get(format!("{}/api/ps", self.base))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        else {
+            return Vec::new();
+        };
+        resp.json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| {
+                v["models"].as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|m| m["name"].as_str().map(str::to_string))
+                        .collect()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// Removes a downloaded model from the runtime's disk.
+    pub async fn delete(&self, model: &str) -> Result<()> {
+        if self.kind == Kind::Vllm {
+            return Ok(());
+        }
+        let resp = self
+            .http
+            .delete(format!("{}/api/delete", self.base))
+            .json(&json!({ "model": model }))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .context("runtime unreachable")?;
+        if !resp.status().is_success() && resp.status().as_u16() != 404 {
+            bail!("delete failed ({})", resp.status());
+        }
+        Ok(())
     }
 
     /// Loads weights into memory and pins them there.
@@ -269,6 +354,83 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for `/api/pull` that sends `lines`, one every 50 ms, and
+    /// then holds the connection open without another word.
+    async fn pull_server(lines: Vec<&'static str>) -> Runtime {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let lines = lines.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+                        .await;
+                    for l in lines {
+                        let body = format!("{l}\n");
+                        let _ = sock
+                            .write_all(format!("{:x}\r\n{body}\r\n", body.len()).as_bytes())
+                            .await;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                });
+            }
+        });
+        Runtime::new(Kind::Ollama, &format!("http://{addr}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_download_that_goes_silent_is_abandoned() {
+        let rt = pull_server(vec![
+            r#"{"status":"pulling abc","completed":100,"total":1000}"#,
+        ])
+        .await;
+        let started = Instant::now();
+        let err = rt
+            .pull_within("m:1", |_| {}, Duration::from_millis(400))
+            .await
+            .expect_err("a download that stopped must not wait for ever");
+        assert!(err.to_string().contains("stalled"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_download_that_keeps_reporting_the_same_figures_is_abandoned() {
+        // The runtime repeats itself for as long as the connection is open.
+        let rt = pull_server(vec![
+            r#"{"status":"pulling abc","completed":100,"total":1000}"#;
+            40
+        ])
+        .await;
+        let err = rt
+            .pull_within("m:1", |_| {}, Duration::from_millis(400))
+            .await
+            .expect_err("repeating the same progress is not progress");
+        assert!(err.to_string().contains("stalled"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_slow_download_that_is_moving_is_left_alone() {
+        let rt = pull_server(vec![
+            r#"{"status":"pulling abc","completed":100,"total":1000}"#,
+            r#"{"status":"pulling abc","completed":400,"total":1000}"#,
+            r#"{"status":"pulling abc","completed":700,"total":1000}"#,
+            r#"{"status":"verifying sha256 digest"}"#,
+            r#"{"status":"success"}"#,
+        ])
+        .await;
+        rt.pull_within("m:1", |_| {}, Duration::from_millis(400))
+            .await
+            .expect("each line moved the download on");
+    }
 
     #[test]
     fn parses_runtime_kinds() {

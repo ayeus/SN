@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"sync"
+	"time"
 
 	agentv1 "github.com/ayeus/ayeusann/gen/go/agent/v1"
 	"github.com/ayeus/ayeusann/internal/platform"
@@ -23,6 +24,12 @@ type session struct {
 	capabilities []string
 
 	sendMu sync.Mutex
+
+	// When the host's model runtime was first reported unreachable, and
+	// whether its replicas have been given up on since. Touched only by the
+	// goroutine that reads this session's stream.
+	runtimeDownSince time.Time
+	runtimeGivenUp   bool
 
 	mu       sync.Mutex
 	inflight map[string]*answer

@@ -74,6 +74,9 @@ type Requirements struct {
 	FallbackMinVramGB int
 	// ExcludeHosts holds hosts that already run a replica of this deployment.
 	ExcludeHosts map[string]bool
+	// RestingHosts holds hosts that failed to start this model a short while
+	// ago and are sitting out a cool-down.
+	RestingHosts map[string]bool
 }
 
 // Candidate is one available GPU on an online host.
@@ -109,6 +112,9 @@ type Rejection struct {
 func Filter(c Candidate, req Requirements) (string, string) {
 	if req.ExcludeHosts[c.HostID] {
 		return "", "host already runs a replica of this deployment"
+	}
+	if req.RestingHosts[c.HostID] {
+		return "", "the machine failed to start this model a short while ago and will be tried again later"
 	}
 	if !TierSatisfies(c.HostTier, req.Tier) {
 		return "", fmt.Sprintf("host tier %s is below requested %s", strings.ToUpper(c.HostTier), strings.ToUpper(req.Tier))

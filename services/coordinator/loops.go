@@ -124,13 +124,14 @@ type pendingReplica struct {
 	id, deploymentID, hostID, modelID, modelName, runtime string
 	gpuUUID                                               *string
 	refs                                                  []byte
+	minVram                                               int // GB the catalogue says the model needs when the runtime entry does not
 }
 
 // dispatchPending sends a signed manifest for every placed replica whose host
 // is connected and which has not been dispatched yet.
 func (s *AgentServer) dispatchPending(ctx context.Context) error {
 	rows, err := s.db.Pool.Query(ctx, `
-		SELECT r.id, r.deployment_id, r.host_id, d.model_id, m.name, COALESCE(h.runtime, ''), g.uuid, m.runtime_refs
+		SELECT r.id, r.deployment_id, r.host_id, d.model_id, m.name, COALESCE(h.runtime, ''), g.uuid, m.runtime_refs, m.min_vram_gb
 		FROM replicas r
 		JOIN deployments d ON d.id = r.deployment_id
 		JOIN models m ON m.id = d.model_id
@@ -146,7 +147,7 @@ func (s *AgentServer) dispatchPending(ctx context.Context) error {
 	var todo []pendingReplica
 	for rows.Next() {
 		var p pendingReplica
-		if err := rows.Scan(&p.id, &p.deploymentID, &p.hostID, &p.modelID, &p.modelName, &p.runtime, &p.gpuUUID, &p.refs); err != nil {
+		if err := rows.Scan(&p.id, &p.deploymentID, &p.hostID, &p.modelID, &p.modelName, &p.runtime, &p.gpuUUID, &p.refs, &p.minVram); err != nil {
 			rows.Close()
 			return err
 		}
@@ -182,6 +183,15 @@ func (s *AgentServer) dispatchPending(ctx context.Context) error {
 		if p.gpuUUID != nil {
 			m.GpuUuid = *p.gpuUUID
 		}
+		// How much memory the model is sold as needing, so the agent can
+		// refuse to load it into a GPU that is busy with something else.
+		// A hint, not part of what is signed: agents that predate it and
+		// agents that cannot measure free memory ignore it.
+		need := ref.MinVramGB
+		if need <= 0 {
+			need = p.minVram
+		}
+		m.MemoryMb = int64(need) * 1024
 		s.signer.Sign(m)
 
 		// Claim the dispatch before sending so a slow send cannot race the
@@ -453,9 +463,18 @@ func (s *AgentServer) failReplica(ctx context.Context, replicaID, reason string)
 // deployment in one transaction.
 func (s *AgentServer) setReplica(ctx context.Context, replicaID, state, detail, errMsg string) {
 	err := s.db.ExecTx(ctx, func(tx pgx.Tx) error {
-		depID, _, err := lifecycle.SetReplicaState(ctx, tx, replicaID, state, detail, errMsg)
+		depID, changed, err := lifecycle.SetReplicaState(ctx, tx, replicaID, state, detail, errMsg)
 		if err != nil || depID == "" {
 			return err
+		}
+		if changed && state == lifecycle.Failed && errMsg != "" {
+			var hostID string
+			if err := tx.QueryRow(ctx, `SELECT host_id FROM replicas WHERE id = $1;`, replicaID).Scan(&hostID); err != nil {
+				return err
+			}
+			if err := noteHostError(ctx, tx, hostID, errMsg); err != nil {
+				return err
+			}
 		}
 		_, _, err = lifecycle.Recompute(ctx, tx, depID)
 		return err
@@ -463,4 +482,15 @@ func (s *AgentServer) setReplica(ctx context.Context, replicaID, state, detail, 
 	if err != nil {
 		s.log.Error("replica state update failed", "replica_id", replicaID, "state", state, "err", err)
 	}
+}
+
+// noteHostError records the last thing that went wrong with a replica on a
+// host, for the host's owner: it is their machine that needs looking at, and
+// until now the reason was only in the log of a deployment they may not own.
+func noteHostError(ctx context.Context, tx pgx.Tx, hostID, msg string) error {
+	if len(msg) > 500 {
+		msg = msg[:500]
+	}
+	_, err := tx.Exec(ctx, `UPDATE hosts SET last_error = $2, last_error_at = NOW() WHERE id = $1;`, hostID, msg)
+	return err
 }
